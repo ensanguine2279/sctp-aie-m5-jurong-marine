@@ -10,7 +10,7 @@ python -m venv .venv
 source .venv/bin/activate                 # Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt       # pandas, sqlalchemy, pymysql, ... + pytest
 cp .env.example .env                      # set the passwords
-pytest                                    # cleaning + lineage tests, no DB needed
+pytest                                    # tests, no DB needed (see "Testing with pytest")
 
 docker compose up -d                      # MySQL 8.4 on localhost:3307
 docker compose ps                         # wait for "healthy"
@@ -98,25 +98,93 @@ SELECT run_id, script, source_file, status, rows_read, rows_loaded, rows_rejecte
 FROM ingest_runs ORDER BY run_id DESC;
 ```
 
-## Tests
+## Testing with pytest
 
-No database needed; run from the repo root (where `pytest.ini` is), with the
-virtual environment active.
+The tests check the reading and cleaning logic of every script, plus the shared
+modules. They run in a few seconds and **need no database, Docker or `.env`**:
+each test builds a small messy CSV or spreadsheet in a temporary folder, runs
+the script's cleaning steps on it, and checks the result.
 
-| File | Covers |
-|---|---|
-| `tests/test_logs.py` | `ingest_logs.py`: timestamps, temperatures, raw/clean linking, rejects, duplicates |
-| `tests/test_spares.py` | `ingest_spares.py`: costs, lead times, sizes, machines, raw/clean linking, rejects, warnings |
-| `tests/test_shared.py` | `db_config.py`, `lineage.py`: password handling, table names, file hash, driver value types |
+### Setup
+
+pytest is in `requirements-dev.txt` (not `requirements.txt`, which is only what
+the scripts need to run):
 
 ```bash
-pytest                                   # everything
-pytest tests/test_logs.py                # one script
-pytest tests/test_spares.py -v           # one per line, with names
-pytest -k lead_time                      # tests whose name contains "lead_time"
-pytest tests/test_logs.py::test_temperature_units   # a single test
-pytest -x                                # stop at the first failure
+source .venv/bin/activate                 # Windows: .venv\Scripts\activate
+pip install -r requirements-dev.txt
 ```
+
+`pytest.ini` tells pytest where things are, so no other setup is needed:
+
+```ini
+[pytest]
+pythonpath = scripts    # lets tests "import ingest_logs", "import db_config", ...
+testpaths = tests       # where to look for test files
+```
+
+### Running
+
+Run from the **repo root** (the folder with `pytest.ini`):
+
+```bash
+pytest                                              # all tests
+pytest tests/test_logs.py                           # one file
+pytest tests/test_spares.py -v                      # one line per test, with names
+pytest -k lead_time                                 # only tests whose name contains "lead_time"
+pytest -k "spares and not size"                     # combine name filters
+pytest tests/test_logs.py::test_temperature_units   # one specific test
+pytest -x                                           # stop at the first failure
+pytest --lf                                         # re-run only the tests that failed last time
+pytest -q                                           # quieter output
+```
+
+With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
+
+### What's tested
+
+| File | Covers | Tests |
+|---|---|---|
+| `tests/test_logs.py` | `ingest_logs.py`: ISO/epoch timestamps (incl. the 8-hour bug), timezones, °C/°F, unknown units, every CSV line kept in raw with its line number, clean rows linked to raw, reject reasons, duplicates within the file and against rows already loaded | 8 |
+| `tests/test_spares.py` | `ingest_spares.py`: costs (`$38/spool`), lead times (`2-3 weeks (Germany)`, `local`), metric/imperial sizes, machine lists; on a messy sheet: raw rows and row numbers, `raw_id`, duplicate/missing part numbers, warnings for unreadable values | 18 |
+| `tests/test_shared.py` | `db_config.py`, `lineage.py`: password never printed, passwords with special characters, table-name check, file SHA-256, values passed to MySQL are plain Python types | 5 |
+
+**Not covered:** anything that needs MySQL, i.e. creating tables and views,
+the inserts, the one-transaction rollback and the `ingest_runs` record. After
+changing DDL or load code, check with a real load (`--recreate`) and the audit
+queries above.
+
+### Reading the output
+
+```
+tests/test_logs.py ........                         [ 25%]
+tests/test_shared.py .s...                          [ 41%]
+tests/test_spares.py ..................             [100%]
+========== 30 passed, 1 skipped in 0.68s ==========
+```
+
+| Mark | Meaning |
+|---|---|
+| `.` | passed |
+| `F` | failed: an `assert` was false. pytest prints the values on both sides |
+| `E` | error: the test couldn't run (e.g. an import failed) |
+| `s` | skipped: `test_password_with_special_characters_is_escaped` skips if SQLAlchemy isn't installed; installing `requirements-dev.txt` fixes it |
+
+### When it doesn't work
+
+| Message | Cause | Fix |
+|---|---|---|
+| `collected 0 items` | pytest isn't running from the repo root, or `tests/` is missing | `cd` to the folder with `pytest.ini`; check `ls tests` |
+| `ModuleNotFoundError: No module named 'ingest_logs'` (or `db_config`) | `pytest.ini` not found, or the scripts aren't in `scripts/` | Run from the repo root; check `pythonpath = scripts` matches the folder name |
+| `ModuleNotFoundError: No module named 'pandas'` (or `openpyxl`, ...) | Virtual environment not active, or requirements not installed | Activate `.venv`, then `pip install -r requirements-dev.txt` |
+| `pytest: command not found` | pytest not installed in the active environment | `pip install -r requirements-dev.txt`, or use `python -m pytest` |
+
+### Adding a test
+
+- Put it in the file for the script it tests (`test_logs.py`, `test_spares.py`), or `test_shared.py` for `db_config.py` / `lineage.py`.
+- Name the function `test_...`, otherwise pytest won't find it.
+- Test the cleaning functions directly with a small `DataFrame` (see `test_temperature_units`), or a whole file through `process()` / `prepare()` using the `tmp_path` fixture (see the `lineage_run` and `messy_sheet` fixtures).
+- When you find a new problem in the client's data, add a test with that exact value **before** fixing the code. It fails first, then passes with the fix, and it keeps the problem from coming back. The harness checklist asks for this pattern in your git history.
 
 **Timezone rule:** `epoch_ms` is UTC; `sampled_at` is Singapore time (UTC+8).
 ISO timestamps without an offset are assumed to be Singapore time (`--source-tz`).
