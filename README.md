@@ -98,6 +98,26 @@ SELECT run_id, script, source_file, status, rows_read, rows_loaded, rows_rejecte
 FROM ingest_runs ORDER BY run_id DESC;
 ```
 
+## Tests
+
+No database needed; run from the repo root (where `pytest.ini` is), with the
+virtual environment active.
+
+| File | Covers |
+|---|---|
+| `tests/test_logs.py` | `ingest_logs.py`: timestamps, temperatures, raw/clean linking, rejects, duplicates |
+| `tests/test_spares.py` | `ingest_spares.py`: costs, lead times, sizes, machines, raw/clean linking, rejects, warnings |
+| `tests/test_shared.py` | `db_config.py`, `lineage.py`: password handling, table names, file hash, driver value types |
+
+```bash
+pytest                                   # everything
+pytest tests/test_logs.py                # one script
+pytest tests/test_spares.py -v           # one per line, with names
+pytest -k lead_time                      # tests whose name contains "lead_time"
+pytest tests/test_logs.py::test_temperature_units   # a single test
+pytest -x                                # stop at the first failure
+```
+
 **Timezone rule:** `epoch_ms` is UTC; `sampled_at` is Singapore time (UTC+8).
 ISO timestamps without an offset are assumed to be Singapore time (`--source-tz`).
 

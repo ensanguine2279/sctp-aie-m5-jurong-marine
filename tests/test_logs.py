@@ -1,18 +1,16 @@
-"""Tests for the cleaning steps. No database needed: pytest"""
-import hashlib
+"""Tests for scripts/ingest_logs.py (sensor log). No database needed.
+
+Run:  pytest tests/test_logs.py
+"""
 from collections import Counter
-from datetime import datetime
 
 import pandas as pd
 import pytest
 
 import ingest_logs as logs
-import ingest_spares as spares
-from db_config import DbConfig, safe_identifier, to_records
-from lineage import file_sha256
 
 
-# ---------------------------------------------------------------- sensor log ---
+# ------------------------------------------------------------- timestamps ---
 
 def _ts(values):
     return logs.parse_timestamps(pd.DataFrame({"timestamp": values}))
@@ -103,79 +101,3 @@ def test_duplicates_against_rows_already_in_db():
              .pipe(logs.clean_values).pipe(logs.split_rejects, seen=seen))
     assert out["reject_reason"].tolist() == ["duplicate_reading"]
     assert out["duplicate_of_raw_id"].tolist() == [55]
-
-
-# ------------------------------------------------------------------- spares ---
-
-@pytest.mark.parametrize("raw,expected", [
-    ("$12.50", ("12.50", None)), ("$38/spool", ("38.00", "spool")), (None, (None, None)),
-])
-def test_parse_cost(raw, expected):
-    value, per = spares.parse_cost(raw)
-    assert (str(value) if value is not None else None, per) == expected
-
-
-@pytest.mark.parametrize("raw,expected", [
-    ("3 days", (3, 3, 0, None)),
-    ("2-3 weeks (Germany)", (14, 21, 0, "Germany")),
-    ("6-8 weeks!!", (42, 56, 0, None)),
-    ("1 wk", (7, 7, 0, None)),
-    ("local", (None, None, 1, None)),
-])
-def test_parse_lead_time(raw, expected):
-    assert spares.parse_lead_time(raw) == expected
-
-
-@pytest.mark.parametrize("desc,unit,mm", [
-    ("V-Belt 5V x 85 in", "in", 2159.0),
-    ("Mech seal kit 1-3/8 inch", "in", 34.92),
-    ("Welding wire ER70S-6 0.045in", "in", 1.14),
-    ("Insert tip DNMG 2.4mm nose", "mm", 2.4),
-    ("Bearing 6205 2RS", None, None),        # designation, not decoded
-    ("Hydraulic oil ISO VG32 (20L)", None, None),
-])
-def test_parse_size(desc, unit, mm):
-    _, u, size_mm, _ = spares.parse_size(desc)
-    assert (u, size_mm) == (unit, mm)
-
-
-def test_split_machines():
-    assert spares.split_machines("CNC-01/02/03") == ["CNC-01", "CNC-02", "CNC-03"]
-    assert spares.split_machines("ALL") == ["ALL"]
-    assert spares.split_machines(None) == []
-
-
-# ------------------------------------------------------------------ config ---
-
-def test_password_never_printed():
-    cfg = DbConfig(user="u", password="s3cr3t", host="h", port=3306, name="d")
-    assert "s3cr3t" not in repr(cfg) and "s3cr3t" not in cfg.describe()
-
-
-def test_password_with_special_characters_is_escaped():
-    pytest.importorskip("sqlalchemy")
-    url = DbConfig(user="u", password="p@ss:w/rd", host="h", port=3306, name="d").url()
-    assert url.password == "p@ss:w/rd" and url.host == "h"
-
-
-def test_table_name_whitelist():
-    assert safe_identifier("vibration_temp") == "vibration_temp"
-    with pytest.raises(ValueError):
-        safe_identifier("x; DROP TABLE y")
-
-
-# ----------------------------------------------------------------- lineage ---
-
-def test_file_sha256(tmp_path):
-    p = tmp_path / "f.csv"
-    p.write_bytes(b"abc")
-    assert file_sha256(str(p)) == hashlib.sha256(b"abc").hexdigest()
-
-
-def test_records_are_plain_python_types():
-    df = pd.DataFrame({"i": pd.array([1, None], dtype="Int64"), "f": [1.5, float("nan")],
-                       "t": pd.to_datetime(["2026-01-01", None])})
-    rows = to_records(df)
-    assert type(rows[0]["i"]) is int and type(rows[0]["f"]) is float
-    assert type(rows[0]["t"]) is datetime
-    assert rows[1] == {"i": None, "f": None, "t": None}
