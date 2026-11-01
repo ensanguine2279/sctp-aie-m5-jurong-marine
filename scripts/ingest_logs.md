@@ -111,7 +111,7 @@ The password is never printed. Connection messages show
 ## How it works
 
 ```mermaid
-flowchart LR
+flowchart TD
     CSV[(CSV file)] --> R[read in chunks<br/>all values as text]
     R --> RAW[keep original row<br/>+ line number + raw_id]
     R --> T[parse_timestamps]
