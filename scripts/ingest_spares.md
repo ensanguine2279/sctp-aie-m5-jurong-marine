@@ -112,7 +112,7 @@ upward from the `scripts/` folder. The password is never printed.
 ## How it works
 
 ```mermaid
-flowchart LR
+flowchart TD
     X[(xlsx)] --> R[read_sheet<br/>find header, title, rev]
     R --> RAW[keep every row as text<br/>+ sheet row + raw_id]
     R --> B[clean_basics]
