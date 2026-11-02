@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Ingest the vibration/temperature sensor log CSV into MySQL, with lineage.
 
 Three tables, so every cleaned value can be traced back to the file line it came from:
@@ -311,7 +312,8 @@ def print_report(stats: Counter) -> None:
                           ("rejected:", "Rejected rows"), ("warn:", "Loaded with gaps")]:
         items = {k[len(prefix):]: v for k, v in stats.items() if k.startswith(prefix) and v}
         if items:
-            print(f"{title}: " + ", ".join(f"{k}={v}" for k, v in sorted(items.items())))
+            print(f"{title}: " + ", ".join(f"{k}={v}" for k, v in sorted(items.items()))
+                  + f" (total {sum(items.values())})")
 
 
 def main() -> None:

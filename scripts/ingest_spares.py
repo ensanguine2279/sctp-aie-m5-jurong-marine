@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Ingest the Critical Spares spreadsheet into MySQL, with lineage.
 
 Tables, so every cleaned part can be traced back to the sheet row it came from:
@@ -438,7 +439,8 @@ def print_report(stats: Counter, rev) -> None:
     for prefix, title in [("rejected:", "Rejected rows"), ("warn:", "Loaded with warnings")]:
         items = {k[len(prefix):]: v for k, v in stats.items() if k.startswith(prefix)}
         if items:
-            print(f"{title}: " + ", ".join(f"{k}={v}" for k, v in sorted(items.items())))
+            print(f"{title}: " + ", ".join(f"{k}={v}" for k, v in sorted(items.items()))
+                  + f" (total {sum(items.values())})")
 
 
 def main() -> None:

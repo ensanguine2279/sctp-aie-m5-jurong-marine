@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Run log shared by every ingest script.
 
 Every load writes one row to `ingest_runs`: which script, which file (and its

@@ -7,7 +7,7 @@ from, and every load is recorded.
 
 - **Script:** `scripts/ingest_logs.py`
 - **Shared modules:** `scripts/db_config.py` (settings, DB connection), `scripts/lineage.py` (run log)
-- **Tests:** `tests/test_cleaning.py` (`pytest`, no database needed)
+- **Tests:** `tests/test_logs.py` (`pytest`, no database needed)
 
 ---
 
@@ -329,11 +329,15 @@ report. Example from a deliberately messy test file:
 
 ```
 Rows read: 9   loaded: 5   rejected: 4
-Timestamp formats: epoch_ms=4, iso_naive=1, iso_offset=2, unknown=2
-Temperature units: <blank>=1, C=4, F=1, K=1, degF=1, °C=1
-Rejected rows: bad_timestamp=2, duplicate_reading=1, missing_machine_id=1
-Loaded with gaps: missing_temp=1, missing_vibration=1, unknown_temp_unit=1
+Timestamp formats: epoch_ms=4, iso_naive=1, iso_offset=2, unknown=2 (total 9)
+Temperature units: <blank>=1, C=4, F=1, K=1, degF=1, °C=1 (total 9)
+Rejected rows: bad_timestamp=2, duplicate_reading=1, missing_machine_id=1 (total 4)
+Loaded with gaps: missing_temp=1, missing_vibration=1, unknown_temp_unit=1 (total 3)
 ```
+
+Each breakdown line ends with its total. `Timestamp formats` and `Temperature units`
+add up to `Rows read`, and `Rejected rows` to `rejected`, which is a quick check that no
+row was missed. `Loaded with gaps` counts **warnings**, not rows: one row can carry several.
 
 ---
 

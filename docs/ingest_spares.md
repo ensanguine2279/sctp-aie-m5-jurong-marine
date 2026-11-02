@@ -8,7 +8,7 @@ load is recorded.
 
 - **Script:** `scripts/ingest_spares.py`
 - **Shared modules:** `scripts/db_config.py` (settings, DB connection), `scripts/lineage.py` (run log)
-- **Tests:** `tests/test_cleaning.py` (`pytest`, no database needed)
+- **Tests:** `tests/test_spares.py` (`pytest`, no database needed)
 - **Companion:** [`ingest_logs.md`](ingest_logs.md) for the sensor log script, which uses the same structure
 
 ---
@@ -365,12 +365,17 @@ Rev 11: rows_read=10, parts_loaded=10, rejected=0, machine_links=13, below_min_q
         size_in_inches=4, size_in_mm=1, no_explicit_size=5
 ```
 
-When rows are rejected or loaded with warnings, two more lines appear:
+When rows are rejected or loaded with warnings, two more lines appear, each ending
+with its total:
 
 ```
-Rejected rows: duplicate_part_no=1, missing_part_no=1
-Loaded with warnings: lead_time_unparsed=1, min_qty_missing_or_invalid=1, ...
+Rejected rows: duplicate_part_no=1, missing_part_no=1 (total 2)
+Loaded with warnings: lead_time_unparsed=1, min_qty_missing_or_invalid=1 (total 2)
 ```
+
+The `Rejected rows` total equals `rejected` on the `Rev` line. The `Loaded with
+warnings` total counts **warnings**, not rows: one row can carry several. The `Rev`
+line has no total, because its figures are separate counts rather than one breakdown.
 
 ---
 
