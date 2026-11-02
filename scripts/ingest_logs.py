@@ -312,7 +312,8 @@ def print_report(stats: Counter) -> None:
                           ("rejected:", "Rejected rows"), ("warn:", "Loaded with gaps")]:
         items = {k[len(prefix):]: v for k, v in stats.items() if k.startswith(prefix) and v}
         if items:
-            print(f"{title}: " + ", ".join(f"{k}={v}" for k, v in sorted(items.items())))
+            print(f"{title}: " + ", ".join(f"{k}={v}" for k, v in sorted(items.items()))
+                  + f" (total {sum(items.values())})")
 
 
 def main() -> None:
