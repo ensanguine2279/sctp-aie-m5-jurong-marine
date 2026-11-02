@@ -7,7 +7,7 @@ from, and every load is recorded.
 
 - **Script:** `scripts/ingest_logs.py`
 - **Shared modules:** `scripts/db_config.py` (settings, DB connection), `scripts/lineage.py` (run log)
-- **Tests:** `tests/test_cleaning.py` (`pytest`, no database needed)
+- **Tests:** `tests/test_logs.py` (`pytest`, no database needed)
 
 ---
 
@@ -111,7 +111,7 @@ The password is never printed. Connection messages show
 ## How it works
 
 ```mermaid
-flowchart LR
+flowchart TD
     CSV[(CSV file)] --> R[read in chunks<br/>all values as text]
     R --> RAW[keep original row<br/>+ line number + raw_id]
     R --> T[parse_timestamps]

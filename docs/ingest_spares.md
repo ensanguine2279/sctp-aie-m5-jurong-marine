@@ -8,7 +8,7 @@ load is recorded.
 
 - **Script:** `scripts/ingest_spares.py`
 - **Shared modules:** `scripts/db_config.py` (settings, DB connection), `scripts/lineage.py` (run log)
-- **Tests:** `tests/test_cleaning.py` (`pytest`, no database needed)
+- **Tests:** `tests/test_spares.py` (`pytest`, no database needed)
 - **Companion:** [`ingest_logs.md`](ingest_logs.md) for the sensor log script, which uses the same structure
 
 ---
@@ -112,7 +112,7 @@ upward from the `scripts/` folder. The password is never printed.
 ## How it works
 
 ```mermaid
-flowchart LR
+flowchart TD
     X[(xlsx)] --> R[read_sheet<br/>find header, title, rev]
     R --> RAW[keep every row as text<br/>+ sheet row + raw_id]
     R --> B[clean_basics]

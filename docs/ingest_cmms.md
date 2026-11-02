@@ -8,7 +8,7 @@ in it can drop or overwrite our tables.
 
 - **Script:** `scripts/ingest_cmms.py`
 - **Shared modules:** `scripts/db_config.py` (settings, DB connection), `scripts/lineage.py` (run log)
-- **Tests:** `tests/test_cmms_cleaning.py` (`pytest`, no database needed)
+- **Tests:** `tests/test_cmms.py` (`pytest`, no database needed)
 
 ---
 
@@ -100,7 +100,7 @@ The same `.env` as `ingest_logs.py` and `ingest_spares.py`, read through
 ## How it works
 
 ```mermaid
-flowchart LR
+flowchart TD
     SQL[(SQL dump)] --> R[read_dump<br/>no SQL executed]
     R --> RAW[keep each tuple as text<br/>+ line, tuple_no, raw_id]
     R --> T[clean_text_columns]

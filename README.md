@@ -5,6 +5,12 @@ steps chained with `.pipe()`, each load in a single transaction, `--dry-run` to
 check parsing without a database, lineage back to the source file, and a summary
 you can paste into the data quality report.
 
+| Script | Source | Details |
+|---|---|---|
+| `scripts/ingest_logs.py` | Sensor log CSV (`vibration_temp_*.csv`) | [`ingest_logs.md`](ingest_logs.md) |
+| `scripts/ingest_spares.py` | Critical spares sheet (`critical_spares.xlsx`) | [`ingest_spares.md`](ingest_spares.md) |
+| `scripts/ingest_cmms.py` | CMMS SQL dump (`jurongmarine_cmms.sql`) | [`ingest_cmms.md`](ingest_cmms.md) |
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate                 # Windows: .venv\Scripts\activate
@@ -19,10 +25,15 @@ python scripts/ingest_logs.py   data/logs/vibration_temp_2026H1.csv --dry-run
 python scripts/ingest_logs.py   data/logs/vibration_temp_2026H1.csv --recreate   # first load
 python scripts/ingest_spares.py data/tabular/critical_spares.xlsx --dry-run
 python scripts/ingest_spares.py data/tabular/critical_spares.xlsx --recreate     # first load
+python scripts/ingest_cmms.py   data/sql/jurongmarine_cmms.sql --dry-run
+python scripts/ingest_cmms.py   data/sql/jurongmarine_cmms.sql --recreate        # first load
 ```
 
 Use `--recreate` on the first load and after any schema change; afterwards run
 without it.
+
+With uv (personal repo): `uv sync`, then put `uv run` in front of each command,
+e.g. `uv run python scripts/ingest_cmms.py data/sql/jurongmarine_cmms.sql --dry-run`.
 
 ## Database (Docker)
 
@@ -38,8 +49,22 @@ recreate with `docker compose down -v && docker compose up -d`.
 ```bash
 # MySQL shell inside the container
 docker compose exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"'
+```
 
-# Load the client's CMMS dump (runs as root; see what databases it creates)
+GUI clients (MySQL Workbench, DBeaver) connect to `localhost:3307` from Windows.
+
+### The client's CMMS dump
+
+Load it with **`ingest_cmms.py`** (see the quick start). The script parses the dump
+without executing it, cleans it, and writes `cmms_*` tables with lineage, like the
+other sources. This is the path to use for the app and the audit.
+
+Running the dump directly in MySQL is only for browsing the client's tables as they
+are. It runs as root and executes whatever the dump contains, including any
+`DROP TABLE` or `CREATE DATABASE`, so look at the dump first:
+
+```bash
+grep -nE '^(DROP|CREATE) (TABLE|DATABASE)|^USE ' data/sql/jurongmarine_cmms.sql   # what it will do
 docker compose exec -T mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD"' < data/sql/jurongmarine_cmms.sql
 ```
 
@@ -50,7 +75,8 @@ user access to it:
 docker compose exec mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "GRANT ALL ON jurongmarine_cmms.* TO \"$MYSQL_USER\"@\"%\""'
 ```
 
-GUI clients (MySQL Workbench, DBeaver) connect to `localhost:3307` from Windows.
+The `cmms_` prefix keeps `ingest_cmms.py`'s tables apart from the dump's own
+`machines`, `work_orders`, ... tables, so both can live in the same database.
 
 ## Tables
 
@@ -64,11 +90,30 @@ GUI clients (MySQL Workbench, DBeaver) connect to `localhost:3307` from Windows.
 | `critical_spares` | Cleaned parts only; `raw_id` links each to its raw row |
 | `critical_spare_machines` | Part to machine links (`CNC-01/02/03` split into three rows) |
 | `critical_spares_audit` (view) | Clean + raw + run joined: use this for citations |
+| `cmms_<table>_raw` | For `machines`, `employees`, `work_orders`, `safety_incidents`: every INSERT tuple exactly as in the dump (text), with `source_line`, `tuple_no`, `raw_tuple`, `status`, `reject_reason`, `duplicate_of_raw_id`, `warnings`. The dump's `work_orders.status` is stored as `status_src` |
+| `cmms_<table>` | Cleaned rows only; `raw_id` links each to its raw row. Incidents carry `severity_as_logged`, `severity_scale` and `severity_5_worst` |
+| `cmms_<table>_audit` (view) | Clean + raw + run joined: use this for citations |
 
-Re-loading a sensor file replaces that file's rows (other files are kept).
-The spares sheet is a complete list, so each spares load replaces all spares
+Re-loading a sensor file or a CMMS dump replaces that file's rows (other files are
+kept). The spares sheet is a complete list, so each spares load replaces all spares
 rows with the new sheet; `ingest_runs` keeps the history of what was loaded when.
 Spares `raw_id` = `run_id * 100000 + sheet row`, so `300008` is run 3, row 8.
+
+## Run summary
+
+Every run, dry or real, ends with counts you can paste into the data quality report.
+Each breakdown line ends with its total, for example:
+
+```
+Timestamp formats: epoch_ms=4, iso_naive=1, iso_offset=2, unknown=2 (total 9)
+Rejected rows: bad_timestamp=2, duplicate_reading=1, missing_machine_id=1 (total 4)
+```
+
+Category totals (timestamp formats, temperature units, `trade`, `severity_scale`, ...)
+add up to the rows read or loaded, which is a quick check that no row was missed.
+`Rejected rows` totals equal the rejected count. Warning totals (`Loaded with gaps`,
+`Loaded with warnings`) count **warnings**, not rows: one row can carry several.
+Each script's doc shows a full example.
 
 ## Audit queries
 
@@ -93,6 +138,19 @@ FROM critical_spares_audit WHERE part_no = 'SEAL-KIT-KSB';
 SELECT source_row, part_no, status, reject_reason, warnings FROM critical_spares_raw
 WHERE status = 'rejected' OR warnings IS NOT NULL;
 
+-- Incidents on one severity scale, with their source line in the dump
+SELECT incident_id, incident_date, severity_as_logged, severity_scale, severity_5_worst,
+       source_line, raw_tuple
+FROM cmms_safety_incidents_audit ORDER BY incident_date;
+
+-- Incidents the severity rule could not place (resolve before the audit)
+SELECT incident_id, incident_date, severity_as_logged, severity_scale
+FROM cmms_safety_incidents WHERE severity_5_worst IS NULL;
+
+-- Work orders pointing at unknown machines or employees (fix before adding foreign keys)
+SELECT source_line, wo_id, machine_id, emp_code, warnings FROM cmms_work_orders_raw
+WHERE warnings LIKE '%unknown_%';
+
 -- Load history
 SELECT run_id, script, source_file, status, rows_read, rows_loaded, rows_rejected, started_at
 FROM ingest_runs ORDER BY run_id DESC;
@@ -102,8 +160,8 @@ FROM ingest_runs ORDER BY run_id DESC;
 
 The tests check the reading and cleaning logic of every script, plus the shared
 modules. They run in a few seconds and **need no database, Docker or `.env`**:
-each test builds a small messy CSV or spreadsheet in a temporary folder, runs
-the script's cleaning steps on it, and checks the result.
+each test builds a small messy CSV, spreadsheet or SQL dump (in a temporary folder
+or as a string), runs the script's cleaning steps on it, and checks the result.
 
 ### Setup
 
@@ -133,6 +191,7 @@ pytest tests/test_logs.py                           # one file
 pytest tests/test_spares.py -v                      # one line per test, with names
 pytest -k lead_time                                 # only tests whose name contains "lead_time"
 pytest -k "spares and not size"                     # combine name filters
+pytest -k severity                                  # the CMMS severity-scale tests
 pytest tests/test_logs.py::test_temperature_units   # one specific test
 pytest -x                                           # stop at the first failure
 pytest --lf                                         # re-run only the tests that failed last time
@@ -147,6 +206,7 @@ With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
 |---|---|---|
 | `tests/test_logs.py` | `ingest_logs.py`: ISO/epoch timestamps (incl. the 8-hour bug), timezones, °C/°F, unknown units, every CSV line kept in raw with its line number, clean rows linked to raw, reject reasons, duplicates within the file and against rows already loaded | 8 |
 | `tests/test_spares.py` | `ingest_spares.py`: costs (`$38/spool`), lead times (`2-3 weeks (Germany)`, `local`), metric/imperial sizes, machine lists; on a messy sheet: raw rows and row numbers, `raw_id`, duplicate/missing part numbers, warnings for unreadable values | 18 |
+| `tests/test_cmms_cleaning.py` | `ingest_cmms.py`: dump parsing (`;` and quotes inside strings, comments, multi-row INSERTs with line and tuple numbers, column lists, malformed tuples); ids, numbers (`S$1,050`), day-first dates; the severity flip (old scale inverted, July 2025 left unconverted, a confirmed cutover, out-of-range values never guessed); on a messy dump: duplicates and conflicting duplicates, orphan machines/employees flagged not dropped, raw text kept, `work_orders.status` not clashing with the load status | 21 |
 | `tests/test_shared.py` | `db_config.py`, `lineage.py`: password never printed, passwords with special characters, table-name check, file SHA-256, values passed to MySQL are plain Python types | 5 |
 
 **Not covered:** anything that needs MySQL, i.e. creating tables and views,
@@ -157,10 +217,11 @@ queries above.
 ### Reading the output
 
 ```
-tests/test_logs.py ........                         [ 25%]
-tests/test_shared.py .s...                          [ 41%]
+tests/test_cmms_cleaning.py .....................   [ 40%]
+tests/test_logs.py ........                         [ 55%]
+tests/test_shared.py .....                          [ 65%]
 tests/test_spares.py ..................             [100%]
-========== 30 passed, 1 skipped in 0.68s ==========
+========== 52 passed in 1.19s ==========
 ```
 
 | Mark | Meaning |
@@ -181,16 +242,24 @@ tests/test_spares.py ..................             [100%]
 
 ### Adding a test
 
-- Put it in the file for the script it tests (`test_logs.py`, `test_spares.py`), or `test_shared.py` for `db_config.py` / `lineage.py`.
+- Put it in the file for the script it tests (`test_logs.py`, `test_spares.py`, `test_cmms_cleaning.py`), or `test_shared.py` for `db_config.py` / `lineage.py`.
 - Name the function `test_...`, otherwise pytest won't find it.
-- Test the cleaning functions directly with a small `DataFrame` (see `test_temperature_units`), or a whole file through `process()` / `prepare()` using the `tmp_path` fixture (see the `lineage_run` and `messy_sheet` fixtures).
+- Test the cleaning functions directly with a small `DataFrame` (see `test_temperature_units`), or a whole file through `process()` / `prepare()` using the `tmp_path` fixture (see the `lineage_run` and `messy_sheet` fixtures). For the CMMS script, pass a dump as a string to `parse_dump()` and then `process()` (see `test_pipeline_end_to_end`).
 - When you find a new problem in the client's data, add a test with that exact value **before** fixing the code. It fails first, then passes with the fix, and it keeps the problem from coming back. The harness checklist asks for this pattern in your git history.
+
+## Rules worth knowing
 
 **Timezone rule:** `epoch_ms` is UTC; `sampled_at` is Singapore time (UTC+8).
 ISO timestamps without an offset are assumed to be Singapore time (`--source-tz`).
 
 **Temperatures:** stored in Celsius only (`temp_c`); the reading and unit as
 logged stay in `vibration_temp_raw`. Unknown units give `temp_c = NULL`.
+
+**Severity:** the CMMS scale flipped from 1 = worst to 5 = worst in July 2025.
+`severity_5_worst` puts every incident on the new scale; always query it, never
+`severity_as_logged`. Incidents from July 2025 are left unconverted until the client
+confirms the switch-over day; then re-run `ingest_cmms.py` with
+`--severity-cutover <date> --severity-ambiguous-until none`.
 
 **Adding a new ingest script:** import `load_db_config`, `add_common_args` from
 `db_config` and `start_run`, `finish_run` from `lineage`; write each cleaning rule
