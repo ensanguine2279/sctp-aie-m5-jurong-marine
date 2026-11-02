@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Ingest the vibration/temperature sensor log CSV into MySQL, with lineage.
 
 Three tables, so every cleaned value can be traced back to the file line it came from:

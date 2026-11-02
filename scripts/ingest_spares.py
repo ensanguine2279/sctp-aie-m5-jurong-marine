@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Ingest the Critical Spares spreadsheet into MySQL, with lineage.
 
 Tables, so every cleaned part can be traced back to the sheet row it came from:
