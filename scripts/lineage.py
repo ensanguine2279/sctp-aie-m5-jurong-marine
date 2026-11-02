@@ -8,6 +8,10 @@ run_id, so any value can be traced back to the load that produced it.
 
 The run row is written in its own transaction, so a failed load is still
 recorded with status='failed' and the error message.
+
+A script that works on the database rather than a file (relationships.py) passes
+its own `sha256`, a fingerprint of what it read, and a label such as '(database)'
+as the source.
 """
 from __future__ import annotations
 
@@ -60,15 +64,23 @@ def _now() -> datetime:
     return datetime.now().replace(microsecond=0)
 
 
-def start_run(engine, script: str, source_path: str) -> int:
+def start_run(engine, script: str, source_path: str, sha256: str | None = None) -> int:
+    """Record a run as 'running' and return its run_id.
+
+    Normally source_path is the file being loaded and its SHA-256 is computed here.
+    Pass `sha256` when there is no file (source_path is then just a label).
+    """
     from sqlalchemy import text
 
+    if sha256 is not None and len(sha256) != 64:
+        raise ValueError("sha256 must be 64 hex characters")
     with engine.begin() as conn:
         conn.execute(text(RUNS_DDL))
         res = conn.execute(text(
             "INSERT INTO ingest_runs (script, source_file, file_sha256, git_commit, "
             "started_at, status) VALUES (:s, :f, :h, :g, :t, 'running')"),
-            {"s": script, "f": Path(source_path).name, "h": file_sha256(source_path),
+            {"s": script, "f": Path(source_path).name,
+             "h": sha256 if sha256 is not None else file_sha256(source_path),
              "g": git_commit(), "t": _now()})
         return int(res.lastrowid)
 

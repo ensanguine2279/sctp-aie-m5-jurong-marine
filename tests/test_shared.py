@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from db_config import DbConfig, safe_identifier, to_records
-from lineage import file_sha256
+from lineage import file_sha256, start_run
 
 
 # ---------------------------------------------------------------- config ---
@@ -37,6 +37,33 @@ def test_file_sha256(tmp_path):
     p = tmp_path / "f.csv"
     p.write_bytes(b"abc")
     assert file_sha256(str(p)) == hashlib.sha256(b"abc").hexdigest()
+
+
+def test_start_run_with_sha256_reads_no_file():
+    pytest.importorskip("sqlalchemy")
+    seen = {}
+
+    class Conn:
+        def execute(self, stmt, params=None):
+            if params:
+                seen.update(params)
+            return type("R", (), {"lastrowid": 42})()
+
+    class Engine:
+        def begin(self):
+            class Ctx:
+                def __enter__(self):
+                    return Conn()
+
+                def __exit__(self, *a):
+                    return False
+            return Ctx()
+
+    run_id = start_run(Engine(), "relationships.py", "(database)", sha256="a" * 64)
+    assert run_id == 42
+    assert seen["f"] == "(database)" and seen["h"] == "a" * 64
+    with pytest.raises(ValueError):
+        start_run(Engine(), "relationships.py", "(database)", sha256="short")
 
 
 def test_records_are_plain_python_types():
