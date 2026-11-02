@@ -41,9 +41,12 @@ class DbConfig:
         )
 
     def engine(self):
+        """Engine for every script. hide_parameters=True keeps the values of a failed
+        query (a password, or a row with an employee's name) out of error messages,
+        tracebacks and ingest_runs.error. The SQL itself is still shown."""
         from sqlalchemy import create_engine
 
-        return create_engine(self.url(), pool_pre_ping=True)
+        return create_engine(self.url(), pool_pre_ping=True, hide_parameters=True)
 
     def describe(self) -> str:
         return f"{self.user}@{self.host}:{self.port}/{self.name} (password hidden)"
