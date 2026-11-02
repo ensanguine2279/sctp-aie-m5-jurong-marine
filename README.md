@@ -5,8 +5,6 @@ steps chained with `.pipe()`, each load in a single transaction, `--dry-run` to
 check parsing without a database, lineage back to the source file, and a summary
 you can paste into the data quality report.
 
-How the cleaned tables connect: **[ER diagram](docs/er_diagram.md)**.
-
 | Script | Source | Details |
 |---|---|---|
 | `scripts/ingest_logs.py` | Sensor log CSV (`vibration_temp_*.csv`) | [`ingest_logs.md`](docs/ingest_logs.md) |
