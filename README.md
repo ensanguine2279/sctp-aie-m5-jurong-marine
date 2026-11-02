@@ -7,10 +7,10 @@ you can paste into the data quality report.
 
 | Script | Source | Details |
 |---|---|---|
-| `scripts/ingest_logs.py` | Sensor log CSV (`vibration_temp_*.csv`) | [`ingest_logs.md`](ingest_logs.md) |
-| `scripts/ingest_spares.py` | Critical spares sheet (`critical_spares.xlsx`) | [`ingest_spares.md`](ingest_spares.md) |
-| `scripts/ingest_cmms.py` | CMMS SQL dump (`jurongmarine_cmms.sql`) | [`ingest_cmms.md`](ingest_cmms.md) |
-| `scripts/relationships.py` | The loaded tables: links the three sources | [`relationships.md`](relationships.md) |
+| `scripts/ingest_logs.py` | Sensor log CSV (`vibration_temp_*.csv`) | [`ingest_logs.md`](docs/ingest_logs.md) |
+| `scripts/ingest_spares.py` | Critical spares sheet (`critical_spares.xlsx`) | [`ingest_spares.md`](docs/ingest_spares.md) |
+| `scripts/ingest_cmms.py` | CMMS SQL dump (`jurongmarine_cmms.sql`) | [`ingest_cmms.md`](docs/ingest_cmms.md) |
+| `scripts/relationships.py` | The loaded tables: links the three sources | [`relationships.md`](docs/relationships.md) |
 | `scripts/agent_user.py` | Creates the app's read-only database user (PDPA) | [below](#database-access-for-the-app-pdpa) |
 
 ```bash
@@ -62,7 +62,7 @@ GUI clients (MySQL Workbench, DBeaver) connect to `localhost:3307` from Windows.
 ### The client's CMMS dump
 
 Load it with **`ingest_cmms.py`** (see the quick start and
-[`ingest_cmms.md`](ingest_cmms.md)). The script parses the dump
+[`ingest_cmms.md`](docs/ingest_cmms.md)). The script parses the dump
 without executing it, cleans it, and writes `cmms_*` tables with lineage, like the
 other sources. This is the path to use for the app and the audit.
 
@@ -90,22 +90,22 @@ The `cmms_` prefix keeps `ingest_cmms.py`'s tables apart from the dump's own
 | Table | What it holds | Made by |
 |---|---|---|
 | `ingest_runs` | One row per run: script, file name, file SHA-256, git commit, time, row counts, `success`/`failed` + error. `relationships.py` runs appear as source `(database)` | every script |
-| `vibration_temp_raw` | Every CSV row exactly as in the file (text), with `source_line`, `status` (`loaded`/`rejected`), `reject_reason`, `duplicate_of_raw_id`, `warnings` | [`ingest_logs`](ingest_logs.md) |
-| `vibration_temp` | Cleaned readings only; `raw_id` links each to its raw row | [`ingest_logs`](ingest_logs.md) |
-| `vibration_temp_audit` (view) | Clean + raw + run joined: use this for citations | [`ingest_logs`](ingest_logs.md) |
-| `critical_spares_raw` | Every sheet row exactly as written (text), with `source_row`, `source_rev`, `status`, `reject_reason`, `duplicate_of_raw_id`, `warnings` | [`ingest_spares`](ingest_spares.md) |
-| `critical_spares` | Cleaned parts only; `raw_id` links each to its raw row | [`ingest_spares`](ingest_spares.md) |
-| `critical_spare_machines` | Part to machine links (`CNC-01/02/03` split into three rows) | [`ingest_spares`](ingest_spares.md) |
-| `critical_spares_audit` (view) | Clean + raw + run joined: use this for citations | [`ingest_spares`](ingest_spares.md) |
-| `cmms_<table>_raw` | For `machines`, `employees`, `work_orders`, `safety_incidents`: every INSERT tuple exactly as in the dump (text), with `source_line`, `tuple_no`, `raw_tuple`, `status`, `reject_reason`, `duplicate_of_raw_id`, `warnings`. The dump's `work_orders.status` is stored as `status_src` | [`ingest_cmms`](ingest_cmms.md) |
-| `cmms_<table>` | Cleaned rows only; `raw_id` links each to its raw row. Incidents carry `severity_as_logged`, `severity_scale` and `severity_5_worst` | [`ingest_cmms`](ingest_cmms.md) |
-| `cmms_<table>_audit` (view) | Clean + raw + run joined: use this for citations | [`ingest_cmms`](ingest_cmms.md) |
-| `table_relationships` | One row per link between sources (see below): child and parent column, `fk`/`soft`, rows checked, matched, orphans and which keys, `run_id` of the run that checked it | [`relationships`](relationships.md) |
-| `machine_overview` (view) | One row per machine: work orders, breakdowns, open WOs, incidents, lost days, spares, spares below min, sensor readings and their date range | [`relationships`](relationships.md#views) |
-| `machine_spares` (view) | Spares per machine, with `ALL` expanded to every machine | [`relationships`](relationships.md#views) |
-| `work_order_detail` (view) | Work orders + machine + employee trade/shift (no names) | [`relationships`](relationships.md#views) |
-| `incident_detail` (view) | Incidents + machine + employee trade/shift; severity as `severity_5_worst` only | [`relationships`](relationships.md#views) |
-| `work_order_sensor_window` (view) | Each work order with the sensor readings in the 7 days up to it (`--window-days`) | [`relationships`](relationships.md#views) |
+| `vibration_temp_raw` | Every CSV row exactly as in the file (text), with `source_line`, `status` (`loaded`/`rejected`), `reject_reason`, `duplicate_of_raw_id`, `warnings` | [`ingest_logs`](docs/ingest_logs.md) |
+| `vibration_temp` | Cleaned readings only; `raw_id` links each to its raw row | [`ingest_logs`](docs/ingest_logs.md) |
+| `vibration_temp_audit` (view) | Clean + raw + run joined: use this for citations | [`ingest_logs`](docs/ingest_logs.md) |
+| `critical_spares_raw` | Every sheet row exactly as written (text), with `source_row`, `source_rev`, `status`, `reject_reason`, `duplicate_of_raw_id`, `warnings` | [`ingest_spares`](docs/ingest_spares.md) |
+| `critical_spares` | Cleaned parts only; `raw_id` links each to its raw row | [`ingest_spares`](docs/ingest_spares.md) |
+| `critical_spare_machines` | Part to machine links (`CNC-01/02/03` split into three rows) | [`ingest_spares`](docs/ingest_spares.md) |
+| `critical_spares_audit` (view) | Clean + raw + run joined: use this for citations | [`ingest_spares`](docs/ingest_spares.md) |
+| `cmms_<table>_raw` | For `machines`, `employees`, `work_orders`, `safety_incidents`: every INSERT tuple exactly as in the dump (text), with `source_line`, `tuple_no`, `raw_tuple`, `status`, `reject_reason`, `duplicate_of_raw_id`, `warnings`. The dump's `work_orders.status` is stored as `status_src` | [`ingest_cmms`](docs/ingest_cmms.md) |
+| `cmms_<table>` | Cleaned rows only; `raw_id` links each to its raw row. Incidents carry `severity_as_logged`, `severity_scale` and `severity_5_worst` | [`ingest_cmms`](docs/ingest_cmms.md) |
+| `cmms_<table>_audit` (view) | Clean + raw + run joined: use this for citations | [`ingest_cmms`](docs/ingest_cmms.md) |
+| `table_relationships` | One row per link between sources (see below): child and parent column, `fk`/`soft`, rows checked, matched, orphans and which keys, `run_id` of the run that checked it | [`relationships`](docs/relationships.md) |
+| `machine_overview` (view) | One row per machine: work orders, breakdowns, open WOs, incidents, lost days, spares, spares below min, sensor readings and their date range | [`relationships`](docs/relationships.md#views) |
+| `machine_spares` (view) | Spares per machine, with `ALL` expanded to every machine | [`relationships`](docs/relationships.md#views) |
+| `work_order_detail` (view) | Work orders + machine + employee trade/shift (no names) | [`relationships`](docs/relationships.md#views) |
+| `incident_detail` (view) | Incidents + machine + employee trade/shift; severity as `severity_5_worst` only | [`relationships`](docs/relationships.md#views) |
+| `work_order_sensor_window` (view) | Each work order with the sensor readings in the 7 days up to it (`--window-days`) | [`relationships`](docs/relationships.md#views) |
 
 Re-loading a sensor file or a CMMS dump replaces that file's rows (other files are
 kept). The spares sheet is a complete list, so each spares load replaces all spares
@@ -143,11 +143,11 @@ python scripts/relationships.py --drop-foreign-keys                      # befor
 
 Foreign keys are opt-in: a reload deletes rows they would protect, so while they
 exist a reload fails. Order of work: `--drop-foreign-keys`, reload, `--foreign-keys`
-(see [Foreign keys](relationships.md#foreign-keys)). Every run is logged too
-(see [Run log](relationships.md#run-log)).
-The ER diagram of the cleaned schema is in [`er_diagram.md`](er_diagram.md); solid
+(see [Foreign keys](docs/relationships.md#foreign-keys)). Every run is logged too
+(see [Run log](docs/relationships.md#run-log)).
+The ER diagram of the cleaned schema is in [`er_diagram.md`](docs/er_diagram.md); solid
 lines are foreign keys, dotted lines are soft links. Details in
-[`relationships.md`](relationships.md).
+[`relationships.md`](docs/relationships.md).
 
 ## Database access for the app (PDPA)
 
@@ -322,10 +322,10 @@ Category totals (timestamp formats, temperature units, `trade`, `severity_scale`
 add up to the rows read or loaded, which is a quick check that no row was missed.
 `Rejected rows` totals equal the rejected count. Warning totals (`Loaded with gaps`,
 `Loaded with warnings`) count **warnings**, not rows: one row can carry several.
-Each script's doc shows a full example: [`ingest_logs.md`](ingest_logs.md),
-[`ingest_spares.md`](ingest_spares.md), [`ingest_cmms.md`](ingest_cmms.md).
+Each script's doc shows a full example: [`ingest_logs.md`](docs/ingest_logs.md),
+[`ingest_spares.md`](docs/ingest_spares.md), [`ingest_cmms.md`](docs/ingest_cmms.md).
 `relationships.py` prints a per-link check instead
-(see [`relationships.md`](relationships.md#relationships)).
+(see [`relationships.md`](docs/relationships.md#relationships)).
 
 ## Audit queries
 
@@ -428,10 +428,10 @@ With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
 
 | File | Covers | Tests |
 |---|---|---|
-| `tests/test_logs.py` | [`ingest_logs.py`](ingest_logs.md): ISO/epoch timestamps (incl. the 8-hour bug), timezones, °C/°F, unknown units, every CSV line kept in raw with its line number, clean rows linked to raw, reject reasons, duplicates within the file and against rows already loaded | 8 |
-| `tests/test_spares.py` | [`ingest_spares.py`](ingest_spares.md): costs (`$38/spool`), lead times (`2-3 weeks (Germany)`, `local`), metric/imperial sizes, machine lists; on a messy sheet: raw rows and row numbers, `raw_id`, duplicate/missing part numbers, warnings for unreadable values | 18 |
-| `tests/test_cmms.py` | [`ingest_cmms.py`](ingest_cmms.md): dump parsing (`;` and quotes inside strings, comments, multi-row INSERTs with line and tuple numbers, column lists, malformed tuples); ids, numbers (`S$1,050`), day-first dates; the severity flip (old scale inverted, July 2025 left unconverted, a confirmed cutover, out-of-range values never guessed); on a messy dump: duplicates and conflicting duplicates, orphan machines/employees flagged not dropped, raw text kept, `work_orders.status` not clashing with the load status | 21 |
-| `tests/test_relationships.py` | [`relationships.py`](relationships.md): orphan/NULL/`ALL` counting, keys compared like MySQL (case, spaces), when a foreign key is added or skipped, table prefixes, no view exposes `emp_name`, incidents only offer `severity_5_worst`, the ER diagram, the run fingerprint, successful and failed runs recorded in `ingest_runs` | 33 |
+| `tests/test_logs.py` | [`ingest_logs.py`](docs/ingest_logs.md): ISO/epoch timestamps (incl. the 8-hour bug), timezones, °C/°F, unknown units, every CSV line kept in raw with its line number, clean rows linked to raw, reject reasons, duplicates within the file and against rows already loaded | 8 |
+| `tests/test_spares.py` | [`ingest_spares.py`](docs/ingest_spares.md): costs (`$38/spool`), lead times (`2-3 weeks (Germany)`, `local`), metric/imperial sizes, machine lists; on a messy sheet: raw rows and row numbers, `raw_id`, duplicate/missing part numbers, warnings for unreadable values | 18 |
+| `tests/test_cmms.py` | [`ingest_cmms.py`](docs/ingest_cmms.md): dump parsing (`;` and quotes inside strings, comments, multi-row INSERTs with line and tuple numbers, column lists, malformed tuples); ids, numbers (`S$1,050`), day-first dates; the severity flip (old scale inverted, July 2025 left unconverted, a confirmed cutover, out-of-range values never guessed); on a messy dump: duplicates and conflicting duplicates, orphan machines/employees flagged not dropped, raw text kept, `work_orders.status` not clashing with the load status | 21 |
+| `tests/test_relationships.py` | [`relationships.py`](docs/relationships.md): orphan/NULL/`ALL` counting, keys compared like MySQL (case, spaces), when a foreign key is added or skipped, table prefixes, no view exposes `emp_name`, incidents only offer `severity_5_worst`, the ER diagram, the run fingerprint, successful and failed runs recorded in `ingest_runs` | 33 |
 | `tests/test_agent_user.py` | `agent_user.py`: the allow-list never includes employees or raw tables, objects with `emp_name` refused, missing objects skipped, `SELECT`-only grants after a full reset, password never written into SQL or output, bad user/host/database names rejected, MySQL error codes read correctly, errors never include the password | 15 |
 | `tests/test_shared.py` | `db_config.py`, `lineage.py`: password never printed, passwords with special characters, values of a failed query kept out of error messages, table-name check, file SHA-256, a run recorded without a file, values passed to MySQL are plain Python types | 7 |
 
@@ -480,37 +480,37 @@ tests/test_spares.py ..................                             [100%]
 
 **Timezone rule:** `epoch_ms` is UTC; `sampled_at` is Singapore time (UTC+8).
 ISO timestamps without an offset are assumed to be Singapore time (`--source-tz`).
-See [`ingest_logs.md`](ingest_logs.md).
+See [`ingest_logs.md`](docs/ingest_logs.md).
 
 **Temperatures:** stored in Celsius only (`temp_c`); the reading and unit as
 logged stay in `vibration_temp_raw`. Unknown units give `temp_c = NULL`.
-See [`ingest_logs.md`](ingest_logs.md).
+See [`ingest_logs.md`](docs/ingest_logs.md).
 
 **Spares sizes and lead times:** sizes in inches and mm both end up in `size_mm`;
 lead times like `2-3 weeks (Germany)` become day ranges. See
-[`ingest_spares.md`](ingest_spares.md).
+[`ingest_spares.md`](docs/ingest_spares.md).
 
 **Severity:** the CMMS scale flipped from 1 = worst to 5 = worst in July 2025.
 `severity_5_worst` puts every incident on the new scale; always query it, never
 `severity_as_logged`. Incidents from July 2025 are left unconverted until the client
 confirms the switch-over day; then re-run `ingest_cmms.py` with
 `--severity-cutover <date> --severity-ambiguous-until none`. See
-[`ingest_cmms.md`](ingest_cmms.md).
+[`ingest_cmms.md`](docs/ingest_cmms.md).
 
 **Employee names (PDPA):** `emp_name` stays in `cmms_employees`. None of the linking
 views select it; they give `emp_code`, trade and shift only. The app connects as the
 read-only user from `agent_user.py`, which the database stops from reading names, so
 this holds whatever the model is asked. See
 [Database access for the app](#database-access-for-the-app-pdpa) and
-[`relationships.md`](relationships.md#views).
+[`relationships.md`](docs/relationships.md#views).
 
 **Foreign keys before reloading:** if you ran `relationships.py --foreign-keys`, run
 `relationships.py --drop-foreign-keys` before reloading any source or using
 `--recreate`, then add them back afterwards. See
-[`relationships.md`](relationships.md#foreign-keys).
+[`relationships.md`](docs/relationships.md#foreign-keys).
 
 **Adding a new ingest script:** import `load_db_config`, `add_common_args` from
 `db_config` and `start_run`, `finish_run` from `lineage`; write each cleaning rule
 as a `df -> df` function and add a test for it. If its tables share a key with
 another source, add the link to `RELATIONSHIPS` in `relationships.py`
-(see [`relationships.md`](relationships.md#relationships)).
+(see [`relationships.md`](docs/relationships.md#relationships)).
