@@ -11,6 +11,7 @@ you can paste into the data quality report.
 | `scripts/ingest_spares.py` | Critical spares sheet (`critical_spares.xlsx`) | [`ingest_spares.md`](ingest_spares.md) |
 | `scripts/ingest_cmms.py` | CMMS SQL dump (`jurongmarine_cmms.sql`) | [`ingest_cmms.md`](ingest_cmms.md) |
 | `scripts/relationships.py` | The loaded tables: links the three sources | [`relationships.md`](relationships.md) |
+| `scripts/agent_user.py` | Creates the app's read-only database user (PDPA) | [below](#database-access-for-the-app-pdpa) |
 
 ```bash
 python -m venv .venv
@@ -30,6 +31,7 @@ python scripts/ingest_cmms.py   data/sql/jurongmarine_cmms.sql --dry-run
 python scripts/ingest_cmms.py   data/sql/jurongmarine_cmms.sql --recreate        # first load
 
 python scripts/relationships.py --mermaid docs/er_diagram.md   # link the sources (after the loads)
+python scripts/agent_user.py                                   # the app's read-only user, then a check
 ```
 
 Use `--recreate` on the first load and after any schema change; afterwards run
@@ -146,6 +148,42 @@ exist a reload fails. Order of work: `--drop-foreign-keys`, reload, `--foreign-k
 The ER diagram of the cleaned schema is in [`er_diagram.md`](er_diagram.md); solid
 lines are foreign keys, dotted lines are soft links. Details in
 [`relationships.md`](relationships.md).
+
+## Database access for the app (PDPA)
+
+The app, and through its tools the LLM, must **never** connect as `DB_USERNAME`: that
+user owns every table, including `cmms_employees.emp_name`. Telling the model "use the
+views" is not protection; the database has to refuse. `agent_user.py` creates a separate
+user that can only `SELECT` from an allow-list:
+
+| The app user can read | It can't |
+|---|---|
+| the linking views (`machine_overview`, `machine_spares`, `work_order_detail`, `incident_detail`, `work_order_sensor_window`), `table_relationships`, and the `*_audit` views for citations (machines, work orders, incidents, sensor readings, spares) | `cmms_employees`, `cmms_employees_raw`, `cmms_employees_audit`, any `*_raw` table, any write, any schema change |
+
+Views run with their creator's rights (MySQL's default), so the app user reads
+`work_order_detail` without any access to the tables underneath. Before granting, the
+script refuses any object that has an `emp_name` column, so a view changed later can't
+leak names. Add to `.env`:
+
+```bash
+AGENT_DB_USERNAME=agent_ro
+AGENT_DB_PASSWORD=...              # the app connects with these two
+DB_ADMIN_USERNAME=root             # creating users needs an admin account
+DB_ADMIN_PASSWORD=...              # falls back to MYSQL_ROOT_PASSWORD
+```
+
+```bash
+python scripts/agent_user.py --dry-run   # the plan and SQL, password hidden; no database needed
+python scripts/agent_user.py             # create/update the user, then check it
+python scripts/agent_user.py --check     # only the check (exit 1 if anything is wrong)
+```
+
+The check connects **as the app user** and must show every allowed view working and
+every probe refused: employee names, the employees table and its audit view, raw rows,
+a write, a `CREATE TABLE`. Run it after the first full load: objects that don't exist
+yet are skipped, not granted. Run it again after adding a view to the allow-list
+(`allowed_objects` in the script). It's also the evidence for the PDPA question on
+demo day; run `--check` live.
 
 ## Lineage: traceability and reproducibility
 
@@ -394,22 +432,25 @@ With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
 | `tests/test_spares.py` | [`ingest_spares.py`](ingest_spares.md): costs (`$38/spool`), lead times (`2-3 weeks (Germany)`, `local`), metric/imperial sizes, machine lists; on a messy sheet: raw rows and row numbers, `raw_id`, duplicate/missing part numbers, warnings for unreadable values | 18 |
 | `tests/test_cmms.py` | [`ingest_cmms.py`](ingest_cmms.md): dump parsing (`;` and quotes inside strings, comments, multi-row INSERTs with line and tuple numbers, column lists, malformed tuples); ids, numbers (`S$1,050`), day-first dates; the severity flip (old scale inverted, July 2025 left unconverted, a confirmed cutover, out-of-range values never guessed); on a messy dump: duplicates and conflicting duplicates, orphan machines/employees flagged not dropped, raw text kept, `work_orders.status` not clashing with the load status | 21 |
 | `tests/test_relationships.py` | [`relationships.py`](relationships.md): orphan/NULL/`ALL` counting, keys compared like MySQL (case, spaces), when a foreign key is added or skipped, table prefixes, no view exposes `emp_name`, incidents only offer `severity_5_worst`, the ER diagram, the run fingerprint, successful and failed runs recorded in `ingest_runs` | 33 |
-| `tests/test_shared.py` | `db_config.py`, `lineage.py`: password never printed, passwords with special characters, table-name check, file SHA-256, a run recorded without a file, values passed to MySQL are plain Python types | 6 |
+| `tests/test_agent_user.py` | `agent_user.py`: the allow-list never includes employees or raw tables, objects with `emp_name` refused, missing objects skipped, `SELECT`-only grants after a full reset, password never written into SQL or output, bad user/host/database names rejected, MySQL error codes read correctly, errors never include the password | 15 |
+| `tests/test_shared.py` | `db_config.py`, `lineage.py`: password never printed, passwords with special characters, values of a failed query kept out of error messages, table-name check, file SHA-256, a run recorded without a file, values passed to MySQL are plain Python types | 7 |
 
-**Not covered:** anything that needs MySQL, i.e. creating tables and views,
+**Not covered:** anything that needs MySQL, i.e. creating tables, views and users,
 the inserts, the one-transaction rollback and the `ingest_runs` record. After
 changing DDL or load code, check with a real load (`--recreate`) and the audit
-queries above; after changing a view in `relationships.py`, run it and query the view.
+queries above; after changing a view in `relationships.py`, run it and query the view;
+for the app user's grants, `agent_user.py --check` is the real test.
 
 ### Reading the output
 
 ```
-tests/test_cmms.py .....................                          [ 24%]
-tests/test_logs.py ........                                         [ 33%]
-tests/test_relationships.py .................................       [ 72%]
-tests/test_shared.py ......                                         [ 79%]
+tests/test_agent_user.py ...............                            [ 15%]
+tests/test_cmms.py .....................                            [ 35%]
+tests/test_logs.py ........                                         [ 44%]
+tests/test_relationships.py .................................       [ 78%]
+tests/test_shared.py .......                                        [ 85%]
 tests/test_spares.py ..................                             [100%]
-========== 86 passed in 0.81s ==========
+========== 102 passed in 0.85s ==========
 ```
 
 | Mark | Meaning |
@@ -417,7 +458,7 @@ tests/test_spares.py ..................                             [100%]
 | `.` | passed |
 | `F` | failed: an `assert` was false. pytest prints the values on both sides |
 | `E` | error: the test couldn't run (e.g. an import failed) |
-| `s` | skipped: `test_password_with_special_characters_is_escaped` and `test_start_run_with_sha256_reads_no_file` skip if SQLAlchemy isn't installed; installing `requirements-dev.txt` fixes it |
+| `s` | skipped: the tests that build a SQLAlchemy engine or URL skip if SQLAlchemy isn't installed; installing `requirements-dev.txt` fixes it |
 
 ### When it doesn't work
 
@@ -457,8 +498,11 @@ confirms the switch-over day; then re-run `ingest_cmms.py` with
 [`ingest_cmms.md`](ingest_cmms.md).
 
 **Employee names (PDPA):** `emp_name` stays in `cmms_employees`. None of the linking
-views select it; they give `emp_code`, trade and shift only. Query those views, not
-the employees table, when answering questions. See [`relationships.md`](relationships.md#views).
+views select it; they give `emp_code`, trade and shift only. The app connects as the
+read-only user from `agent_user.py`, which the database stops from reading names, so
+this holds whatever the model is asked. See
+[Database access for the app](#database-access-for-the-app-pdpa) and
+[`relationships.md`](relationships.md#views).
 
 **Foreign keys before reloading:** if you ran `relationships.py --foreign-keys`, run
 `relationships.py --drop-foreign-keys` before reloading any source or using

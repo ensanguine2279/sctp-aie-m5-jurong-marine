@@ -25,6 +25,19 @@ def test_password_with_special_characters_is_escaped():
     assert url.password == "p@ss:w/rd" and url.host == "h"
 
 
+def test_engine_keeps_values_out_of_error_messages():
+    """A failed insert must not print or log the row (e.g. an employee's name, PDPA)."""
+    pytest.importorskip("sqlalchemy")
+    from sqlalchemy import exc
+
+    engine = DbConfig(user="u", password="p", host="h", port=3306, name="d").engine()
+    assert engine.hide_parameters is True
+    err = exc.StatementError("insert failed", "INSERT INTO t (emp_name) VALUES (%(n)s)",
+                             {"n": "Seah Jia Hui"}, Exception("boom"),
+                             hide_parameters=engine.hide_parameters)
+    assert "Seah Jia Hui" not in str(err)
+
+
 def test_table_name_whitelist():
     assert safe_identifier("vibration_temp") == "vibration_temp"
     with pytest.raises(ValueError):
