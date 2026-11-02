@@ -11,7 +11,7 @@ you can paste into the data quality report.
 | `scripts/ingest_spares.py` | Critical spares sheet (`critical_spares.xlsx`) | [`ingest_spares.md`](docs/ingest_spares.md) |
 | `scripts/ingest_cmms.py` | CMMS SQL dump (`jurongmarine_cmms.sql`) | [`ingest_cmms.md`](docs/ingest_cmms.md) |
 | `scripts/relationships.py` | The loaded tables: links the three sources | [`relationships.md`](docs/relationships.md), [ER diagram](docs/er_diagram.md) |
-| `scripts/agent_user.py` | Creates the app's read-only database user (PDPA) | [below](#database-access-for-the-app-pdpa) |
+| `scripts/agent_user.py` | Creates the app's read-only database user (PDPA) | [`agent_user.md`](docs/agent_user.md) |
 
 ```bash
 python -m venv .venv
@@ -186,7 +186,8 @@ every probe refused: employee names, the employees table and its audit view, raw
 a write, a `CREATE TABLE`. Run it after the first full load: objects that don't exist
 yet are skipped, not granted. Run it again after adding a view to the allow-list
 (`allowed_objects` in the script). It's also the evidence for the PDPA question on
-demo day; run `--check` live.
+demo day; run `--check` live. Details, errors and hosted MySQL in
+[`agent_user.md`](docs/agent_user.md).
 
 ## Lineage: traceability and reproducibility
 
@@ -310,6 +311,54 @@ Compare by `source_file` + `source_line` / `source_row` and by the counts.
 **Dry run vs real load:** a real load also rejects rows that duplicate rows already
 loaded from *other* files, which a dry run can't see. The counts match exactly for the
 first file of a source; for later files, the difference is the `duplicate_*` rejects.
+
+## Data concerns and open questions
+
+What we know is uncertain in the client's data, what the scripts do about it now, and
+what we need from someone else to settle it. Keep this list current: it feeds the data
+quality report, and the client will be asked these questions.
+
+### Needs the client's input
+
+| # | Question | Evidence and why it matters | What we do now | Once answered |
+|---|---|---|---|---|
+| 1 | **On which day did incident severity switch to 5 = worst?** (safety officer) | The dump's header note says 1 Jul 2025, but forms in use may have lagged. In this dump only two incidents fall in July 2025: **906** (11 Jul, logged 3) and **907** (4 Jul, logged 2). A 3 means the same on both scales, so **907 is the only incident whose meaning changes**: severity 2 on the new scale, or 4 converted from the old. The auditor will test this. | Before 1 Jul 2025 converted (`6 − s`); all of July left `ambiguous`, `severity_5_worst = NULL` | `ingest_cmms.py --severity-cutover <date> --severity-ambiguous-until none`, then `relationships.py` |
+| 2 | **Do old-scale severities agree with lost days?** (safety officer) | Several pre-July-2025 incidents logged `5` (least severe on the old scale) have 5 lost days, e.g. 901, 919, 920, 937; incident 982 logged `4` (minor) has 14. Either lost days aren't tied to severity, or some old records already used the new scale. Check with the query below. | Rule applied as stated | If records were mixed, the rule needs a per-record source (e.g. which form, the `reporting` field) |
+| 3 | **Are work order and incident descriptions reliable for the machine they're on?** (maintenance) | Many don't fit the machine type: 10018 `crane limit switch fault` on the test pump rig, 10045 `weld porosity complaints` on the overhead crane, 10005 `spindle vibration high` on a welding bay; incident 923 `finger caught in chuck` on a crane. Either the machine id or the description is wrong. | Loaded as written | Decide which field to trust; until then the app should cite descriptions, not reason from them |
+| 4 | **What vibration and temperature levels count as "off" for CNC-02?** (maintenance / OEM) | The night shift's question needs a threshold or a baseline; the data has none. | Readings stored; no alarm levels | Add the limits to the analysis and the chart |
+| 5 | **Is "Nurul Aisyah binte Hassan" one person or two?** (HR) | Same name on EMP015 (QA, night) and EMP026 (QA, night). Affects any per-person count. | Treated as two employees (two codes) | Merge or keep; the app never shows names either way |
+| 6 | **What's the difference between `corrective` and `breakdown` work orders?** (maintenance) | Both are unplanned repairs; "breakdowns per machine" depends on the definition. | Kept as logged | Document the definition, or map one to the other |
+| 7 | **What does `cost_sgd` on an open work order mean?** (finance / maintenance) | Open and `awaiting parts` WOs already have costs, e.g. 11550 (open, S$941.13). Estimate or spend so far? | Summed like closed WOs | Exclude open WOs from cost totals, or label them estimates |
+| 8 | **Which currency are spares costs in?** (storeman) | The sheet only shows `$`; the bearing from Germany may be priced differently. | Stored without a currency | Add the currency per part |
+| 9 | **Which part is an `awaiting parts` work order waiting for?** (maintenance) | Work orders don't record parts, so spares can't be linked to WOs; the app can't answer "what's holding up WO 11552". | Not linked | A part field in the CMMS export, or a separate list |
+
+```sql
+-- Evidence for question 2: lost days by scale and logged severity
+SELECT severity_scale, severity_as_logged, COUNT(*) AS incidents, ROUND(AVG(lost_days), 1) AS avg_lost_days
+FROM cmms_safety_incidents GROUP BY severity_scale, severity_as_logged ORDER BY 1, 2;
+```
+
+### Assumptions we made (state them in the data quality report)
+
+| Assumption | Where | Check |
+|---|---|---|
+| Sensor timestamps without an offset are Singapore time | [`ingest_logs.md`](docs/ingest_logs.md) | `iso_naive` count in the run summary |
+| Slash dates in the CMMS are day first (`05/02/2026` = 5 Feb) | [`ingest_cmms.md`](docs/ingest_cmms.md) | `date_assumed_day_first` warnings |
+| Lead-time months are 30 days; `local` has no lead time in days | [`ingest_spares.md`](docs/ingest_spares.md) | `lead_time_unparsed` warnings |
+| Only sizes written with a unit are converted; bearing numbers (`6205`) aren't decoded | [`ingest_spares.md`](docs/ingest_spares.md) | `no_explicit_size` count |
+| Duplicates keep the first row seen, even if later ones differ | all three ingest docs | `duplicate_*` rejects |
+| Category values aren't merged, only case and spacing normalised. This dump has none to merge: statuses are only `CLOSED`, `OPEN`, `AWAITING PARTS`; types only `CORRECTIVE`, `PREVENTIVE`, `BREAKDOWN` | [`ingest_cmms.md`](docs/ingest_cmms.md) | distinct `status` / `wo_type` values in the run summary of a new dump |
+| No plausibility checks: a 900 °C reading or negative quantity loads as written | [`ingest_logs.md`](docs/ingest_logs.md), [`ingest_spares.md`](docs/ingest_spares.md) | add a rule if the data audit finds one |
+| Time gaps in the sensor log aren't detected at ingest | [`ingest_logs.md`](docs/ingest_logs.md) | analysis step |
+
+### Still to check ourselves
+
+| Item | How |
+|---|---|
+| Machine ids in the full sensor CSV (~106k rows) may be spelled differently from the CMMS | load it, run `relationships.py`, read `orphan_values` in `table_relationships`; lookalikes need a `machine_aliases` table |
+| Whether `emp_code` with trade and shift identifies a person in a 32-person shop (PDPA) | team decision: if so, drop `emp_code` from `incident_detail` / `work_order_detail` |
+| Names also appear in the spares sheet title (`storeman: Halim`) | stored only in `critical_spares_raw.source_title`, which the app user can't read; keep it that way |
+| Views, grants and run logging have only been tested without a database | run `relationships.py` and `agent_user.py --check` on the real database |
 
 ## Run summary
 
