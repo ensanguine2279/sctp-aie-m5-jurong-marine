@@ -5,12 +5,14 @@ steps chained with `.pipe()`, each load in a single transaction, `--dry-run` to
 check parsing without a database, lineage back to the source file, and a summary
 you can paste into the data quality report.
 
+How the cleaned tables connect: **[ER diagram](docs/er_diagram.md)**.
+
 | Script | Source | Details |
 |---|---|---|
 | `scripts/ingest_logs.py` | Sensor log CSV (`vibration_temp_*.csv`) | [`ingest_logs.md`](docs/ingest_logs.md) |
 | `scripts/ingest_spares.py` | Critical spares sheet (`critical_spares.xlsx`) | [`ingest_spares.md`](docs/ingest_spares.md) |
 | `scripts/ingest_cmms.py` | CMMS SQL dump (`jurongmarine_cmms.sql`) | [`ingest_cmms.md`](docs/ingest_cmms.md) |
-| `scripts/relationships.py` | The loaded tables: links the three sources | [`relationships.md`](docs/relationships.md) |
+| `scripts/relationships.py` | The loaded tables: links the three sources | [`relationships.md`](docs/relationships.md), [ER diagram](docs/er_diagram.md) |
 | `scripts/agent_user.py` | Creates the app's read-only database user (PDPA) | [below](#database-access-for-the-app-pdpa) |
 
 ```bash
@@ -86,6 +88,9 @@ The `cmms_` prefix keeps `ingest_cmms.py`'s tables apart from the dump's own
 `machines`, `work_orders`, ... tables, so both can live in the same database.
 
 ## Tables
+
+The [ER diagram](docs/er_diagram.md) shows the cleaned tables and how they link;
+`relationships.py --mermaid docs/er_diagram.md` regenerates it.
 
 | Table | What it holds | Made by |
 |---|---|---|
