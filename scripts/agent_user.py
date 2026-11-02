@@ -42,7 +42,8 @@ from db_config import DbConfig, add_common_args, load_db_config
 from relationships import CATALOG, VIEWS, Names
 
 PII_COLUMNS = {"emp_name"}  # columns the app user must never be able to read
-DENIED_CODES = {1044, 1142, 1143, 1227}  # MySQL "access denied" errors
+DENIED_CODES = {1044, 1142, 1143, 1227, 3879}  # MySQL "access denied" errors
+PARTIAL_REVOKE_CODE = 3879  # access denied to a database (hosted MySQL: system databases)
 MISSING_CODES = {1146}  # table doesn't exist
 
 
@@ -114,9 +115,11 @@ def statements(db: str, user: str, host: str, grant: list[str]) -> list[str]:
     if not _DB.fullmatch(db):
         raise ValueError(f"Invalid database name: {db!r}")
     acct = account(user, host)
-    out = [f"CREATE USER IF NOT EXISTS {acct} IDENTIFIED BY :pw",
-           f"ALTER USER {acct} IDENTIFIED BY :pw",                 # password from .env wins
-           f"REVOKE ALL PRIVILEGES, GRANT OPTION FROM {acct}"]     # drop anything granted before
+    # Drop and recreate rather than REVOKE ALL: same clean slate (no grant survives, the
+    # password comes from .env), but needs no rights over every database. Hosted MySQL
+    # (Aiven) keeps even its admin out of system databases, and REVOKE ALL fails there.
+    out = [f"DROP USER IF EXISTS {acct}",
+           f"CREATE USER {acct} IDENTIFIED BY :pw"]
     out += [f"GRANT SELECT ON `{db}`.`{obj}` TO {acct}" for obj in grant]
     return out
 
@@ -138,16 +141,42 @@ def make_engine(cfg: DbConfig):
     return cfg.engine()
 
 
-def admin_error(code: int | None, admin_user: str) -> str:
-    """A readable message for a failed setup, without the SQL or its parameters."""
+class SetupError(Exception):
+    """A setup statement failed: which step, MySQL's code and its own message.
+
+    MySQL's messages name users and databases but never echo a password, and the
+    statement is given without its parameters, so this is safe to print."""
+
+    def __init__(self, step: str, code: int | None, message: str):
+        super().__init__(message)
+        self.step, self.code, self.message = step, code, message
+
+
+def step_label(sql: str) -> str:
+    """The statement as shown in errors: up to the password placeholder."""
+    return sql.split(" IDENTIFIED BY")[0]
+
+
+def admin_error(code: int | None, admin_user: str, step: str | None = None,
+                message: str | None = None) -> str:
+    """A readable message for a failed setup, without the SQL's parameters."""
     if code == 1045:
-        return (f"Login refused for {admin_user}: check DB_ADMIN_USERNAME / DB_ADMIN_PASSWORD "
+        hint = (f"Login refused for {admin_user}: check DB_ADMIN_USERNAME / DB_ADMIN_PASSWORD "
                 f"in .env.")
-    if code in DENIED_CODES:
-        return (f"{admin_user} is not allowed to create users or grant. Set "
-                f"DB_ADMIN_USERNAME=root and DB_ADMIN_PASSWORD to the MySQL root password "
-                f"(docker compose exec mysql sh -c 'echo \"$MYSQL_ROOT_PASSWORD\"').")
-    return f"Setting up the app user failed (MySQL error {code})."
+    elif code == PARTIAL_REVOKE_CODE:
+        hint = (f"{admin_user} is refused access to a database it would need for this step. "
+                f"Hosted MySQL (e.g. Aiven) keeps even its admin out of some databases.")
+    elif code in DENIED_CODES:
+        hint = (f"{admin_user} is not allowed to create users or grant. Use an admin account: "
+                f"root on Docker (docker compose exec mysql sh -c 'echo \"$MYSQL_ROOT_PASSWORD\"'), "
+                f"avnadmin on Aiven.")
+    else:
+        hint = f"Setting up the app user failed (MySQL error {code})."
+    if step:
+        hint += f"\n  Failed at: {step}"
+    if message:
+        hint += f"\n  MySQL said: {message}"
+    return hint
 
 
 def agent_settings(require_password: bool = True) -> tuple[str, str]:
@@ -179,19 +208,35 @@ def existing_objects(conn) -> dict[str, set[str]]:
 
 
 def apply(admin_engine, cfg: DbConfig, names: Names, user: str, host: str, pw: str) -> Plan:
-    from sqlalchemy import text
+    from sqlalchemy import exc, text
 
     with admin_engine.connect() as conn:
         plan = plan_grants(names, existing_objects(conn))
     with admin_engine.begin() as conn:
         for sql in statements(cfg.name, user, host, plan.grant):
-            conn.execute(text(sql), {"pw": pw} if ":pw" in sql else {})
+            try:
+                conn.execute(text(sql), {"pw": pw} if ":pw" in sql else {})
+            except exc.DBAPIError as e:
+                raise SetupError(step_label(sql), _code(e), _message(e)) from None
     return plan
+
+
+def _message(e) -> str:
+    """MySQL's own error text (never contains bound parameters)."""
+    args = getattr(getattr(e, "orig", None), "args", None)
+    return str(args[1]) if args and len(args) > 1 else type(e).__name__
 
 
 def _code(e) -> int | None:
     args = getattr(getattr(e, "orig", None), "args", None)
     return args[0] if args and isinstance(args[0], int) else None
+
+
+def access_probe(obj: str) -> str:
+    """Tests that obj can be read without reading it. LIMIT 0 still makes MySQL check the
+    grants and resolve the view, but returns at once. LIMIT 1 would compute a grouped view
+    in full first (work_order_sensor_window: every work order against every reading)."""
+    return f"SELECT * FROM `{obj}` LIMIT 0"
 
 
 def check(agent_cfg: DbConfig, names: Names) -> bool:
@@ -205,7 +250,7 @@ def check(agent_cfg: DbConfig, names: Names) -> bool:
     for obj in allowed_objects(names):
         try:
             with engine.connect() as conn:
-                conn.execute(text(f"SELECT * FROM `{obj}` LIMIT 1")).all()
+                conn.execute(text(access_probe(obj))).all()
             print(f"  ok      {obj}")
         except exc.DBAPIError as e:
             kind = classify(_code(e))
@@ -290,8 +335,10 @@ def main() -> None:
 
             try:
                 plan = apply(make_engine(admin), cfg, names, user, a.host, pw)
-            except exc.DBAPIError as e:  # message rebuilt: never echo SQL or parameters
-                sys.exit(admin_error(_code(e), admin.user))
+            except SetupError as e:
+                sys.exit(admin_error(e.code, admin.user, e.step, e.message))
+            except exc.DBAPIError as e:  # e.g. login refused: no statement to name
+                sys.exit(admin_error(_code(e), admin.user, message=_message(e)))
             print_plan(plan, cfg.name, user, a.host)
     except (ValueError, FileNotFoundError) as e:
         sys.exit(str(e))

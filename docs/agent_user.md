@@ -25,8 +25,10 @@ not granted.
 | The audit views for citations: `cmms_machines_audit`, `cmms_work_orders_audit`, `cmms_safety_incidents_audit`, `vibration_temp_audit`, `critical_spares_audit` | the clean tables themselves (`vibration_temp`, `cmms_work_orders`, ...) and `ingest_runs` |
 | | any write, any schema change, granting itself more |
 
-MySQL denies everything not granted, and the script first revokes anything granted
-earlier, so the 11 objects above are all the user can read.
+MySQL denies everything not granted, and every run drops the user and creates it again,
+so nothing granted earlier survives: the 11 objects above are all the user can read.
+(Dropping and recreating, rather than `REVOKE ALL`, also works on hosted MySQL, where
+even the admin account is kept out of some databases.)
 
 **Why views work without access to the tables:** MySQL runs a view with its creator's
 rights (`SQL SECURITY DEFINER`, the default). The views were created by the ingest user,
@@ -56,8 +58,9 @@ DB_ADMIN_PASSWORD=...              # falls back to MYSQL_ROOT_PASSWORD
 - The **app** connects with `AGENT_DB_USERNAME` / `AGENT_DB_PASSWORD`, never `DB_USERNAME`.
 - The **admin** account is only for running this script. The ingest user (`DB_USERNAME`)
   can't create users, so it won't do.
-- Every run sets the app user's password from `.env`, so changing `AGENT_DB_PASSWORD`
-  and re-running changes it.
+- Every run recreates the app user with the password from `.env`, so changing
+  `AGENT_DB_PASSWORD` and re-running changes it. Connections the app already has open
+  keep working until they close; reconnect the app after a run.
 - `--host` (default `%`, any host) is where the app may connect from. Keep `%` with Docker:
   the port mapping makes local connections look remote to MySQL.
 
@@ -100,6 +103,7 @@ SHOW GRANTS FOR 'agent_ro'@'%';   -- USAGE (connect only) + one SELECT line per 
 
 | Message | Cause | Fix |
 |---|---|---|
+| `... is refused access to a database it would need` (MySQL 3879) | hosted MySQL keeps the admin out of some databases; older versions of this script used `REVOKE ALL`, which needs them | use the current script; if it still fails, the `Failed at` and `MySQL said` lines show which step and database |
 | `... is not allowed to create users or grant` (MySQL 1227) | the admin account isn't an admin, e.g. `DB_ADMIN_USERNAME` is the ingest user | `DB_ADMIN_USERNAME=root` (Docker) or `avnadmin` (Aiven) with its password |
 | `Login refused for ...` (MySQL 1045) | wrong admin user or password | check `DB_ADMIN_USERNAME` / `DB_ADMIN_PASSWORD` |
 | `Set AGENT_DB_PASSWORD in .env` | no password for the app user | add it to `.env` |
@@ -119,7 +123,7 @@ is not 3306; the database is usually `defaultdb`).
 
 **Don't create the app user in the Aiven console:** a user made there gets admin-level
 privileges by default. Let this script create it with SQL; even if it already exists,
-the script revokes everything first and grants `SELECT` on the allow-list only. Then run
+the script drops it and recreates it with `SELECT` on the allow-list only. Then run
 `--check`.
 
 Aiven requires encrypted connections; the scripts don't set up SSL yet, so expect to add

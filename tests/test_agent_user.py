@@ -52,10 +52,16 @@ def test_object_with_a_name_column_is_refused():
 
 def test_statements_reset_then_grant_select_only():
     sql = au.statements("jurong", "agent_ro", "%", ["machine_overview"])
-    assert sql[0] == "CREATE USER IF NOT EXISTS 'agent_ro'@'%' IDENTIFIED BY :pw"
-    assert sql[2] == "REVOKE ALL PRIVILEGES, GRANT OPTION FROM 'agent_ro'@'%'"
-    assert sql[3:] == ["GRANT SELECT ON `jurong`.`machine_overview` TO 'agent_ro'@'%'"]
-    assert all("GRANT" not in s or "GRANT SELECT" in s or "REVOKE" in s for s in sql)
+    assert sql[0] == "DROP USER IF EXISTS 'agent_ro'@'%'"        # nothing granted before survives
+    assert sql[1] == "CREATE USER 'agent_ro'@'%' IDENTIFIED BY :pw"
+    assert sql[2:] == ["GRANT SELECT ON `jurong`.`machine_overview` TO 'agent_ro'@'%'"]
+    assert all("GRANT" not in s or s.startswith("GRANT SELECT ON") for s in sql)
+
+
+def test_no_statement_needs_rights_over_every_database():
+    """Aiven keeps avnadmin out of system databases: REVOKE ALL / ON *.* fail there (3879)."""
+    for s in au.statements("defaultdb", "agent_ro", "%", ["machine_overview"]):
+        assert "REVOKE" not in s and "*.*" not in s and "`mysql`" not in s
 
 
 def test_password_is_bound_never_written_into_sql():
@@ -75,9 +81,16 @@ def test_bad_identifiers_are_rejected(db, user, host):
 def test_error_codes():
     assert au.classify(1142) == "denied"      # SELECT/UPDATE/CREATE command denied
     assert au.classify(1143) == "denied"      # column denied
+    assert au.classify(3879) == "denied"      # database denied (hosted MySQL)
     assert au.classify(1146) == "missing"     # table doesn't exist
     assert au.classify(2013) == "error"       # lost connection: not a pass
     assert au.classify(None) == "error"
+
+
+def test_access_check_reads_no_rows():
+    """LIMIT 1 hung on work_order_sensor_window: a grouped view is computed in full first."""
+    assert au.access_probe("work_order_sensor_window") == \
+        "SELECT * FROM `work_order_sensor_window` LIMIT 0"
 
 
 def test_probes_cover_names_raw_writes_and_schema():
@@ -97,11 +110,58 @@ def test_engine_never_puts_parameters_in_errors():
 
 
 def test_admin_errors_are_readable_and_hold_no_secrets():
-    assert "DB_ADMIN_USERNAME=root" in au.admin_error(1227, "ingest")   # no CREATE USER
+    assert "avnadmin on Aiven" in au.admin_error(1227, "ingest")         # no CREATE USER
     assert "Login refused for root" in au.admin_error(1045, "root")
+    assert "Hosted MySQL" in au.admin_error(3879, "avnadmin")
     assert "2013" in au.admin_error(2013, "root")
-    for code in (1227, 1045, 2013):
+    for code in (1227, 1045, 3879, 2013):
         assert ":pw" not in au.admin_error(code, "root")
+
+
+def test_admin_error_names_the_step_and_mysqls_message():
+    msg = au.admin_error(3879, "avnadmin", "CREATE USER 'agent_ro'@'%'",
+                         "Access denied for AuthId `avnadmin`@`%` to database 'mysql'.")
+    assert "Failed at: CREATE USER 'agent_ro'@'%'" in msg
+    assert "MySQL said: Access denied" in msg
+
+
+def test_step_label_stops_before_the_password():
+    sql = au.statements("d", "agent_ro", "%", [])[1]
+    assert au.step_label(sql) == "CREATE USER 'agent_ro'@'%'"
+
+
+def test_failed_step_is_reported_without_the_password():
+    pytest.importorskip("sqlalchemy")
+    from sqlalchemy import exc
+
+    class Orig(Exception):
+        pass
+
+    class Conn:
+        def execute(self, stmt, params=None):
+            sql = str(stmt)
+            if sql.startswith("SELECT"):
+                return []                                         # existing_objects: nothing
+            if sql.startswith("CREATE USER"):
+                raise exc.OperationalError(sql, params, Orig(3879, "Access denied ... 'mysql'"),
+                                           hide_parameters=True)
+
+    class Ctx:
+        def __enter__(self):
+            return Conn()
+
+        def __exit__(self, *a):
+            return False
+
+    class Engine:
+        connect = begin = lambda self: Ctx()
+
+    from db_config import DbConfig
+    cfg = DbConfig(user="u", password="p", host="h", port=3306, name="defaultdb")
+    with pytest.raises(au.SetupError) as e:
+        au.apply(Engine(), cfg, Names(), "agent_ro", "%", "s3cr3t")
+    assert (e.value.step, e.value.code) == ("CREATE USER 'agent_ro'@'%'", 3879)
+    assert "s3cr3t" not in au.admin_error(e.value.code, "avnadmin", e.value.step, e.value.message)
 
 
 def test_dry_run_needs_no_database_and_hides_the_password(monkeypatch, capsys):
