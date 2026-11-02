@@ -100,7 +100,7 @@ The same `.env` as `ingest_logs.py` and `ingest_spares.py`, read through
 ## How it works
 
 ```mermaid
-flowchart TD
+flowchart LR
     SQL[(SQL dump)] --> R[read_dump<br/>no SQL executed]
     R --> RAW[keep each tuple as text<br/>+ line, tuple_no, raw_id]
     R --> T[clean_text_columns]
@@ -366,11 +366,19 @@ work_orders: read 5, loaded 3, rejected 2
 safety_incidents: read 5, loaded 5, rejected 0
   Loaded with gaps: missing_date=1, severity_out_of_range=1, severity_scale_ambiguous=1, severity_scale_unknown=1, unknown_employee=1 (total 5)
   severity_scale: 1_worst=1, 5_worst=1, ambiguous=1, unknown=2 (total 5)
+
+Severity: before 2025-07-01 the scale was 1 = worst (converted); from then 5 = worst.
+          Incidents 2025-07-01 to 2025-07-31 left unconverted (switch-over date unconfirmed).
 ```
 
 Each breakdown line ends with its total. On category lines (`trade`, `severity_scale`, ...)
 it equals the table's loaded rows. On `Loaded with gaps` it counts **warnings**, not rows:
 one row can carry several.
+
+The last line states the severity rule the run used, so the summary records it alongside
+the counts. Once the client confirms the switch-over day and you run with
+`--severity-cutover <date> --severity-ambiguous-until none`, the second line is dropped
+and the first shows the confirmed date.
 
 ---
 
