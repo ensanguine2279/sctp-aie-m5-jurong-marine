@@ -11,7 +11,8 @@ recorded with status='failed' and the error message.
 
 A script that works on the database rather than a file (relationships.py) passes
 its own `sha256`, a fingerprint of what it read, and a label such as '(database)'
-as the source.
+as the source. A script that loads a folder (ingest_images.py) passes
+folder_sha256() of the files in it, with the folder as the source.
 """
 from __future__ import annotations
 
@@ -45,6 +46,21 @@ def file_sha256(path: str) -> str:
         for block in iter(lambda: f.read(1 << 20), b""):
             h.update(block)
     return h.hexdigest()
+
+
+def folder_files(folder: str | Path, extensions) -> list[Path]:
+    """The files directly in `folder` with one of `extensions` (case-insensitive), by name."""
+    exts = {e.lower() for e in extensions}
+    return sorted((p for p in Path(folder).iterdir() if p.is_file() and p.suffix.lower() in exts),
+                  key=lambda p: p.name)
+
+
+def folder_sha256(folder: str | Path, extensions) -> str:
+    """One SHA-256 for a folder of files: the hash of '<name>  <sha256>' lines, sorted by
+    name. Same file names with the same bytes give the same hash; adding, removing,
+    renaming or changing any file changes it. Stands in for file_sha256 in ingest_runs."""
+    lines = [f"{p.name}  {file_sha256(str(p))}" for p in folder_files(folder, extensions)]
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
 
 
 def git_commit() -> str | None:

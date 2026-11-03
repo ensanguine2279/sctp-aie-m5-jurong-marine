@@ -8,7 +8,9 @@ an allow-list of views, then proves it:
 
     allowed   the linking views (machine_overview, work_order_detail, ...), the
               table_relationships catalog, and the *_audit views needed for citations
-    never     cmms_employees, cmms_employees_raw, cmms_employees_audit, any *_raw table,
+              (including the scanned nameplates and incident forms)
+    never     cmms_employees, cmms_employees_raw, cmms_employees_audit, any *_raw table
+              (img_documents_raw keeps a form's "person involved" exactly as read),
               any write, any schema change
 
 Views run with their creator's rights (SQL SECURITY DEFINER, MySQL's default), so the
@@ -57,6 +59,8 @@ def allowed_objects(names: Names) -> list[str]:
         f"{names['safety_incidents']}_audit",
         f"{names['readings']}_audit",
         "critical_spares_audit",
+        f"{names['nameplates']}_audit",               # scanned images: file + SHA-256 cited
+        f"{names['incident_reports']}_audit",
     ]
 
 
@@ -302,13 +306,14 @@ def main() -> None:
                          "Docker port mapping makes local connections look remote)")
     ap.add_argument("--cmms-prefix", default="cmms_")
     ap.add_argument("--sensor-table", default="vibration_temp")
+    ap.add_argument("--image-prefix", default="img_")
     ap.add_argument("--check", action="store_true",
                     help="only test what the app user can and can't read")
     add_common_args(ap)
     a = ap.parse_args()
 
     try:
-        names = Names(a.cmms_prefix, a.sensor_table)
+        names = Names(a.cmms_prefix, a.sensor_table, a.image_prefix)
         names.mapping()
         if a.dry_run:
             from dotenv import load_dotenv

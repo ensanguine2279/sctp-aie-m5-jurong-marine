@@ -3,9 +3,11 @@
 
 Runs, in order, each as its own process exactly as you would by hand:
 
+    audit_sensor_csv.py optional (--audit): profile the sensor CSV before loading it
     ingest_logs.py      sensor log CSV
     ingest_spares.py    critical spares sheet
     ingest_cmms.py      CMMS SQL dump
+    ingest_images.py    scanned nameplates and incident report forms (a folder)
     relationships.py    link the sources, refresh the views and the ER diagram
     agent_user.py       optional (--agent): check or set up the app's read-only user
 
@@ -15,7 +17,8 @@ input files' SHA-256, the run summaries, how the sources linked up, and the code
 
 Where the numbers come from: for a real load, from each run's row in ingest_runs (the
 database's own record), and the report checks each file's SHA-256 against the one
-recorded. For a dry run, from the scripts' printed summaries.
+recorded. For a dry run, from the scripts' printed summaries. A folder input (the images)
+is fingerprinted with lineage.folder_sha256, the same hash ingest_images.py records.
 
 PDPA: the report never copies a script's full output, only its summary lines (counts and
 categories), because a dry run prints sample rows that can include employee names. The
@@ -35,6 +38,7 @@ Usage
     python scripts/pipeline.py --foreign-keys --agent check       # drop/re-add FKs, check the app user
     python scripts/pipeline.py --only cmms,relationships          # some steps only
     python scripts/pipeline.py --save-log                         # keep the full on-screen log too
+    python scripts/pipeline.py --dry-run --audit                  # new sensor file: profile it first
     python scripts/pipeline.py --logs data/logs/vibration_temp_sample.csv --dry-run
 """
 from __future__ import annotations
@@ -51,7 +55,7 @@ from datetime import datetime
 from pathlib import Path
 
 from db_config import add_common_args, load_db_config
-from lineage import file_sha256, git_commit
+from lineage import file_sha256, folder_files, folder_sha256, git_commit
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -65,22 +69,26 @@ class Step:
     key: str
     script: str
     title: str
+    full_output: bool = False  # report all it prints: only for steps that print no personal data
 
 
 STEPS = [
+    Step("audit", "audit_sensor_csv.py", "Sensor CSV audit", full_output=True),
     Step("logs", "ingest_logs.py", "Sensor logs"),
     Step("spares", "ingest_spares.py", "Critical spares"),
     Step("cmms", "ingest_cmms.py", "CMMS dump"),
+    Step("images", "ingest_images.py", "Scanned images"),
     Step("relationships", "relationships.py", "Links between sources"),
     Step("agent_user", "agent_user.py", "App user (PDPA)"),
 ]
 BY_KEY = {s.key: s for s in STEPS}
-INGEST_KEYS = ("logs", "spares", "cmms")
+INGEST_KEYS = ("logs", "spares", "cmms", "images")
 DROP_FKS = Step("drop_fks", "relationships.py", "Drop foreign keys before loading")
 DEFAULT_INPUTS = {
     "logs": "data/logs/vibration_temp_2026H1.csv",
     "spares": "data/tabular/critical_spares.xlsx",
     "cmms": "data/sql/jurongmarine_cmms.sql",
+    "images": "data/images",
 }
 
 
@@ -119,13 +127,19 @@ def parse_only(value: str | None) -> list[str] | None:
 def build_plan(*, inputs: dict[str, str], dry_run: bool = False, recreate: bool = False,
                foreign_keys: bool = False, mermaid: str | None = None,
                agent: str | None = None, env_file: str | None = None,
-               only: list[str] | None = None) -> list[Planned]:
-    """The commands to run, in order. `only` limits the steps (always in pipeline order)."""
+               only: list[str] | None = None, audit: bool = False) -> list[Planned]:
+    """The commands to run, in order. `only` limits the steps (always in pipeline order).
+
+    `audit` profiles the sensor CSV first, before anything is written: it reads the file
+    only, so it takes no --dry-run or --env-file."""
     common = (["--dry-run"] if dry_run else []) + (["--env-file", env_file] if env_file else [])
     if only and "agent_user" in only and not agent:
         agent = "check"
+    audit = audit or bool(only and "audit" in only)
     keys = only or [*INGEST_KEYS, "relationships", *(["agent_user"] if agent else [])]
     plan: list[Planned] = []
+    if audit:
+        plan.append(Planned(BY_KEY["audit"], [inputs["logs"]], inputs["logs"]))
     loads = [k for k in INGEST_KEYS if k in keys]
     if foreign_keys and loads and not dry_run:
         # A reload deletes rows the foreign keys protect, so they go first and come back last.
@@ -212,13 +226,15 @@ def run_command(cmd: list[str], cwd: Path = ROOT, echo: bool = True, log=None) -
 _COLON_PREFIXES = ("Rows read:", "Statements in dump:", "Tables with no spec", "Timestamp formats:",
                    "Temperature units:", "Rejected rows:", "Loaded with gaps:",
                    "Loaded with warnings:", "Severity:", "orphan keys:",
-                   "parent key not unique:", "not checked:")
+                   "parent key not unique:", "not checked:", "Document types:", "OCR engine:",
+                   "Severity scale on forms:", "Machine ids:")
 _PLAIN_PREFIXES = ("Incidents ", "Done.", "Dropped ", "Recorded as run", "Passed", "REFUSED",
                    "Skipped, not created yet", "NO ROWS FOUND", "Catalog written",
                    "ER diagram written")
 _SUMMARY_RES = [
     re.compile(r"^Rev \S+: rows_read=\d+"),                                  # spares
     re.compile(r"^[a-z_]+: read \d+, loaded \d+, rejected \d+$"),           # cmms per table
+    re.compile(r"^[a-z_]+: loaded \d+$"),                                    # images per table
     re.compile(r"^(trade|shift|wo_type|status|severity_scale|reporting): .+\(total \d+\)$"),
     re.compile(r"^(ok|FAIL|skip)\s{2,}\S"),                                  # agent_user check
     re.compile(r"^rows=\d+\s+matched=\d+"),                                  # relationships check
@@ -243,7 +259,7 @@ def summary_lines(lines: list[str]) -> list[str]:
 
 
 _COUNT_RES = [
-    re.compile(r"Rows read: (\d+)\s+loaded: (\d+)\s+rejected: (\d+)"),        # logs, cmms
+    re.compile(r"Rows read: (\d+)\s+loaded: (\d+)\s+rejected: (\d+)"),        # logs, cmms, images
     re.compile(r"rows_read=(\d+), parts_loaded=(\d+), rejected=(\d+)"),        # spares
 ]
 _RUN_RE = re.compile(r"Recorded as run (\d+) in ingest_runs")
@@ -255,6 +271,22 @@ def parse_counts(lines: list[str]) -> dict | None:
             if m := rx.search(line):
                 return dict(zip(("rows_read", "rows_loaded", "rows_rejected"),
                                 map(int, m.groups())))
+    return None
+
+
+_AUDIT_ROWS_RE = re.compile(r"^Rows: (\d+)")
+
+
+def full_output_lines(lines: list[str]) -> list[str]:
+    """Everything a full_output step printed, blank lines dropped, indentation kept."""
+    return [line.rstrip() for line in lines if line.strip()]
+
+
+def parse_audit_counts(lines: list[str]) -> dict | None:
+    """audit_sensor_csv.py loads nothing: its one count is the rows it profiled."""
+    for line in lines:
+        if m := _AUDIT_ROWS_RE.match(line):
+            return {"rows_read": int(m.group(1))}
     return None
 
 
@@ -298,9 +330,12 @@ def run_pipeline(plan: list[Planned], runner=run_command, keep_going: bool = Fal
         status = ("interrupted" if o.interrupted else "ok" if o.exit_code == 0 else "failed")
         to_log(f"--- {status}" + (f", exit code {o.exit_code}" if o.exit_code is not None else "")
                + f", {_duration(o.seconds)}")
+        full = p.step.full_output
         results.append(Result(
-            p, status, o.exit_code, o.seconds, summary_lines(o.stdout),
-            parse_counts(o.stdout), parse_run_id(o.stdout + o.stderr),
+            p, status, o.exit_code, o.seconds,
+            full_output_lines(o.stdout) if full else summary_lines(o.stdout),
+            parse_audit_counts(o.stdout) if full else parse_counts(o.stdout),
+            parse_run_id(o.stdout + o.stderr),
             o.stderr[-ERROR_TAIL:] if status != "ok" else []))
         if status == "interrupted" or (status == "failed" and not keep_going):
             stop = True
@@ -348,13 +383,26 @@ class InputFile:
 
 
 def describe_inputs(plan: list[Planned]) -> list[InputFile]:
-    out = []
-    for p in plan:
-        if not p.input:
+    """Size and SHA-256 of each input. A folder (the images) gets the total size of its
+    images and lineage.folder_sha256, the hash ingest_images.py records in ingest_runs.
+    A file read by two steps (the audit and the sensor load) is listed once, under the step
+    that loads it, so 'Same file as loaded' can be checked."""
+    out, seen = [], set()
+    for p in sorted(plan, key=lambda p: p.step.full_output):   # loading steps first
+        if not p.input or p.input in seen:
             continue
+        seen.add(p.input)
         f = Path(p.input) if Path(p.input).is_absolute() else ROOT / p.input
-        out.append(InputFile(p.step.key, p.input, f.stat().st_size, file_sha256(str(f)))
-                   if f.is_file() else InputFile(p.step.key, p.input))
+        if f.is_dir():
+            from ingest_images import IMAGE_EXTS
+
+            files = folder_files(f, IMAGE_EXTS)
+            out.append(InputFile(p.step.key, p.input, sum(x.stat().st_size for x in files),
+                                 folder_sha256(f, IMAGE_EXTS)) if files
+                       else InputFile(p.step.key, p.input))
+        else:
+            out.append(InputFile(p.step.key, p.input, f.stat().st_size, file_sha256(str(f)))
+                       if f.is_file() else InputFile(p.step.key, p.input))
     return out
 
 
@@ -418,8 +466,10 @@ def render_report(meta: dict, results: list[Result], inputs: list[InputFile],
                  f"{_cell(r.run_id)} | {_cell(c.get('rows_read'))} | "
                  f"{_cell(c.get('rows_loaded'))} | {_cell(c.get('rows_rejected'))} |")
     L += ["", "For `relationships.py`, Read / Loaded / Rejected are rows checked / matched / "
-          "orphans. Counts for a load come from `ingest_runs`; for a dry run, from the "
-          "scripts' summaries.", ""]
+          "orphans. For `ingest_images.py`, one row is one image. `audit_sensor_csv.py` "
+          "loads nothing: Read is the rows it profiled, and \"ok\" means it ran, not that the "
+          "file is clean; its findings are under Details. Counts for a load come from "
+          "`ingest_runs`; for a dry run, from the scripts' summaries.", ""]
 
     if inputs:
         L += ["## Input files", "",
@@ -502,6 +552,9 @@ def main(argv: list[str] | None = None, runner=run_command) -> int:
     ap.add_argument("--no-mermaid", action="store_true", help="don't rewrite the ER diagram")
     ap.add_argument("--agent", choices=["check", "setup"],
                     help="also run agent_user.py: --check only, or full setup + check")
+    ap.add_argument("--audit", action="store_true",
+                    help="first profile the sensor CSV with audit_sensor_csv.py (read-only, "
+                         "about 20-40 s): formats, units, ids, gaps, duplicates, outliers")
     ap.add_argument("--keep-going", action="store_true",
                     help="run the remaining steps after a failure")
     ap.add_argument("--report", metavar="PATH",
@@ -524,14 +577,15 @@ def main(argv: list[str] | None = None, runner=run_command) -> int:
                                          else a.mermaid)
     plan = build_plan(inputs=inputs, dry_run=a.dry_run, recreate=a.recreate,
                       foreign_keys=a.foreign_keys, mermaid=mermaid, agent=a.agent,
-                      env_file=env_file, only=only)
+                      env_file=env_file, only=only, audit=a.audit)
 
     started = datetime.now().astimezone()
     stamp = f"{started:%Y%m%d-%H%M%S}" + ("_dry-run" if a.dry_run else "")
     report = Path(a.report) if a.report else ROOT / "reports" / f"pipeline_{stamp}.md"
     options = [o for o, on in [("--dry-run", a.dry_run), ("--recreate", a.recreate),
                                ("--foreign-keys", a.foreign_keys), ("--keep-going", a.keep_going),
-                               (f"--agent {a.agent}", a.agent), (f"--only {a.only}", a.only)] if on]
+                               ("--audit", a.audit), (f"--agent {a.agent}", a.agent),
+                               (f"--only {a.only}", a.only)] if on]
     if a.dry_run:
         database = "not used (dry run)"
     else:

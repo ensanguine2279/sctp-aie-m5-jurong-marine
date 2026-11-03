@@ -9,7 +9,7 @@ in it can drop or overwrite our tables.
 - **Script:** `scripts/ingest_cmms.py`
 - **Shared modules:** `scripts/db_config.py` (settings, DB connection), `scripts/lineage.py` (run log)
 - **Tests:** `tests/test_cmms.py` (`pytest`, no database needed)
-- **Data audit:** problems found in the client's dump, with record IDs, in [`TRAP_LIST.md`](TRAP_LIST.md#cmms-dump-jurongmarine_cmmssql)
+- **Data audit:** problems found in the client's dump, with record IDs, in [`trap_list.md`](trap_list.md#cmms-dump-jurongmarine_cmmssql)
 
 ---
 
@@ -72,7 +72,7 @@ The client's dump is clean in form: every date is `YYYY-MM-DD`, every number is 
 and every key is present and unique. Its problems are in the meaning of the data (the
 severity flip, descriptions that don't fit the machine, coded `lost_days`), which is why
 most of them are client questions rather than reject rules. See
-[`TRAP_LIST.md`](TRAP_LIST.md#cmms-dump-jurongmarine_cmmssql).
+[`trap_list.md`](trap_list.md#cmms-dump-jurongmarine_cmmssql).
 
 ---
 
@@ -210,7 +210,7 @@ The data supports the rule. Before the cutover, 36 of 48 incidents are logged 4 
 after it, 24 of 37 are logged 1 or 2. Converted with `6 − s`, the old period has the
 same shape as the new one. Only two incidents fall in July 2025: **906** (logged 3, the
 same on both scales) and **907** (logged 2, so 2 or 4 depending on the cutover day).
-Details in [`TRAP_LIST.md`](TRAP_LIST.md) (C1, C2).
+Details in [`trap_list.md`](trap_list.md) (C1, C2).
 
 ### Duplicates: `split_rejects`
 

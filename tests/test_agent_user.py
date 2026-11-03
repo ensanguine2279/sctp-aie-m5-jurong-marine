@@ -25,8 +25,17 @@ def test_allow_list_never_includes_employees_or_raw_tables():
 
 
 def test_grants_follow_the_ingest_prefixes():
-    objs = au.allowed_objects(Names("acme_", "sensors"))
+    objs = au.allowed_objects(Names("acme_", "sensors", "scan_"))
     assert "acme_work_orders_audit" in objs and "sensors_audit" in objs
+    assert "scan_nameplates_audit" in objs and "scan_incident_reports_audit" in objs
+
+
+def test_scanned_images_are_cited_but_raw_ocr_is_never_granted():
+    """img_documents_raw keeps a form's 'person involved' exactly as read (maybe a name)."""
+    objs = au.allowed_objects(Names())
+    assert {"img_nameplates_audit", "img_incident_reports_audit", "machine_nameplate",
+            "incident_report_vs_cmms"} <= set(objs)
+    assert not any("documents" in o for o in objs)
 
 
 def test_everything_allowed_and_existing_is_granted():
@@ -172,4 +181,5 @@ def test_dry_run_needs_no_database_and_hides_the_password(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "s3cr3t" not in out and "IDENTIFIED BY ****" in out
     assert "GRANT SELECT ON `jurong`.`incident_detail`" in out
+    assert "GRANT SELECT ON `jurong`.`img_incident_reports_audit`" in out
     assert "cmms_employees" not in out.split("Will then check")[0]

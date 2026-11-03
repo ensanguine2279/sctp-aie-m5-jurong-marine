@@ -10,7 +10,7 @@ load is recorded.
 - **Shared modules:** `scripts/db_config.py` (settings, DB connection), `scripts/lineage.py` (run log)
 - **Tests:** `tests/test_spares.py` (`pytest`, no database needed)
 - **Companion:** [`ingest_logs.md`](ingest_logs.md) for the sensor log script, which uses the same structure
-- **Data audit:** problems found in the client's sheet, cell by cell, in [`TRAP_LIST.md`](TRAP_LIST.md#critical-spares-sheet-critical_sparesxlsx)
+- **Data audit:** problems found in the client's sheet, cell by cell, in [`trap_list.md`](trap_list.md#critical-spares-sheet-critical_sparesxlsx)
 
 ---
 

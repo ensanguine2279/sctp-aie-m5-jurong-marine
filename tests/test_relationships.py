@@ -7,9 +7,9 @@ from datetime import date
 import pytest
 
 import relationships as rel
-from relationships import (ENTITIES, RELATIONSHIPS, VIEWS, Check, Names, check_relationship,
-                           enforced_names, fingerprint, mermaid_doc, plan_foreign_key,
-                           render_view, run_totals, to_mermaid)
+from relationships import (ENTITIES, RELATIONSHIPS, REPORT_FIELDS, VIEWS, Check, Names,
+                           check_relationship, enforced_names, fingerprint, mermaid_doc,
+                           plan_foreign_key, render_view, run_totals, to_mermaid)
 
 BY_NAME = {r.name: r for r in RELATIONSHIPS}
 
@@ -59,6 +59,12 @@ def test_orphan_text_sorted_by_rows_and_truncated():
     assert len(c.orphan_text(100)) == 100 and c.orphan_text(100).endswith("...")
 
 
+def test_scanned_form_for_an_incident_missing_from_the_cmms_is_an_orphan():
+    """Integer keys (incident_id) are checked like text keys."""
+    c = check_relationship({900: 1, 999: 1}, {900: 1, 901: 1})
+    assert c.matched == 1 and c.orphans == {"999": 1}
+
+
 # ------------------------------------------------------------- foreign keys ---
 
 def test_fk_added_only_when_clean():
@@ -76,6 +82,11 @@ def test_soft_relationships_never_get_a_fk():
     for name in ("spare_machine", "wo_employee", "incident_employee"):
         action, reason = plan_foreign_key(BY_NAME[name], Check(rows=1, matched=1), False)
         assert action == "skip" and reason
+
+
+def test_image_links_can_be_enforced_when_clean():
+    for name in ("nameplate_machine", "report_incident", "report_machine"):
+        assert plan_foreign_key(BY_NAME[name], Check(rows=1, matched=1), False) == ("add", "")
 
 
 def test_enforced_detects_fk_made_by_ingest_script():
@@ -103,13 +114,22 @@ def test_names_follow_ingest_prefix_and_reject_bad_identifiers():
         Names("x; DROP TABLE y; --", "vibration_temp").mapping()
 
 
+def test_image_tables_follow_their_prefix():
+    n = Names("cmms_", "vibration_temp", "scan_")
+    assert n["nameplates"] == "scan_nameplates"
+    assert n["incident_reports"] == "scan_incident_reports"
+    assert Names()["nameplates"] == "img_nameplates"
+    with pytest.raises(ValueError):
+        Names(image_prefix="img`; --").mapping()
+
+
 # -------------------------------------------------------------------- views ---
 
 @pytest.mark.parametrize("view", list(VIEWS))
 def test_views_use_the_real_table_names(view):
-    sql = render_view(view, Names("acme_", "sensors"), 7)
+    sql = render_view(view, Names("acme_", "sensors", "scan_"), 7)
     assert f"CREATE OR REPLACE VIEW {view} AS" in sql
-    assert "cmms_" not in sql and "vibration_temp" not in sql
+    assert "cmms_" not in sql and "vibration_temp" not in sql and "img_" not in sql
     assert "{" not in sql                                    # every placeholder filled
 
 
@@ -137,6 +157,35 @@ def test_sensor_window_days():
             render_view("work_order_sensor_window", Names(), bad)
 
 
+def test_form_comparison_has_one_branch_per_field_on_one_collation():
+    """Dates, numbers and text all compared as text with ONE explicit collation, so MySQL
+    never meets two collations it can't mix (error 1267)."""
+    sql = render_view("incident_report_vs_cmms", Names(), 7)
+    assert sql.count("UNION ALL") == len(REPORT_FIELDS) - 1
+    assert sql.count("COLLATE utf8mb4_unicode_ci") == 2 * len(REPORT_FIELDS)
+    for name, _, _ in REPORT_FIELDS:
+        assert f"'{name}' AS field" in sql
+    assert "LEFT JOIN cmms_safety_incidents i ON i.incident_id = r.incident_id" in sql
+
+
+def test_form_comparison_uses_the_converted_severity_only():
+    """The auditor test: never compare a 1-worst number with a 5-worst number."""
+    sql = render_view("incident_report_vs_cmms", Names(), 7)
+    assert "severity_5_worst" in sql and "severity_as_logged" not in sql
+
+
+def test_ambiguous_july_is_left_open_not_counted_as_a_disagreement():
+    sql = render_view("incident_report_vs_cmms", Names(), 7)
+    assert "x.logged_value = 'ambiguous' THEN NULL" in sql
+    assert "WHEN NOT x.incident_logged THEN NULL" in sql        # form with no CMMS incident
+
+
+def test_nameplate_view_keeps_machines_without_a_photo():
+    sql = render_view("machine_nameplate", Names(), 7)
+    assert "FROM cmms_machines m" in sql and "LEFT JOIN img_nameplates n" in sql
+    assert "has_nameplate" in sql and "grease_interval_h" in sql and "lubricant" in sql
+
+
 # --------------------------------------------------------------- ER diagram ---
 
 def test_mermaid_solid_for_fk_dotted_for_soft():
@@ -144,6 +193,8 @@ def test_mermaid_solid_for_fk_dotted_for_soft():
     assert 'critical_spares ||--o{ critical_spare_machines : "is listed for"' in m
     assert 'cmms_machines ||..o{ vibration_temp : "has sensor readings"' in m
     assert 'cmms_employees |o..o{ cmms_work_orders : "did work orders"' in m
+    assert 'cmms_machines ||..o{ img_nameplates : "has nameplate photo"' in m
+    assert 'cmms_safety_incidents ||..o{ img_incident_reports : "has scanned form"' in m
 
 
 def test_mermaid_lists_every_entity_once():
