@@ -14,10 +14,10 @@ you can paste into the data quality report.
 | `scripts/relationships.py` | The loaded tables: links the four sources | [`relationships.md`](docs/relationships.md), [ER diagram](docs/er_diagram.md) |
 | `scripts/agent_user.py` | Creates the app's read-only database user (PDPA) | [`agent_user.md`](docs/agent_user.md) |
 | `scripts/pipeline.py` | Runs all of the above in order, writes a Markdown report | [`pipeline.md`](docs/pipeline.md) |
-| `scripts/audit_sensor_csv.py` | Profiles a sensor CSV without loading it: formats, units, ids, gaps, duplicates, outliers, with line numbers | [`trap_list.md`](docs/trap_list.md#sensor-log-vibration_temp_2026h1csv) |
+| `scripts/audit_sensor_csv.py` | Profiles a sensor CSV without loading it: formats, units, ids, gaps, duplicates, outliers, with line numbers. Run it alone, or first in the pipeline with `pipeline.py --audit` | [`trap_list.md`](docs/trap_list.md#sensor-log-vibration_temp_2026h1csv) |
 
 Every data-quality problem found so far, with evidence, is in
-[`TRAP_LIST.md`](docs/TRAP_LIST.md).
+[`trap_list.md`](docs/trap_list.md).
 
 ```bash
 python -m venv .venv
@@ -379,7 +379,7 @@ result; across machines, compare `fields_raw` and `ocr_notes`.
 What we know is uncertain in the client's data, what the scripts do about it now, and
 what we need from someone else to settle it. Keep this list current: it feeds the data
 quality report, and the client will be asked these questions. The evidence for every
-problem, by source, is in [`TRAP_LIST.md`](docs/TRAP_LIST.md); the `C`, `S`, `L` and `I`
+problem, by source, is in [`trap_list.md`](docs/trap_list.md); the `C`, `S`, `L` and `I`
 numbers below refer to it.
 
 ### Needs the client's input
@@ -436,7 +436,7 @@ FROM cmms_work_orders GROUP BY 1, 2, 3 HAVING n > 1 ORDER BY wo_date;
 
 | Item | How |
 |---|---|
-| Only 2 of the 42 scans are audited (`IR-2024-900.jpg`, `nameplate_BLAST-01.jpg`); the other 11 nameplates, 29 forms and the SOPs aren't | `pipeline.py --only images,relationships`, then the audit queries in [`ingest_images.md`](docs/ingest_images.md#audit-queries); add findings to [`TRAP_LIST.md`](docs/TRAP_LIST.md#images-images-first-two-scans). Try `--engine llm` on scans that are rejected or full of `ocr_disagreed_*` |
+| Only 2 of the 42 scans are audited (`IR-2024-900.jpg`, `nameplate_BLAST-01.jpg`); the other 11 nameplates, 29 forms and the SOPs aren't | `pipeline.py --only images,relationships`, then the audit queries in [`ingest_images.md`](docs/ingest_images.md#audit-queries); add findings to [`trap_list.md`](docs/trap_list.md#images-images-first-two-scans). Try `--engine llm` on scans that are rejected or full of `ocr_disagreed_*` |
 | Whether `emp_code` with trade and shift identifies a person in a 32-person shop (PDPA) | team decision: if so, drop `emp_code` from `incident_detail` / `work_order_detail` |
 | Names also appear in the spares sheet title (`storeman: Halim`) | stored only in `critical_spares_raw.source_title`, which the app user can't read; keep it that way |
 | Views, grants and run logging have only been tested without a database | run `relationships.py` and `agent_user.py --check` on the real database |
@@ -575,7 +575,7 @@ With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
 | `tests/test_cmms.py` | [`ingest_cmms.py`](docs/ingest_cmms.md): dump parsing (`;` and quotes inside strings, comments, multi-row INSERTs with line and tuple numbers, column lists, malformed tuples); ids, numbers (`S$1,050`), day-first dates; the severity flip (old scale inverted, July 2025 left unconverted, a confirmed cutover, out-of-range values never guessed); on a messy dump: duplicates and conflicting duplicates, orphan machines/employees flagged not dropped, raw text kept, `work_orders.status` not clashing with the load status; employee names masked to their last 4 characters in everything printed | 27 |
 | `tests/test_images.py` | [`ingest_images.py`](docs/ingest_images.md): the sample scans' real OCR text (mistakes included); label parsing, the printed severity scale, voting across three readings, id fixes (`BLAST` stays `BLAST`), forms that contradict the date rule or settle July 2025, an unreadable scale never guessed, a name never stored as `emp_code`, welding ratings, lb -> kg, every reject reason, the LLM engine, the cache, the folder hash, audit views without OCR text; reads the real scans if Tesseract is installed | 35 |
 | `tests/test_relationships.py` | [`relationships.py`](docs/relationships.md): orphan/NULL/`ALL` counting, keys compared like MySQL (case, spaces), when a foreign key is added or skipped, table prefixes, no view exposes `emp_name`, incidents (and the form comparison) only offer `severity_5_worst`, the form comparison on one collation with July left open, machines without a nameplate kept, the ER diagram, the run fingerprint, successful and failed runs recorded in `ingest_runs` | 44 |
-| `tests/test_pipeline.py` | [`pipeline.py`](docs/pipeline.md): step order and flags (images after the CMMS), foreign keys dropped first and re-added last (never in a dry run), sample rows with names kept out of the report, counts from every script's summary, the images folder hashed like the load, a failure stopping the rest, `--keep-going`, Ctrl+C, the report's tables, `--save-log` | 29 |
+| `tests/test_pipeline.py` | [`pipeline.py`](docs/pipeline.md): step order and flags (images after the CMMS), foreign keys dropped first and re-added last (never in a dry run), sample rows with names kept out of the report, counts from every script's summary, the images folder hashed like the load, a failure stopping the rest, `--keep-going`, Ctrl+C, the report's tables, `--save-log`, `--audit` | 34 |
 | `tests/test_agent_user.py` | `agent_user.py`: the allow-list never includes employees or raw tables (nor the raw OCR), the scans' audit views granted, objects with `emp_name` refused, missing objects skipped, `SELECT`-only grants after a full reset, password never written into SQL or output, bad user/host/database names rejected, MySQL error codes read correctly, errors never include the password, failed steps named with MySQL's message, no statement needing rights over every database, the access check reads no rows | 21 |
 | `tests/test_shared.py` | `db_config.py`, `lineage.py`: password never printed, passwords with special characters, values of a failed query kept out of error messages, table-name check, file SHA-256, a run recorded without a file, values passed to MySQL are plain Python types | 7 |
 
@@ -588,15 +588,15 @@ for the app user's grants, `agent_user.py --check` is the real test.
 ### Reading the output
 
 ```
-tests/test_agent_user.py .....................                      [ 10%]
-tests/test_cmms.py ...........................                      [ 25%]
-tests/test_images.py ...................................            [ 43%]
-tests/test_logs.py ..........                                       [ 48%]
-tests/test_pipeline.py .............................                [ 63%]
-tests/test_relationships.py ............................................ [ 86%]
-tests/test_shared.py .......                                        [ 90%]
+tests/test_agent_user.py .....................                      [ 11%]
+tests/test_cmms.py ...........................                      [ 24%]
+tests/test_images.py ...................................            [ 42%]
+tests/test_logs.py ..........                                       [ 47%]
+tests/test_pipeline.py ..................................           [ 65%]
+tests/test_relationships.py ............................................[ 87%]
+tests/test_shared.py .......                                        [ 91%]
 tests/test_spares.py ..................                             [100%]
-========== 191 passed in 9.80s ==========
+========== 196 passed in 9.80s ==========
 ```
 
 | Mark | Meaning |

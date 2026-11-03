@@ -104,7 +104,7 @@ def test_duplicates_against_rows_already_in_db():
 
 
 # ------------------------------------------------------------ line endings ---
-# TRAP_LIST.md L8: the client's vibration_temp_2026H1.csv has Windows (CRLF) line
+# trap_list.md L8: the client's vibration_temp_2026H1.csv has Windows (CRLF) line
 # endings. A reader that splits on '\n' only leaves '\r' on the last field, so the
 # header becomes 'temp_unit\r' and the load stops. These check that a CRLF file is
 # read exactly like the same file with LF endings.

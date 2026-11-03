@@ -31,7 +31,7 @@ Pipeline (each step is a small function you can test on its own):
       -> load              one transaction
 
 Why the printed scale matters: the CMMS severity flipped from 1 = worst to 5 = worst in
-July 2025 and old records were never converted (TRAP_LIST C1-C3). ingest_cmms.py converts
+July 2025 and old records were never converted (trap list C1-C3, docs/trap_list.md). ingest_cmms.py converts
 by date. Each form says which scale it used, so a form can confirm the date rule, contradict
 it, or settle an incident the date rule leaves ambiguous (July 2025). Forms whose printed
 scale disagrees with the date rule are flagged form_scale_contradicts_date_rule.
@@ -644,7 +644,7 @@ def add_nameplate_warnings(df: pd.DataFrame, machine_ids: set | None = None) -> 
         & ~df["lubricant"].map(has_viscosity_grade),
         "missing_grease_interval": ~df["grease_interval_given"],
         "bad_grease_interval": df["grease_interval_given"] & df["grease_interval_h"].isna(),
-        # '450 A @ 60%' is how welding power sources are rated (TRAP_LIST I-list)
+        # '450 A @ 60%' is how welding power sources are rated (trap list I2, docs/trap_list.md)
         "duty_cycle_rating_on_non_welder": df["duty_cycle_pct"].notna()
         & ~df["asset_tag"].fillna("").str.startswith("WELD"),
     }

@@ -91,6 +91,23 @@ Recorded as run 15 in ingest_runs.
 Done. 2 orphan row(s) in total - see orphan_values in table_relationships.
 """.splitlines()
 
+# What audit_sensor_csv.py prints on the client's file, trimmed.
+AUDIT_OUT = """File: data/logs/vibration_temp_2026H1.csv  bytes=4598467  CRLF lines=106385  BOM=False
+Rows: 106384  Columns: ['timestamp', 'machine_id', 'vib_rms_mms', 'temp', 'temp_unit']
+
+[Timestamps] formats: {'iso_offset': 79596, 'epoch_ms': 26788}
+  range (SGT): 2026-01-01 00:00:00+08:00 -> 2026-06-30 23:48:00+08:00
+
+[Machine ids] as written: {'CNC-01': 21268, 'CNC-02': 21291}
+  not in CMMS after trim/upper: []
+
+[Duplicates] same machine+instant: 0 rows in 0 groups
+  exact duplicate lines: 0
+
+[Sampling / gaps] per machine (minutes):
+  CMP-01: n=21276 typical=12 min  irregular=436  gaps>36min=0  total_gap_h=0.0
+""".splitlines()
+
 
 def fake_runner(outcomes: dict[str, Outcome]):
     """Runner keyed by script name; records the commands it was given."""
@@ -412,3 +429,55 @@ def test_main_returns_1_on_failure(tmp_path, monkeypatch):
     run = fake_runner({"relationships.py": Outcome(1, [], ["boom"], 0.1)})
     assert pl.main(["--dry-run", "--only", "relationships", "--report",
                     str(tmp_path / "r.md")], runner=run) == 1
+
+
+# ------------------------------------------------------------------ --audit ---
+
+def test_audit_runs_first_on_the_sensor_file_and_writes_nothing():
+    plan = pl.build_plan(inputs=INPUTS, audit=True, foreign_keys=True, env_file="/x/.env")
+    assert [p.step.key for p in plan][:3] == ["audit", "drop_fks", "logs"]   # before any write
+    assert plan[0].args == [INPUTS["logs"]]                    # read-only: no --env-file
+    dry = pl.build_plan(inputs=INPUTS, audit=True, dry_run=True)
+    assert dry[0].args == [INPUTS["logs"]]                     # the script has no --dry-run
+    assert dry[0].display() == f"python scripts/audit_sensor_csv.py {INPUTS['logs']}"
+
+
+def test_audit_is_off_by_default_and_can_be_picked_with_only():
+    assert "audit" not in [p.step.key for p in pl.build_plan(inputs=INPUTS)]
+    assert [p.step.key for p in pl.build_plan(inputs=INPUTS, only=["audit"])] == ["audit"]
+    assert [p.step.key for p in pl.build_plan(inputs=INPUTS, only=["logs", "audit"])] == \
+        ["audit", "logs"]
+
+
+def test_audit_findings_go_into_the_report_in_full():
+    """The sensor file holds no personal data, so all of the audit's findings are kept."""
+    run = fake_runner({"audit_sensor_csv.py": Outcome(0, AUDIT_OUT, [], 19.2)})
+    r = pl.run_pipeline(pl.build_plan(inputs=INPUTS, only=["audit"]), run,
+                        echo=lambda *a, **k: None)[0]
+    assert r.status == "ok" and r.counts == {"rows_read": 106384}
+    assert "[Duplicates] same machine+instant: 0 rows in 0 groups" in r.summary
+    assert "  not in CMMS after trim/upper: []" in r.summary          # indentation kept
+    assert "" not in r.summary and len(r.summary) == 10
+
+
+def test_a_file_read_twice_is_listed_once_under_the_loading_step(tmp_path):
+    csv = tmp_path / "x.csv"
+    csv.write_text("a\n", encoding="utf-8")
+    both = pl.build_plan(inputs={**INPUTS, "logs": str(csv)}, only=["audit", "logs"])
+    assert [(f.step, f.path) for f in pl.describe_inputs(both)] == [("logs", str(csv))]
+    alone = pl.build_plan(inputs={**INPUTS, "logs": str(csv)}, only=["audit"])
+    assert [f.step for f in pl.describe_inputs(alone)] == ["audit"]
+
+
+def test_main_with_audit_reports_its_findings(tmp_path, monkeypatch):
+    monkeypatch.setattr(pl, "git_dirty", lambda: False)
+    run = fake_runner({"audit_sensor_csv.py": Outcome(0, AUDIT_OUT, [], 19.2)})
+    report = tmp_path / "r.md"
+    assert pl.main(["--dry-run", "--audit", "--only", "logs", "--report", str(report)],
+                   runner=run) == 0
+    assert [c[1].rsplit("/", 1)[-1] for c in run.calls] == ["audit_sensor_csv.py",
+                                                             "ingest_logs.py"]
+    md = report.read_text(encoding="utf-8")
+    assert "| 1 | Sensor CSV audit | `audit_sensor_csv.py` | ok | 19.2s | – | 106,384 | – | – |" \
+        in md
+    assert "[Sampling / gaps] per machine (minutes):" in md and "--audit" in md

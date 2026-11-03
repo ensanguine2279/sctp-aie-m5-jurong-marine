@@ -8,7 +8,7 @@ from, and every load is recorded.
 - **Script:** `scripts/ingest_logs.py`
 - **Shared modules:** `scripts/db_config.py` (settings, DB connection), `scripts/lineage.py` (run log)
 - **Tests:** `tests/test_logs.py` (`pytest`, no database needed)
-- **Data audit:** `scripts/audit_sensor_csv.py` profiles a sensor file without loading it; findings in [`TRAP_LIST.md`](TRAP_LIST.md#sensor-log-vibration_temp_2026h1csv)
+- **Data audit:** `scripts/audit_sensor_csv.py` profiles a sensor file without loading it; findings in [`trap_list.md`](trap_list.md#sensor-log-vibration_temp_2026h1csv)
 
 ---
 

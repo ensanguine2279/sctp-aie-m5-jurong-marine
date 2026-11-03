@@ -62,7 +62,7 @@ employee codes included, through the proxy: say so if asked about PDPA.
 ## Severity: the scale printed on the form
 
 The CMMS severity scale flipped in July 2025 and old records were never converted
-([TRAP_LIST C1-C3](TRAP_LIST.md)). `ingest_cmms.py` converts **by date**. The forms print
+([trap list C1-C3](trap_list.md#cmms-dump-jurongmarine_cmmssql)). `ingest_cmms.py` converts **by date**. The forms print
 their scale next to the field: `Severity (1 = MOST SEVERE): 4`. So for every incident with a
 scanned form, the form says which scale that number is on:
 
