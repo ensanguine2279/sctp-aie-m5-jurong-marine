@@ -14,7 +14,7 @@ you can paste into the data quality report.
 | `scripts/relationships.py` | The loaded tables: links the four sources | [`relationships.md`](docs/relationships.md), [ER diagram](docs/er_diagram.md) |
 | `scripts/agent_user.py` | Creates the app's read-only database user (PDPA) | [`agent_user.md`](docs/agent_user.md) |
 | `scripts/pipeline.py` | Runs all of the above in order, writes a Markdown report | [`pipeline.md`](docs/pipeline.md) |
-| `scripts/audit_sensor_csv.py` | Profiles a sensor CSV without loading it: formats, units, ids, gaps, duplicates, outliers, with line numbers | [`TRAP_LIST.md`](docs/trap_list.md#sensor-log-vibration_temp_2026h1csv) |
+| `scripts/audit_sensor_csv.py` | Profiles a sensor CSV without loading it: formats, units, ids, gaps, duplicates, outliers, with line numbers | [`trap_list.md`](docs/trap_list.md#sensor-log-vibration_temp_2026h1csv) |
 
 Every data-quality problem found so far, with evidence, is in
 [`TRAP_LIST.md`](docs/TRAP_LIST.md).
