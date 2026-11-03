@@ -199,6 +199,27 @@ def test_value_that_fails_every_check_is_kept_but_flagged():
     assert notes == [{"field": "asset_tag", "issue": "failed_format", "chose": "BLAST!"}]
 
 
+def test_vote_keeps_the_only_reading_shaped_like_a_machine_id():
+    """trap_list I10: IR-2025-914.jpg. No two passes agreed on the location; only the
+    adaptive reading is a machine id. Choosing 'CRN-O02' gave machine_id CRN-002, an orphan."""
+    readings = {"gray": {"location": "CRN-O02 — workshop bay", "severity": "3)"},
+                "otsu": {"location": "CRN-G2 — workshop bay", "severity": "5"},
+                "adaptive": {"location": "CRN-02 — workshop bay", "severity": "5"}}
+    fields, notes = ii.vote(readings, "incident_report")
+    assert fields["location"] == "CRN-02 — workshop bay"
+    assert fields["severity"] == "5"                                  # majority
+    assert {n["field"] for n in notes if n["issue"] == "disagreed"} == {"location", "severity"}
+    assert not [n for n in notes if n["issue"] == "failed_format"]
+
+
+def test_machine_id_check_allows_a_letter_but_not_a_misread_digit():
+    """PMP-T01 is a real id; CRN-O02 / CRN-G2 / BLAST-O1 are OCR misreads (trap_list I10)."""
+    check = ii.VALIDATORS["incident_report"]["location"]
+    assert check("PMP-T01 — test bay") and check("CRN-02 — workshop bay")
+    assert not check("CRN-O02 — workshop bay") and not check("CRN-G2 — workshop bay")
+    assert not ii.VALIDATORS["nameplate"]["asset_tag"]("BLAST-O1")
+
+
 # ----------------------------------------------------------- incident forms ---
 
 def test_incident_form_end_to_end():
@@ -440,10 +461,3 @@ def test_the_real_scans_read_correctly():
         ("1_worst", 2, 1)
     assert (p["asset_tag"], p["serial_no"], p["grease_interval_h"], p["lubricant"]) == \
         ("BLAST-01", "CU6744884", 1000, "Shell Tonna S3 M68")
-
-def test_machine_id_check_allows_a_letter_but_not_a_misread_digit():
-    """PMP-T01 is a real id; CRN-O02 / CRN-G2 / BLAST-O1 are OCR misreads (trap_list I10)."""
-    check = ii.VALIDATORS["incident_report"]["location"]
-    assert check("PMP-T01 — test bay") and check("CRN-02 — workshop bay")
-    assert not check("CRN-O02 — workshop bay") and not check("CRN-G2 — workshop bay")
-    assert not ii.VALIDATORS["nameplate"]["asset_tag"]("BLAST-O1")
