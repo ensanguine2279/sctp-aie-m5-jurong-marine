@@ -395,15 +395,13 @@ def scale_from_label(label) -> str | None:
 
 ISO_VG = {2, 3, 5, 7, 10, 15, 22, 32, 46, 68, 100, 150, 220, 320, 460, 680, 1000, 1500}
 
-
 def has_viscosity_grade(v) -> bool:
     """Industrial oils end in an ISO VG grade: 'Shell Tonna S3 M68' -> 68."""
     m = re.search(r"(\d+)\s*$", _text(v) or "")
     return bool(m) and int(m.group(1)) in ISO_VG
 
-
 # Machine ids: letters, dash, digits, with an optional letter before the digits (PMP-T01).
-TAG = r"[A-Z]{2,6}-[A-Z]?\d{1,3}"
+TAG = r"[A-Z]{2,6}-[A-HJKMNPR-Z]?\d{2,3}"   # PMP-T01 yes; CRN-O02, CRN-G2, BLAST-O1 no
 VALIDATORS = {
     "incident_report": {
         "report_no": lambda v: bool(re.fullmatch(r"IR-\d{4}-\d{1,5}", norm_id(v, 2) or "")),

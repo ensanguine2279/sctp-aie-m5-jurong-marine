@@ -11,10 +11,10 @@ Week 1 checkpoint (due Thu 5 Nov 2026). Every problem we have found in the clien
 | `sql/jurongmarine_cmms.sql` | Whole dump, read in full | 12 machines, 32 employees, 1,603 work orders (10001–11603), 85 incidents (900–984) |
 | `tabular/critical_spares.xlsx` | Every cell (openpyxl) | 1 sheet `Spares`, A1:H13, 10 parts, rev 11 |
 | `logs/vibration_temp_2026H1.csv` | Every row (`scripts/audit_sensor_csv.py`) | 106,384 readings + header, 4.6 MB, SHA-256 `05c18527…6bd023` |
-| `images/` (12 nameplates, 30 incident reports) | **2 of 42 so far**: `IR-2024-900.jpg`, `nameplate_BLAST-01.jpg`, read with `scripts/ingest_images.py` and checked by eye against the CMMS | 1 incident form, 1 nameplate |
+| `images/` (12 nameplates, 30 incident reports) | **All 30 incident forms loaded** and linked to the CMMS by `relationships.py` (one orphan: I10). Checked by eye: `IR-2024-900.jpg`, `IR-2025-914.jpg`, `nameplate_BLAST-01.jpg`. The 12 nameplates' link results and the field-by-field form comparison aren't reviewed yet | 30 incident forms; nameplates not yet reviewed |
 | `docs/sops/` | **Not yet** | |
 
-`vibration_temp_sample.csv` is exactly the first 7 lines of the full file, so it adds nothing of its own. The other 40 images and the SOPs will add traps; the brief already warns the nameplate photos are bad.
+`vibration_temp_sample.csv` is exactly the first 7 lines of the full file, so it adds nothing of its own. The rest of the images and the SOPs will add traps; the brief already warns the nameplate photos are bad.
 
 ---
 
@@ -84,7 +84,7 @@ Not a data error, but the headline for Ask 2: **CNC-02's vibration rises from 2.
 
 ## Images (`images/`): first two scans
 
-Read with `python scripts/ingest_images.py data/images --dry-run` ([`ingest_images.md`](ingest_images.md)), which reads each image three ways (Tesseract on three preprocessed versions) and votes per field. Both scans were also checked by eye and against the CMMS. Only 2 of the 42 images are in hand so far; the rest will add evidence (especially I5).
+Read with `python scripts/ingest_images.py data/images --dry-run` ([`ingest_images.md`](ingest_images.md)), which reads each image three ways (Tesseract on three preprocessed versions) and votes per field. The scans below were also checked by eye and against the CMMS. All 30 forms are loaded; reviewing `incident_report_vs_cmms` for all of them will add evidence (especially I5).
 
 **Incident form `IR-2024-900.jpg` vs CMMS incident 900:** all seven shared fields agree (date 2024-07-01, LTH-01, EMP001, `weld flash burn`, severity 4, 0 lost days, `found during audit`). The form adds immediate action, root cause, signature and the printed severity scale.
 **Nameplate `nameplate_BLAST-01.jpg` vs CMMS machine BLAST-01:** model `Custom SG-Fab` and the 2014 date agree. The plate adds serial, power, weight, lubricant and grease interval, which no other source has.
@@ -98,14 +98,15 @@ Read with `python scripts/ingest_images.py data/images --dry-run` ([`ingest_imag
 | I5 | **Each form prints the severity scale it used** | `Severity (1 = MOST SEVERE): 4` on IR-2024-900 (Jul 2024): the old scale, as the date rule says, so 4 → 2 on the 5 = worst scale, matching the CMMS. | Per-record evidence for C1–C3: the forms can confirm the date rule, catch old records already on the new scale (C3), and settle 907 (C2). | Handled: `severity_scale` from the label, `severity_5_worst`; flags `form_scale_contradicts_date_rule`, `form_scale_in_cutover_month`; view `incident_report_vs_cmms`. Us: check all 30 forms, starting with 901, 907, 919, 920, 937, 982 |
 | I6 | **The paper form repeats the description mismatch** | Form 900 says `weld flash burn` on `LTH-01 — workshop bay` (a manual lathe), like the CMMS. | For 900 at least, C6 isn't a CMMS typing error: the mismatch was on the original form. | Client (Q3) |
 | I7 | **Root cause is in an attachment we don't have** | `Root cause (5-Why attached?): see attached`; no 5-Why sheet is in the scan or the data package. | "Why did incident 900 happen" can't be answered; the app must say the 5-Why isn't in the data. | Flagged `root_cause_in_attachment`. Client (Q14) |
-| I8 | **Slash dates are day first** (checked, no trap) | Form `01/07/2024` = CMMS `2024-07-01`. | Confirms the day-first assumption used by `ingest_cmms.py` and `ingest_images.py`. | Checked on one form |
+| I8 | **Slash dates are day first** (checked, no trap) | Form 900 `01/07/2024` = CMMS `2024-07-01`; form 914 `03/01/2025` = CMMS `2025-01-03`. Both would be wrong read month-first. | Confirms the day-first assumption used by `ingest_cmms.py` and `ingest_images.py`. | Checked on two forms |
 | I9 | **Personal data on the forms** | Employee code and a handwritten signature on every form. | Signatures are personal data; a form may name a person instead of a code. | Handled: only `signature_present` stored; a person that isn't an `EMP` code is not stored in the clean table; raw OCR not granted to the app user |
+| I10 | **A too-loose machine-id check let an OCR misread win the vote** | `IR-2025-914.jpg` (CMMS incident 914, CRN-02). The location was read three ways: `CRN-O02` (gray), `CRN-G2` (otsu), `CRN-02` (adaptive). The loaded row has `machine_id = CRN-002`. The format check `TAG = [A-Z]{2,6}-[A-Z]?\d{1,3}` had been loosened so `PMP-T01` would pass, which let all three readings pass too; with no two agreeing, the tie went to the first pass (gray), and the id clean-up turned its letter O into a zero. The stricter `[A-Z]{2,6}-\d{1,3}` rejects the real id `PMP-T01`. Every other field matches incident 914 (date, EMP029, `weld flash burn`, severity 5 on the printed old scale, 0 lost days, `reported same day`); the garbled severity (`3)` / `5` / `5`) was fixed by majority. | The only orphan in `table_relationships` (`report_machine`, 1 of 30). A wrong machine on an incident sends "incidents on CRN-02" answers astray, and with `--foreign-keys` the link can't be enforced. | Fix: `TAG = [A-Z]{2,6}-[A-HJKMNPR-Z]?\d{2,3}` (a letter after the dash, but not I, L, O, Q or S, which OCR confuses with digits; then 2-3 digits): passes `PMP-T01`, `CRN-02`, `BLAST-01`; rejects `CRN-O02`, `CRN-G2`, `BLAST-O1`. Tests `test_vote_keeps_the_only_reading_shaped_like_a_machine_id`, `test_machine_id_check_allows_a_letter_but_not_a_misread_digit`. Flagged `ocr_disagreed_location`; the CMMS value is untouched. Us: reload the images and re-run `relationships.py` (expect 0 orphans); check `LOCATION_TAG` also accepts `PMP-T01` |
 
 ---
 
 ## Client questions raised by this list
 
-All of them are in one list, Q1–Q15 in [`README.md`](../README.md#needs-the-clients-input). This list added **Q10** (C4, what `lost_days` values mean), **Q11** (C7, why QA inspectors and crane operators log repairs), **Q12** (C9, are same-day PM pairs double entries) and **Q13** (C13, is 24.1 h real), and new evidence for **Q4** (the CNC-02 trend under L-items). The first two scans added **Q14** (I7, where are the 5-Why sheets) and **Q15** (I2–I3, is BLAST-01's nameplate on the right machine, and which oil does it take), and new evidence for **Q1**, **Q2** (I5, the printed severity scale) and **Q3** (I6).
+All of them are in one list, Q1–Q15 in [`README.md`](../README.md#needs-the-clients-input). This list added **Q10** (C4, what `lost_days` values mean), **Q11** (C7, why QA inspectors and crane operators log repairs), **Q12** (C9, are same-day PM pairs double entries) and **Q13** (C13, is 24.1 h real), and new evidence for **Q4** (the CNC-02 trend under L-items). The scans added **Q14** (I7, where are the 5-Why sheets) and **Q15** (I2–I3, is BLAST-01's nameplate on the right machine, and which oil does it take), and new evidence for **Q1**, **Q2** (I5, the printed severity scale) and **Q3** (I6).
 
 ## Reproducing the evidence
 
@@ -128,6 +129,12 @@ WHERE status <> 'closed' GROUP BY 1;
 -- I5: scanned forms vs the CMMS, field by field (after the image load + relationships.py)
 SELECT incident_id, field, form_value, logged_value, agrees
 FROM incident_report_vs_cmms ORDER BY incident_id, field;
+
+-- I10: scanned forms whose machine isn't a CMMS machine
+SELECT r.incident_id, r.machine_id AS form_machine, i.machine_id AS cmms_machine, d.source_file, d.ocr_notes
+FROM img_incident_reports r JOIN img_documents_raw d ON d.raw_id = r.raw_id
+LEFT JOIN cmms_safety_incidents i ON i.incident_id = r.incident_id
+LEFT JOIN cmms_machines m ON m.machine_id = r.machine_id WHERE m.machine_id IS NULL;
 
 -- I1: every field OCR was unsure about, with each reading
 SELECT source_file, ocr_notes FROM img_documents_raw WHERE ocr_notes IS NOT NULL;

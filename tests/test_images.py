@@ -440,3 +440,10 @@ def test_the_real_scans_read_correctly():
         ("1_worst", 2, 1)
     assert (p["asset_tag"], p["serial_no"], p["grease_interval_h"], p["lubricant"]) == \
         ("BLAST-01", "CU6744884", 1000, "Shell Tonna S3 M68")
+
+def test_machine_id_check_allows_a_letter_but_not_a_misread_digit():
+    """PMP-T01 is a real id; CRN-O02 / CRN-G2 / BLAST-O1 are OCR misreads (trap_list I10)."""
+    check = ii.VALIDATORS["incident_report"]["location"]
+    assert check("PMP-T01 — test bay") and check("CRN-02 — workshop bay")
+    assert not check("CRN-O02 — workshop bay") and not check("CRN-G2 — workshop bay")
+    assert not ii.VALIDATORS["nameplate"]["asset_tag"]("BLAST-O1")
