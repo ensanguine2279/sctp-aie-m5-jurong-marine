@@ -18,6 +18,18 @@ REQUIRED_KEYS = ("DB_USERNAME", "DB_HOST", "DB_NAME")
 # DB_PASSWORD must be present but may be empty (local root with no password).
 
 
+def getenv(key: str, default: str | None = None) -> str | None:
+    """os.getenv without stray line endings.
+
+    A .env saved on Windows has CRLF line endings. python-dotenv reads it correctly, but
+    a shell that loads it (`source .env`, `export $(cat .env | xargs)`) keeps the '\\r':
+    AGENT_DB_USERNAME becomes 'agent_ro\\r', and shell values win over .env. Only CR/LF
+    are removed, so a password that really starts or ends with a space is kept.
+    """
+    value = os.getenv(key, default)
+    return value.strip("\r\n") if isinstance(value, str) else value
+
+
 @dataclass(frozen=True)
 class DbConfig:
     user: str
@@ -61,19 +73,19 @@ def load_db_config(env_file: str | None = None) -> DbConfig:
     else:
         load_dotenv()
 
-    missing = [k for k in REQUIRED_KEYS if not os.getenv(k)]
-    if os.getenv("DB_PASSWORD") is None:
+    missing = [k for k in REQUIRED_KEYS if not getenv(k)]
+    if getenv("DB_PASSWORD") is None:
         missing.append("DB_PASSWORD")
     if missing:
         raise ValueError(
             f"Missing setting(s) {', '.join(missing)}. Add them to .env (see .env.example)."
         )
     return DbConfig(
-        user=os.environ["DB_USERNAME"],
-        password=os.environ["DB_PASSWORD"],
-        host=os.environ["DB_HOST"],
-        port=int(os.getenv("DB_PORT", "3306")),
-        name=os.environ["DB_NAME"],
+        user=getenv("DB_USERNAME"),
+        password=getenv("DB_PASSWORD"),
+        host=getenv("DB_HOST"),
+        port=int(getenv("DB_PORT", "3306")),
+        name=getenv("DB_NAME"),
     )
 
 

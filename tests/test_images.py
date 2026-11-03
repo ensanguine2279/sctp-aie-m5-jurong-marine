@@ -137,6 +137,42 @@ def test_ids_fixed_only_where_digits_belong():
     assert ii.pd.isna(tags[1])                                # 'BLAST!' has no number: no tag
 
 
+@pytest.mark.parametrize("line,tag", [
+    # what Tesseract read on the CNC-01, PMP-T01 and WELD-02 plates (all three were rejected
+    # as missing_key before: '{ME}' and 'GME)' didn't match the label, and the T in PMP-T01
+    # didn't fit the tag pattern)
+    ("ASSET TAG {ME}: CNC-01", "CNC-01"),
+    ("ASSET TAG (JME): PMP-T01", "PMP-T01"),
+    ("ASSET TAG UME): PMP-T01", "PMP-T01"),
+    ("ASSET TAG (JME): PMP-TO1", "PMP-T01"),            # O for 0 fixed, the T kept
+    ("ASSET TAG GME): WELD-02", "WELD-02"),
+    ("ASSET TAG (JME: BLAST-01", "BLAST-01"),
+    ("ASSET TAG: MEX-01", "MEX-01"),                     # a tag starting 'ME' isn't a label
+])
+def test_asset_tag_read_whatever_ocr_makes_of_the_jme_label(line, tag):
+    plate = PLATE_GRAY.replace("ASSET TAG (JME): BLAST-01", line)
+    out, _ = run(Extraction(ii.TESSERACT_TAG, texts={"gray": plate}))
+    assert out["nameplate"]["asset_tag"].tolist() == [tag]
+
+
+def test_tag_with_a_letter_before_the_digits():
+    assert ii.asset_tag_value("GME): WELD-02") == "WELD-02"
+    assert ii.asset_tag_value("UME): BLAST!") == "BLAST!"     # label gone, value kept as read
+    out = ii.clean_nameplate_ids(ii.pd.DataFrame(
+        {"asset_tag": ["pmp-tO1", "LTH-O1"], "serial_no": [None] * 2,
+         "manufacturer": [None] * 2, "model": [None] * 2, "lubricant": [None] * 2}))
+    assert out["asset_tag"].tolist() == ["PMP-T01", "LTH-01"]  # O as 0 unless a digit follows
+    assert ii.VALIDATORS["nameplate"]["asset_tag"]("PMP-T01")
+    assert not ii.VALIDATORS["nameplate"]["asset_tag"]("PMP-TO1")   # vote prefers PMP-T01
+
+
+def test_incident_form_on_a_machine_with_a_letter_in_its_id():
+    """Forms 941 and 955 name PMP-T01: before, they were loaded with missing_machine_id."""
+    out, _ = run(form_text(location="PMP-T01 — pump room"))
+    assert out["incident_report"].iloc[0]["machine_id"] == "PMP-T01"
+    assert "missing_machine_id" not in (out["documents"].iloc[0]["warnings"] or "")
+
+
 # ------------------------------------------------------------------- voting ---
 
 def test_vote_takes_the_majority_reading_that_passes_its_check():
