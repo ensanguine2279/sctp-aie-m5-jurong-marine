@@ -344,6 +344,19 @@ def clean_lubricant(v) -> str | None:
     return re.sub(r"\$(?=\d)", "S", s) if s else None     # OCR: 'Tonna $3' -> 'Tonna S3'
 
 
+# The red italic '(JME)' after ASSET TAG, as OCR reads it: '(JME):', 'UME):', '{ME}:',
+# 'GME):', '(JME:'. Only stripped when a bracket or colon closes it, so a tag that starts
+# with 'ME' is left alone.
+_ASSET_LABEL = re.compile(r"^[(\[{]?\s*[A-Z]?ME\s*(?:[)\]}]\s*[:;.]?|[:;.])\s*", re.I)
+
+
+def asset_tag_value(v) -> str | None:
+    """The value after ASSET TAG with the '(JME)' label removed, however OCR garbled it:
+    '{ME}: CNC-01' -> 'CNC-01', 'GME): WELD-02' -> 'WELD-02', 'UME): BLAST!' -> 'BLAST!'."""
+    s = _text(v)
+    return _text(_ASSET_LABEL.sub("", s)) if s else None
+
+
 def parse_nameplate_text(text: str) -> dict:
     L = clean_lines(text)
     maker = next((ln for ln in L if re.fullmatch(r"[A-Z][A-Z &.\-]{2,}", ln)), None)
@@ -357,8 +370,7 @@ def parse_nameplate_text(text: str) -> dict:
         "weight": field_after(L, r"WEIGHT"),
         "lubricant": clean_lubricant(field_after(L, r"LUBRICANT")),
         "grease_interval": field_after(L, r"GREASE\s*INTERVAL"),
-        # '(JME)' in red italics is often read as 'UME)' or '(JME'
-        "asset_tag": field_after(L, r"ASSET\s*TAG\s*(?:\(?\s*[JU]ME\s*\)?)?"),
+        "asset_tag": asset_tag_value(field_after(L, r"ASSET\s*TAG")),
     }
 
 
@@ -390,7 +402,8 @@ def has_viscosity_grade(v) -> bool:
     return bool(m) and int(m.group(1)) in ISO_VG
 
 
-TAG = r"[A-Z]{2,6}-\d{1,3}"
+# Machine ids: letters, dash, digits, with an optional letter before the digits (PMP-T01).
+TAG = r"[A-Z]{2,6}-[A-Z]?\d{1,3}"
 VALIDATORS = {
     "incident_report": {
         "report_no": lambda v: bool(re.fullmatch(r"IR-\d{4}-\d{1,5}", norm_id(v, 2) or "")),
@@ -468,7 +481,14 @@ def _int_text(v) -> int | None:
 # ------------------------------------------------------------ incident forms ---
 
 REPORT_NO = re.compile(r"^IR-?(\d{4})-?(\d{1,5})$")
-LOCATION_TAG = re.compile(r"\b([A-Za-z]{2,6})\s*-\s*([0-9OoIlSs]{1,3})\b")
+# The optional letter before the digits is lazy, so 'LTH-O1' is LTH-01 (O read for 0)
+# while 'PMP-T01' keeps its T.
+LOCATION_TAG = re.compile(r"\b([A-Za-z]{2,6})\s*-\s*([A-Za-z]??)([0-9OoIlSs]{1,3})\b")
+
+
+def machine_tag(m: re.Match | None) -> str | None:
+    """'pmp-tO1' -> 'PMP-T01': letters upper-cased, OCR slips fixed in the digits only."""
+    return f"{m.group(1).upper()}-{m.group(2).upper()}{fix_digits(m.group(3))}" if m else None
 
 
 def clean_report_ids(df: pd.DataFrame) -> pd.DataFrame:
@@ -488,8 +508,7 @@ def clean_incident_fields(df: pd.DataFrame) -> pd.DataFrame:
     df["location_raw"] = df["location"].map(_text)
 
     def machine(v):
-        m = LOCATION_TAG.search(_text(v) or "")
-        return f"{m.group(1).upper()}-{fix_digits(m.group(2))}" if m else None
+        return machine_tag(LOCATION_TAG.search(_text(v) or ""))
     df["machine_id"] = df["location"].map(machine)
     code = df["person"].map(lambda v: norm_id(v, 3))
     is_code = code.map(lambda c: bool(c and re.fullmatch(r"EMP\d{3,}", c)))
@@ -576,13 +595,13 @@ def add_incident_warnings(df: pd.DataFrame, machine_ids: set | None = None) -> p
 # ---------------------------------------------------------------- nameplates ---
 
 def clean_nameplate_ids(df: pd.DataFrame) -> pd.DataFrame:
-    """asset_tag 'blast-O1' -> 'BLAST-01' (letters stay letters); serial 'CU67448B4'-style
-    OCR slips fixed only after the 2-letter prefix."""
+    """asset_tag 'blast-O1' -> 'BLAST-01', 'PMP-TO1' -> 'PMP-T01' (letters stay letters);
+    serial 'CU67448B4'-style OCR slips fixed only after the 2-letter prefix."""
     df = df.copy()
 
     def tag(v):
-        m = re.match(r"\s*([A-Za-z]{2,6})\s*-?\s*([0-9OoIlSs]{1,3})\b", _text(v) or "")
-        return f"{m.group(1).upper()}-{fix_digits(m.group(2))}" if m else None
+        return machine_tag(re.match(r"\s*([A-Za-z]{2,6})\s*-?\s*([A-Za-z]??)([0-9OoIlSs]{1,3})\b",
+                                    _text(v) or ""))
     df["asset_tag"] = df["asset_tag"].map(tag)
     df["serial_no"] = df["serial_no"].map(lambda v: norm_id(v, 2))
     for c in ("manufacturer", "model", "lubricant"):

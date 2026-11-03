@@ -35,12 +35,11 @@ Usage
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import sys
 from dataclasses import dataclass
 
-from db_config import DbConfig, add_common_args, load_db_config
+from db_config import DbConfig, add_common_args, getenv, load_db_config
 from relationships import CATALOG, VIEWS, Names
 
 PII_COLUMNS = {"emp_name"}  # columns the app user must never be able to read
@@ -184,19 +183,19 @@ def admin_error(code: int | None, admin_user: str, step: str | None = None,
 
 
 def agent_settings(require_password: bool = True) -> tuple[str, str]:
-    user = os.getenv("AGENT_DB_USERNAME", "agent_ro")
-    pw = os.getenv("AGENT_DB_PASSWORD")
+    user = getenv("AGENT_DB_USERNAME", "agent_ro")
+    pw = getenv("AGENT_DB_PASSWORD")
     if require_password and not pw:
         raise ValueError("Set AGENT_DB_PASSWORD in .env (the app's read-only user).")
     return user, pw or ""
 
 
 def admin_config(cfg: DbConfig) -> DbConfig:
-    pw = os.getenv("DB_ADMIN_PASSWORD", os.getenv("MYSQL_ROOT_PASSWORD"))
+    pw = getenv("DB_ADMIN_PASSWORD", getenv("MYSQL_ROOT_PASSWORD"))
     if pw is None:
         raise ValueError("Set DB_ADMIN_PASSWORD (or MYSQL_ROOT_PASSWORD) in .env: "
                          "creating users needs an admin account.")
-    return DbConfig(user=os.getenv("DB_ADMIN_USERNAME", "root"), password=pw,
+    return DbConfig(user=getenv("DB_ADMIN_USERNAME", "root"), password=pw,
                     host=cfg.host, port=cfg.port, name=cfg.name)
 
 
@@ -320,7 +319,7 @@ def main() -> None:
 
             load_dotenv(a.env_file) if a.env_file else load_dotenv()
             user, _ = agent_settings(require_password=False)
-            db = os.getenv("DB_NAME") or "<DB_NAME>"
+            db = getenv("DB_NAME") or "<DB_NAME>"
             objs = allowed_objects(names)
             print_plan(Plan(objs, [], {}), db, user, a.host)
             print("\nSQL (password bound as a parameter, never written out):")

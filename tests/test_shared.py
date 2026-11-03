@@ -8,7 +8,7 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
-from db_config import DbConfig, safe_identifier, to_records
+from db_config import DbConfig, getenv, load_db_config, safe_identifier, to_records
 from lineage import file_sha256, start_run
 
 
@@ -42,6 +42,28 @@ def test_table_name_whitelist():
     assert safe_identifier("vibration_temp") == "vibration_temp"
     with pytest.raises(ValueError):
         safe_identifier("x; DROP TABLE y")
+
+
+def test_getenv_drops_windows_line_endings_but_keeps_spaces(monkeypatch):
+    """`source .env` on a CRLF file leaves '\\r' on every value."""
+    monkeypatch.setenv("X_USER", "agent_ro\r")
+    monkeypatch.setenv("X_PW", " pass word \r\n")
+    monkeypatch.delenv("X_MISSING", raising=False)
+    assert getenv("X_USER") == "agent_ro"
+    assert getenv("X_PW") == " pass word "          # a password's own spaces are kept
+    assert getenv("X_MISSING") is None and getenv("X_MISSING", "d") == "d"
+
+
+def test_db_settings_with_windows_line_endings(monkeypatch, tmp_path):
+    for key, value in {"DB_USERNAME": "ingest\r", "DB_PASSWORD": "s3cr3t\r",
+                       "DB_HOST": "localhost\r", "DB_PORT": "3307\r",
+                       "DB_NAME": "jurong_marine\r"}.items():
+        monkeypatch.setenv(key, value)
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")         # keep the repo's .env out of the test
+    cfg = load_db_config(str(env_file))
+    assert (cfg.user, cfg.password, cfg.host, cfg.port, cfg.name) == \
+        ("ingest", "s3cr3t", "localhost", 3307, "jurong_marine")
 
 
 # --------------------------------------------------------------- lineage ---

@@ -173,13 +173,53 @@ def test_failed_step_is_reported_without_the_password():
     assert "s3cr3t" not in au.admin_error(e.value.code, "avnadmin", e.value.step, e.value.message)
 
 
-def test_dry_run_needs_no_database_and_hides_the_password(monkeypatch, capsys):
+AGENT_KEYS = ("AGENT_DB_USERNAME", "AGENT_DB_PASSWORD", "DB_ADMIN_USERNAME",
+              "DB_ADMIN_PASSWORD", "MYSQL_ROOT_PASSWORD", "DB_NAME")
+
+
+@pytest.fixture
+def clean_env(monkeypatch, tmp_path):
+    """The test's own settings only: none from the shell, none from the repo's .env.
+
+    Without this, whatever the developer has exported (or in .env) leaks in: a CRLF .env
+    loaded with `source .env` made AGENT_DB_USERNAME 'agent_ro\\r' and failed the test.
+    """
+    for key in AGENT_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    return env_file
+
+
+def _dry_run(monkeypatch, capsys, env_file):
+    monkeypatch.setattr("sys.argv", ["agent_user.py", "--dry-run", "--env-file", str(env_file)])
+    au.main()
+    return capsys.readouterr().out
+
+
+def test_dry_run_needs_no_database_and_hides_the_password(monkeypatch, capsys, clean_env):
     monkeypatch.setenv("AGENT_DB_PASSWORD", "s3cr3t")
     monkeypatch.setenv("DB_NAME", "jurong")
-    monkeypatch.setattr("sys.argv", ["agent_user.py", "--dry-run"])
-    au.main()
-    out = capsys.readouterr().out
+    out = _dry_run(monkeypatch, capsys, clean_env)
     assert "s3cr3t" not in out and "IDENTIFIED BY ****" in out
+    assert "App user 'agent_ro'@'%'" in out                        # the default user
     assert "GRANT SELECT ON `jurong`.`incident_detail`" in out
     assert "GRANT SELECT ON `jurong`.`img_incident_reports_audit`" in out
     assert "cmms_employees" not in out.split("Will then check")[0]
+
+
+def test_settings_with_windows_line_endings_still_work(monkeypatch, capsys, clean_env):
+    """`source .env` on a CRLF file leaves '\\r' on every value; shell values win over .env."""
+    monkeypatch.setenv("AGENT_DB_USERNAME", "agent_ro\r")
+    monkeypatch.setenv("AGENT_DB_PASSWORD", "s3cr3t\r")
+    monkeypatch.setenv("DB_NAME", "jurong\r")
+    out = _dry_run(monkeypatch, capsys, clean_env)
+    assert "App user 'agent_ro'@'%' on database `jurong`" in out
+    assert "\r" not in out
+    assert au.agent_settings() == ("agent_ro", "s3cr3t")
+
+
+def test_crlf_env_file_is_read_without_carriage_returns(monkeypatch, capsys, clean_env):
+    clean_env.write_bytes(b"AGENT_DB_USERNAME=agent_ro\r\nDB_NAME=jurong\r\n")
+    out = _dry_run(monkeypatch, capsys, clean_env)
+    assert "App user 'agent_ro'@'%' on database `jurong`" in out
