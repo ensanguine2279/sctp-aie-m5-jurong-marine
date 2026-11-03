@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Establish the relationships between the cleaned tables of all three sources.
+"""Establish the relationships between the cleaned tables of all four sources.
 
 Each ingest script loads one source on its own:
 
     ingest_cmms.py    cmms_machines, cmms_employees, cmms_work_orders, cmms_safety_incidents
     ingest_logs.py    vibration_temp
     ingest_spares.py  critical_spares, critical_spare_machines
+    ingest_images.py  img_nameplates, img_incident_reports
 
-They share keys (machine_id, emp_code, part_no), but nothing ties the sources together
-in the database. This script does, in four steps:
+They share keys (machine_id, emp_code, part_no, incident_id), but nothing ties the sources
+together in the database. This script does, in four steps:
 
     check                 every relationship: child rows, matched, NULL, orphans (child
                           values with no parent row), ambiguous parents (key not unique)
@@ -26,6 +27,9 @@ Relationships (child -> parent):
     critical_spare_machines.part_no      -> critical_spares.part_no    FK already made by ingest_spares.py
     cmms_work_orders.emp_code            -> cmms_employees.emp_code
     cmms_safety_incidents.emp_code       -> cmms_employees.emp_code
+    img_nameplates.asset_tag             -> cmms_machines.machine_id   nameplate photo -> CMMS
+    img_incident_reports.incident_id     -> cmms_safety_incidents.incident_id   scanned form -> CMMS
+    img_incident_reports.machine_id      -> cmms_machines.machine_id
 
 Views:
 
@@ -35,6 +39,10 @@ Views:
     incident_detail           incidents + machine + employee trade/shift, severity on the
                               5 = worst scale only (severity_5_worst)
     work_order_sensor_window  each work order with the sensor readings in the N days up to it
+    machine_nameplate         one row per machine: what its nameplate photo says (oil, grease
+                              interval, power, ...), has_nameplate = 0 if there is no photo
+    incident_report_vs_cmms   one row per scanned form and field: the value on the form, the
+                              value logged in the CMMS, and whether they agree
 
 Orphans are reported, never dropped: the views use LEFT JOINs and flag them with
 machine_known / employee_known.
@@ -80,6 +88,7 @@ class Names:
     """Logical table name -> real table name (the ingest scripts' --prefix / --table)."""
     cmms_prefix: str = "cmms_"
     sensor_table: str = "vibration_temp"
+    image_prefix: str = "img_"
 
     def mapping(self) -> dict[str, str]:
         m = {
@@ -90,6 +99,8 @@ class Names:
             "readings": self.sensor_table,
             "spares": "critical_spares",
             "spare_machines": "critical_spare_machines",
+            "nameplates": f"{self.image_prefix}nameplates",
+            "incident_reports": f"{self.image_prefix}incident_reports",
         }
         return {k: safe_identifier(v) for k, v in m.items()}
 
@@ -142,6 +153,22 @@ ENTITIES: dict[str, list[tuple[str, str, str, str]]] = {
         ("varchar", "part_no", "PK, FK", ""),
         ("varchar", "machine_code", "PK, FK", "ALL = every machine"),
     ],
+    "nameplates": [
+        ("varchar", "asset_tag", "UK, FK", "= machine_id"), ("varchar", "manufacturer", "", ""),
+        ("varchar", "model", "", ""), ("varchar", "serial_no", "", ""),
+        ("char", "mfg_month", "", "YYYY-MM"), ("decimal", "power_kw", "", ""),
+        ("decimal", "weight_kg", "", ""), ("varchar", "lubricant", "", ""),
+        ("int", "grease_interval_h", "", ""),
+    ],
+    "incident_reports": [
+        ("int", "incident_id", "UK, FK", "from report no IR-yyyy-nnn"),
+        ("varchar", "report_no", "", ""), ("date", "incident_date", "", ""),
+        ("varchar", "machine_id", "FK", ""), ("varchar", "emp_code", "", ""),
+        ("varchar", "severity_scale", "", "printed on the form"),
+        ("tinyint", "severity_5_worst", "", "converted with the printed scale"),
+        ("int", "lost_days", "", ""), ("varchar", "immediate_action", "", ""),
+        ("varchar", "root_cause", "", ""), ("tinyint", "signature_present", "", ""),
+    ],
 }
 
 
@@ -179,6 +206,14 @@ RELATIONSHIPS = [
     Relationship("incident_employee", "safety_incidents", "emp_code", "employees", "emp_code",
                  "involved in incidents", "|o", False,
                  note="emp_code has no unique key in cmms_employees, so no FK"),
+    Relationship("nameplate_machine", "nameplates", "asset_tag", "machines", "machine_id",
+                 "has nameplate photo", "||", True, note="nameplate photo -> CMMS machine"),
+    Relationship("report_incident", "incident_reports", "incident_id", "safety_incidents",
+                 "incident_id", "has scanned form", "||", True,
+                 note="scanned incident form -> CMMS incident (IR-yyyy-nnn -> nnn)"),
+    Relationship("report_machine", "incident_reports", "machine_id", "machines", "machine_id",
+                 "named on scanned forms", "|o", True,
+                 note="machine on the scanned form -> CMMS machine"),
 ]
 
 
@@ -289,6 +324,28 @@ _EMPLOYEES = """(SELECT emp_code, MIN(trade) AS trade, MIN(shift) AS shift
           FROM {employees} WHERE emp_code IS NOT NULL
           GROUP BY emp_code HAVING COUNT(*) = 1)"""
 
+# Scanned form vs CMMS, one row per field. Every value is cast to text with ONE explicit
+# collation, so a date, a number and a string compare the same way and MySQL never meets
+# two collations it can't mix. Severity is compared only on the 5 = worst scale.
+_TEXT = "CAST({} AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_unicode_ci"
+REPORT_FIELDS = [  # (field, on the form, logged in the CMMS)
+    ("incident_date", "r.incident_date", "i.incident_date"),
+    ("machine_id", "r.machine_id", "i.machine_id"),
+    ("emp_code", "r.emp_code", "i.emp_code"),
+    ("description", "r.description", "i.description"),
+    ("severity_scale", "r.severity_scale", "i.severity_scale"),
+    ("severity_5_worst", "r.severity_5_worst", "i.severity_5_worst"),
+    ("lost_days", "r.lost_days", "i.lost_days"),
+    ("reporting", "r.reporting", "i.reporting"),
+]
+_REPORT_UNION = "\n      UNION ALL\n".join(
+    f"""      SELECT r.incident_id, r.report_no, '{name}' AS field,
+             {_TEXT.format(form)} AS form_value, {_TEXT.format(logged)} AS logged_value,
+             (i.incident_id IS NOT NULL) AS incident_logged, r.raw_id
+      FROM {{incident_reports}} r
+      LEFT JOIN {{safety_incidents}} i ON i.incident_id = r.incident_id"""
+    for name, form, logged in REPORT_FIELDS)
+
 VIEWS: dict[str, tuple[tuple[str, ...], str]] = {
     "machine_spares": (("machines", "spares", "spare_machines"), """
     CREATE OR REPLACE VIEW machine_spares AS
@@ -362,6 +419,37 @@ VIEWS: dict[str, tuple[tuple[str, ...], str]] = {
       (SELECT MAX(v.sampled_at) FROM {readings} v WHERE v.machine_id = m.machine_id)
         AS last_reading
     FROM {machines} m
+    """),
+    "machine_nameplate": (("machines", "nameplates"), """
+    CREATE OR REPLACE VIEW machine_nameplate AS
+    SELECT m.machine_id, m.machine_name, m.model AS logged_model, m.year_installed,
+           (n.asset_tag IS NOT NULL) AS has_nameplate,
+           n.manufacturer, n.model AS plate_model, n.serial_no, n.mfg_month,
+           n.power_kw, n.phases, n.voltage_min_v, n.voltage_max_v, n.capacity_raw,
+           n.rated_current_a, n.duty_cycle_pct, n.weight_kg, n.lubricant, n.grease_interval_h,
+           CASE WHEN n.asset_tag IS NULL OR m.model IS NULL THEN NULL
+                WHEN LOWER(TRIM(m.model)) IN (LOWER(TRIM(CONCAT_WS(' ', n.manufacturer, n.model))),
+                                              LOWER(TRIM(n.model))) THEN 1 ELSE 0 END
+             AS model_agrees,
+           CASE WHEN n.mfg_month IS NULL OR m.year_installed IS NULL THEN NULL
+                WHEN CAST(LEFT(n.mfg_month, 4) AS UNSIGNED) <= m.year_installed THEN 1 ELSE 0 END
+             AS made_by_install_year,
+           n.raw_id
+    FROM {machines} m
+    LEFT JOIN {nameplates} n ON n.asset_tag = m.machine_id
+    """),
+    "incident_report_vs_cmms": (("incident_reports", "safety_incidents"), """
+    CREATE OR REPLACE VIEW incident_report_vs_cmms AS
+    SELECT x.incident_id, x.report_no, x.field, x.form_value, x.logged_value,
+           CASE WHEN NOT x.incident_logged THEN NULL
+                WHEN x.form_value IS NULL OR x.logged_value IS NULL THEN NULL
+                WHEN x.field = 'severity_scale' AND x.logged_value = 'ambiguous' THEN NULL
+                WHEN LOWER(TRIM(x.form_value)) = LOWER(TRIM(x.logged_value)) THEN 1 ELSE 0 END
+             AS agrees,
+           x.incident_logged, x.raw_id
+    FROM (
+""" + _REPORT_UNION + """
+    ) x
     """),
 }
 
@@ -623,6 +711,8 @@ def main() -> None:
                     help="table prefix used by ingest_cmms.py (default %(default)s)")
     ap.add_argument("--sensor-table", default="vibration_temp",
                     help="table name used by ingest_logs.py (default %(default)s)")
+    ap.add_argument("--image-prefix", default="img_",
+                    help="table prefix used by ingest_images.py (default %(default)s)")
     ap.add_argument("--window-days", type=int, default=7,
                     help="days of sensor readings before each work order (default %(default)s)")
     ap.add_argument("--mermaid", metavar="PATH", help="also write the ER diagram (Markdown) here")
@@ -635,7 +725,7 @@ def main() -> None:
     a = ap.parse_args()
 
     try:
-        names = Names(a.cmms_prefix, a.sensor_table)
+        names = Names(a.cmms_prefix, a.sensor_table, a.image_prefix)
         names.mapping()
         render_view("work_order_sensor_window", names, a.window_days)
     except ValueError as e:

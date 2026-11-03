@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import pipeline as pl
+from lineage import folder_sha256
 from pipeline import Outcome, Planned, Result
 
 INPUTS = dict(pl.DEFAULT_INPUTS)
@@ -33,6 +34,35 @@ safety_incidents: read 5, loaded 5, rejected 0
 
 Severity: before 2025-07-01 the scale was 1 = worst (converted); from then 5 = worst.
           Incidents 2025-07-01 to 2025-07-31 left unconverted (switch-over date unconfirmed).
+Dry run - nothing written to the database.
+""".splitlines()
+
+# What ingest_images.py --dry-run prints, trimmed.
+IMAGES_DRY = """
+Reading 2 image(s) in data/images with tesseract
+  [1/2] IR-2024-900.jpg: incident_report
+incident_reports (first 5 clean rows):
+ raw_id  incident_id incident_date machine_id emp_code
+      1          900    2024-07-01     LTH-01   EMP001
+Rejected images:
+source_file doc_type reject_reason duplicate_of_raw_id
+  blank.jpg  unknown unknown_document_type  None
+
+Rows read: 3   loaded: 2   rejected: 1
+Document types: incident_report=1, nameplate=1, unknown=1 (total 3)
+OCR engine: tesseract-v1=3 (total 3)
+Rejected rows: unknown_document_type=1 (total 1)
+
+nameplates: loaded 1
+  Loaded with warnings: placeholder_manufacturer=1 (total 1)
+
+incident_reports: loaded 1
+  Loaded with warnings: root_cause_in_attachment=1 (total 1)
+  Severity scale on forms: 1_worst=1 (total 1)
+
+Machine ids: not checked here (cmms_machines not loaded, or a dry run); relationships.py checks them after the loads
+
+Severity: taken from the scale printed on each form, not from its date; forms that disagree with the date rule are flagged form_scale_contradicts_date_rule.
 Dry run - nothing written to the database.
 """.splitlines()
 
@@ -79,18 +109,27 @@ def fake_runner(outcomes: dict[str, Outcome]):
 def test_default_plan_order_and_flags():
     plan = pl.build_plan(inputs=INPUTS, recreate=True, mermaid="docs/er_diagram.md",
                          env_file="/x/.env")
-    assert [p.step.key for p in plan] == ["logs", "spares", "cmms", "relationships"]
+    assert [p.step.key for p in plan] == ["logs", "spares", "cmms", "images", "relationships"]
     assert plan[0].args == [INPUTS["logs"], "--recreate", "--env-file", "/x/.env"]
     rels = plan[-1].args
     assert "--recreate" not in rels and rels[-2:] == ["--mermaid", "docs/er_diagram.md"]
     assert plan[2].display() == ("python scripts/ingest_cmms.py data/sql/jurongmarine_cmms.sql "
                                  "--recreate --env-file /x/.env")
+    assert plan[3].display() == ("python scripts/ingest_images.py data/images "
+                                 "--recreate --env-file /x/.env")
+
+
+def test_images_load_after_the_cmms_so_machine_ids_can_be_checked():
+    keys = [p.step.key for p in pl.build_plan(inputs=INPUTS)]
+    assert keys.index("images") == keys.index("cmms") + 1
 
 
 def test_foreign_keys_are_dropped_first_and_added_last():
     plan = pl.build_plan(inputs=INPUTS, foreign_keys=True)
     assert plan[0].step is pl.DROP_FKS and plan[0].args[0] == "--drop-foreign-keys"
     assert plan[-1].step.key == "relationships" and plan[-1].args[0] == "--foreign-keys"
+    only_images = pl.build_plan(inputs=INPUTS, only=["images"], foreign_keys=True)
+    assert [p.step.key for p in only_images] == ["drop_fks", "images"]   # a reload too
 
 
 def test_dry_run_never_touches_foreign_keys():
@@ -123,6 +162,18 @@ def test_paths_relative_to_repo_root(tmp_path):
     assert pl.rel("x.csv", tmp_path) == str((tmp_path / "x.csv").resolve())
 
 
+def test_image_folder_input_is_hashed_like_the_load(tmp_path):
+    """The report's 'Same file as loaded' compares with what ingest_images.py recorded."""
+    (tmp_path / "a.jpg").write_bytes(b"one")
+    (tmp_path / "b.PNG").write_bytes(b"two")
+    (tmp_path / "notes.txt").write_text("not an image", encoding="utf-8")
+    info = pl.describe_inputs([Planned(pl.BY_KEY["images"], [str(tmp_path)], str(tmp_path))])
+    assert info[0].sha256 == folder_sha256(tmp_path, (".jpg", ".png")) and info[0].size == 6
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert pl.describe_inputs([Planned(pl.BY_KEY["images"], [], str(empty))])[0].sha256 is None
+
+
 # ------------------------------------------------------------------ parsing ---
 
 def test_summary_keeps_counts_and_drops_sample_rows():
@@ -135,6 +186,17 @@ def test_summary_keeps_counts_and_drops_sample_rows():
     assert "trade: fitter=1, machinist=2, welder=1 (total 4)" in s
     assert any(line.startswith("Incidents 2025-07-01") for line in s)
     assert "Rejected rows (first 10):" not in s and "Dry run - nothing written" not in text
+
+
+def test_images_summary_lines_are_kept_and_sample_rows_dropped():
+    s = pl.summary_lines(IMAGES_DRY)
+    text = "\n".join(s)
+    assert "Document types: incident_report=1, nameplate=1, unknown=1 (total 3)" in s
+    assert "Severity scale on forms: 1_worst=1 (total 1)" in s
+    assert "nameplates: loaded 1" in s and "incident_reports: loaded 1" in s
+    assert any(x.startswith("Machine ids: not checked") for x in s)
+    assert "EMP001" not in text and "blank.jpg" not in text and "[1/2]" not in text
+    assert pl.parse_counts(IMAGES_DRY) == {"rows_read": 3, "rows_loaded": 2, "rows_rejected": 1}
 
 
 def test_summary_skips_a_bare_heading_but_keeps_its_counts():
@@ -176,7 +238,7 @@ def test_a_failure_stops_the_rest():
     run = fake_runner({"ingest_spares.py": Outcome(1, [], ["Traceback ...",
                                                            "FileNotFoundError: x.xlsx"], 0.2)})
     results = pl.run_pipeline(pl.build_plan(inputs=INPUTS), run, echo=lambda *a, **k: None)
-    assert [r.status for r in results] == ["ok", "failed", "not run", "not run"]
+    assert [r.status for r in results] == ["ok", "failed", "not run", "not run", "not run"]
     assert results[1].error_tail[-1] == "FileNotFoundError: x.xlsx"
     assert len(run.calls) == 2                       # relationships never linked half a load
 
@@ -185,14 +247,15 @@ def test_keep_going_runs_everything():
     run = fake_runner({"ingest_spares.py": Outcome(1, [], ["boom"], 0.2)})
     results = pl.run_pipeline(pl.build_plan(inputs=INPUTS), run, keep_going=True,
                               echo=lambda *a, **k: None)
-    assert [r.status for r in results] == ["ok", "failed", "ok", "ok"]
+    assert [r.status for r in results] == ["ok", "failed", "ok", "ok", "ok"]
 
 
 def test_interrupt_stops_even_with_keep_going():
     run = fake_runner({"ingest_logs.py": Outcome(None, [], [], 3.0, interrupted=True)})
     results = pl.run_pipeline(pl.build_plan(inputs=INPUTS), run, keep_going=True,
                               echo=lambda *a, **k: None)
-    assert [r.status for r in results] == ["interrupted", "not run", "not run", "not run"]
+    assert [r.status for r in results] == ["interrupted", "not run", "not run", "not run",
+                                           "not run"]
 
 
 def test_run_command_streams_and_keeps_both_outputs():
@@ -217,7 +280,7 @@ def _results():
     return [Result(plan[0], "ok", 0, 12.3, ["Rows read: 9   loaded: 5   rejected: 4"],
                    {"rows_read": 9, "rows_loaded": 5, "rows_rejected": 4}, 11),
             Result(plan[1], "failed", 1, 0.4, [], None, 12, ["FileNotFoundError: x.xlsx"]),
-            Result(plan[2], "not run"), Result(plan[3], "not run")]
+            Result(plan[2], "not run"), Result(plan[3], "not run"), Result(plan[4], "not run")]
 
 
 def test_report_tables():
@@ -232,6 +295,7 @@ def test_report_tables():
     assert "| Result | **FAILED** at step 2, Critical spares |" in md
     assert "| 1 | Sensor logs | `ingest_logs.py` | ok | 12.3s | 11 | 106,000 | 105,990 | 10 |" in md
     assert "| 3 | CMMS dump | `ingest_cmms.py` | not run | – |" in md
+    assert "| 4 | Scanned images | `ingest_images.py` | not run | – |" in md
     assert f"| logs | `{INPUTS['logs']}` | 2.0 KB | `{'a' * 64}` | yes |" in md
     assert "| spares |" in md and "| **NO** |" in md             # file changed since the load
     assert "**file not found**" in md
@@ -269,6 +333,20 @@ def test_main_writes_the_report(tmp_path, monkeypatch, capsys):
     assert "Report written to" in capsys.readouterr().out
 
 
+def test_main_passes_an_images_folder(tmp_path, monkeypatch):
+    monkeypatch.setattr(pl, "git_dirty", lambda: False)
+    (tmp_path / "scans").mkdir()
+    (tmp_path / "scans" / "x.jpg").write_bytes(b"img")
+    run = fake_runner({"ingest_images.py": Outcome(0, IMAGES_DRY, [], 1.0)})
+    report = tmp_path / "r.md"
+    assert pl.main(["--dry-run", "--only", "images", "--images", str(tmp_path / "scans"),
+                    "--report", str(report)], runner=run) == 0
+    assert run.calls[0][2] == str((tmp_path / "scans").resolve())
+    md = report.read_text(encoding="utf-8")
+    assert "Severity scale on forms: 1_worst=1 (total 1)" in md
+    assert folder_sha256(tmp_path / "scans", (".jpg",)) in md
+
+
 # ------------------------------------------------------------------ --save-log ---
 
 def logging_runner(outcomes: dict[str, Outcome]):
@@ -299,9 +377,9 @@ def test_run_pipeline_logs_each_step_and_its_outcome(tmp_path):
     with open(path, "w", encoding="utf-8") as log:
         pl.run_pipeline(pl.build_plan(inputs=INPUTS), run, log=log, echo=lambda *a, **k: None)
     text = path.read_text(encoding="utf-8")
-    assert "=== [1/4] Sensor logs: python scripts/ingest_logs.py" in text
+    assert "=== [1/5] Sensor logs: python scripts/ingest_logs.py" in text
     assert "--- failed, exit code 1, 0.2s" in text
-    assert "=== [4/4] Links between sources" in text and "--- not run" in text
+    assert "=== [5/5] Links between sources" in text and "--- not run" in text
 
 
 def test_save_log_keeps_full_output_out_of_git_and_out_of_the_report(tmp_path, monkeypatch):

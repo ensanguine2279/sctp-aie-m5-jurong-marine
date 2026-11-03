@@ -13,6 +13,9 @@ erDiagram
     critical_spares ||--o{ critical_spare_machines : "is listed for"
     cmms_employees |o..o{ cmms_work_orders : "did work orders"
     cmms_employees |o..o{ cmms_safety_incidents : "involved in incidents"
+    cmms_machines ||..o{ img_nameplates : "has nameplate photo"
+    cmms_safety_incidents ||..o{ img_incident_reports : "has scanned form"
+    cmms_machines |o..o{ img_incident_reports : "named on scanned forms"
     cmms_machines {
         varchar machine_id UK
         varchar machine_name
@@ -73,6 +76,30 @@ erDiagram
     critical_spare_machines {
         varchar part_no PK, FK
         varchar machine_code PK, FK "ALL = every machine"
+    }
+    img_nameplates {
+        varchar asset_tag UK, FK "= machine_id"
+        varchar manufacturer
+        varchar model
+        varchar serial_no
+        char mfg_month "YYYY-MM"
+        decimal power_kw
+        decimal weight_kg
+        varchar lubricant
+        int grease_interval_h
+    }
+    img_incident_reports {
+        int incident_id UK, FK "from report no IR-yyyy-nnn"
+        varchar report_no
+        date incident_date
+        varchar machine_id FK
+        varchar emp_code
+        varchar severity_scale "printed on the form"
+        tinyint severity_5_worst "converted with the printed scale"
+        int lost_days
+        varchar immediate_action
+        varchar root_cause
+        tinyint signature_present
     }
 ```
 

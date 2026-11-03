@@ -20,13 +20,13 @@ not granted.
 
 | Can read (`SELECT` only) | Can't |
 |---|---|
-| The linking views: `machine_overview`, `machine_spares`, `work_order_detail`, `incident_detail`, `work_order_sensor_window` | `cmms_employees`, `cmms_employees_raw`, `cmms_employees_audit` |
-| `table_relationships` (join paths, orphan counts) | every `*_raw` table |
-| The audit views for citations: `cmms_machines_audit`, `cmms_work_orders_audit`, `cmms_safety_incidents_audit`, `vibration_temp_audit`, `critical_spares_audit` | the clean tables themselves (`vibration_temp`, `cmms_work_orders`, ...) and `ingest_runs` |
+| The linking views: `machine_overview`, `machine_spares`, `work_order_detail`, `incident_detail`, `work_order_sensor_window`, `machine_nameplate`, `incident_report_vs_cmms` | `cmms_employees`, `cmms_employees_raw`, `cmms_employees_audit` |
+| `table_relationships` (join paths, orphan counts) | every `*_raw` table, including `img_documents_raw` (the OCR text of each scan, and a form's "person involved" exactly as read) |
+| The audit views for citations: `cmms_machines_audit`, `cmms_work_orders_audit`, `cmms_safety_incidents_audit`, `vibration_temp_audit`, `critical_spares_audit`, `img_nameplates_audit`, `img_incident_reports_audit` | the clean tables themselves (`vibration_temp`, `cmms_work_orders`, `img_nameplates`, ...) and `ingest_runs` |
 | | any write, any schema change, granting itself more |
 
 MySQL denies everything not granted, and every run drops the user and creates it again,
-so nothing granted earlier survives: the 11 objects above are all the user can read.
+so nothing granted earlier survives: the 15 objects above are all the user can read.
 (Dropping and recreating, rather than `REVOKE ALL`, also works on hosted MySQL, where
 even the admin account is kept out of some databases.)
 
@@ -39,6 +39,10 @@ someone puts it in a view.
 **For the CNC-02 chart** (readings over time), use `vibration_temp_audit`: it has every
 cleaned reading (`machine_id`, `sampled_at`, `vib_rms_mms`, `temp_c`) plus the source line
 for the citation. `vibration_temp` itself is blocked.
+
+**For the scans,** the audit views give the image file and its SHA-256 to cite, not the
+OCR text. A form that names a person instead of an `EMP` code keeps that name only in
+`img_documents_raw`, which the app can't read.
 
 **Names can't leak through a view either:** before granting, the script reads each
 object's columns and refuses any that has `emp_name`. A view edited later to include
@@ -63,6 +67,8 @@ DB_ADMIN_PASSWORD=...              # falls back to MYSQL_ROOT_PASSWORD
   keep working until they close; reconnect the app after a run.
 - `--host` (default `%`, any host) is where the app may connect from. Keep `%` with Docker:
   the port mapping makes local connections look remote to MySQL.
+- `--cmms-prefix`, `--sensor-table` and `--image-prefix` follow the ingest scripts' table
+  names, if you changed them.
 
 Docker's root password, if you don't remember it:
 
@@ -144,10 +150,11 @@ again recreates the user from `.env`.
 ## Tests
 
 `tests/test_agent_user.py` (no database): the allow-list never includes employees or raw
-tables and follows the ingest prefixes, objects with `emp_name` refused, missing objects
-skipped, `SELECT`-only grants after a full reset, the password never written into SQL or
-output, bad user/host/database names rejected, MySQL error codes read correctly, readable
-setup errors, connections that hide query values.
+tables (nor the scans' raw OCR) and follows the ingest prefixes, the scans' audit and
+comparison views granted, objects with `emp_name` refused, missing objects skipped,
+`SELECT`-only grants after a full reset, the password never written into SQL or output,
+bad user/host/database names rejected, MySQL error codes read correctly, readable setup
+errors, connections that hide query values.
 
 **Not covered:** anything that needs MySQL, i.e. creating the user and the grants. The
 real test is `agent_user.py --check` against your database.
