@@ -219,3 +219,53 @@ def test_ddl_builds_for_every_table():
         stmts = ic.ddl(spec, "cmms_" + spec.name)
         assert len(stmts) == 3
         assert f"cmms_{spec.name}_audit" in stmts[2]
+
+# ---- personal data on screen (PDPA) ---------------------------------------------
+
+def test_names_show_only_their_last_four_characters():
+    assert ic.mask_name("Seah Jia Hui") == "**** Hui"
+    assert ic.mask_name("Ryan D'Cruz") == "****Cruz"
+    assert ic.mask_name("Lim") == "****"              # short names fully hidden
+    assert ic.mask_name(" ") is None and ic.mask_name(None) is None
+
+
+def test_clean_sample_is_masked_for_printing():
+    tables, _ = run()
+    _, clean = tables["employees"]
+    shown = ic.for_display("employees", clean)
+    assert list(shown["emp_name"]) == ["**** Kow", "****"]      # 'Tan Ah Kow', 'Lim'
+    assert list(clean["emp_name"]) == ["Tan Ah Kow", "Lim"]    # the data itself unchanged
+    assert ic.for_display("machines", tables["machines"][1]) is tables["machines"][1]
+
+
+def test_rejected_tuples_are_masked_for_printing():
+    tables, _ = run()
+    shown = ic.rejected_rows(tables, mask=True)
+    emp = shown[shown["table"] == "employees"]["raw_tuple"].tolist()
+    assert emp == ["(2,'E099','****','x','y')"]                # the 'Dup' duplicate
+    full = ic.rejected_rows(tables)                            # --rejects CSV: unmasked
+    assert "'Dup'" in full[full["table"] == "employees"]["raw_tuple"].iloc[0]
+
+
+def test_quoted_name_is_masked_in_the_tuple():
+    assert ic.mask_tuple("(25,'EMP025','Ryan D''Cruz','fitter','day')", ["Ryan D'Cruz"]) == \
+        "(25,'EMP025','****Cruz','fitter','day')"
+
+
+def test_tuple_is_hidden_when_masking_could_miss_the_name():
+    """Unparseable row: the name's position is unknown, so nothing of it is shown."""
+    sql = "INSERT INTO employees VALUES (7,'E007','Goh Chee Keong','fitter');"
+    tables, _ = ic.process(ic.parse_dump(sql), Counter()), None
+    shown = ic.rejected_rows(tables, mask=True)
+    assert shown["raw_tuple"].tolist() == [ic.HIDDEN_TUPLE]
+    assert ic.mask_tuple("(1,'E1','Tan\\x41h')", ["Tan Ah"]) == ic.HIDDEN_TUPLE  # not found
+
+
+def test_dry_run_prints_no_full_names(tmp_path, monkeypatch, capsys):
+    dump = tmp_path / "dump.sql"
+    dump.write_text(DUMP, encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["ingest_cmms.py", str(dump), "--dry-run"])
+    ic.main()
+    out = capsys.readouterr().out
+    assert "Tan Ah Kow" not in out and "'Dup'" not in out
+    assert "**** Kow" in out and "last 4 characters of emp_name" in out

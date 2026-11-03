@@ -269,6 +269,66 @@ def test_main_writes_the_report(tmp_path, monkeypatch, capsys):
     assert "Report written to" in capsys.readouterr().out
 
 
+# ------------------------------------------------------------------ --save-log ---
+
+def logging_runner(outcomes: dict[str, Outcome]):
+    """Fake runner that also writes its output to the log, like run_command does."""
+    def run(cmd, log=None):
+        o = outcomes.get(cmd[1].rsplit("/", 1)[-1], Outcome(0, ["Done."], [], 0.1))
+        if log is not None:
+            for line in o.stdout:
+                log.write(line + "\n")
+            for line in o.stderr:
+                log.write(pl.STDERR_PREFIX + line + "\n")
+        return o
+    return run
+
+
+def test_run_command_logs_both_streams_as_they_arrive(tmp_path):
+    code = "import sys; print('out 1'); print('err 1', file=sys.stderr)"
+    path = tmp_path / "x.log"
+    with open(path, "w", encoding="utf-8") as log:
+        pl.run_command([sys.executable, "-c", code], echo=False, log=log)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert "out 1" in lines and "[stderr] err 1" in lines
+
+
+def test_run_pipeline_logs_each_step_and_its_outcome(tmp_path):
+    path = tmp_path / "x.log"
+    run = fake_runner({"ingest_spares.py": Outcome(1, [], ["boom"], 0.2)})
+    with open(path, "w", encoding="utf-8") as log:
+        pl.run_pipeline(pl.build_plan(inputs=INPUTS), run, log=log, echo=lambda *a, **k: None)
+    text = path.read_text(encoding="utf-8")
+    assert "=== [1/4] Sensor logs: python scripts/ingest_logs.py" in text
+    assert "--- failed, exit code 1, 0.2s" in text
+    assert "=== [4/4] Links between sources" in text and "--- not run" in text
+
+
+def test_save_log_keeps_full_output_out_of_git_and_out_of_the_report(tmp_path, monkeypatch):
+    monkeypatch.setattr(pl, "git_dirty", lambda: False)
+    report = tmp_path / "pipeline_x.md"
+    run = logging_runner({"ingest_cmms.py": Outcome(0, CMMS_DRY, ["a warning"], 1.0)})
+    assert pl.main(["--dry-run", "--only", "cmms", "--report", str(report), "--save-log"],
+                   runner=run) == 0
+    log = tmp_path / "logs" / "pipeline_x.log"
+    text = log.read_text(encoding="utf-8")
+    assert "Seah Jia Hui" in text and "[stderr] a warning" in text   # really everything
+    assert text.startswith("# Pipeline log") and "# Finished" in text
+    assert (tmp_path / "logs" / ".gitignore").read_text(encoding="utf-8").splitlines()[-1] == "*"
+    md = report.read_text(encoding="utf-8")
+    assert "[`" in md and "](logs/pipeline_x.log)" in md and "Seah Jia Hui" not in md
+    if sys.platform != "win32":
+        assert oct(log.stat().st_mode & 0o777) == "0o600"
+
+
+def test_no_log_without_the_option(tmp_path, monkeypatch):
+    monkeypatch.setattr(pl, "git_dirty", lambda: False)
+    report = tmp_path / "r.md"
+    pl.main(["--dry-run", "--only", "cmms", "--report", str(report)], runner=fake_runner({}))
+    assert not (tmp_path / "logs").exists()
+    assert "`--save-log` keeps it" in report.read_text(encoding="utf-8")
+
+
 def test_main_returns_1_on_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(pl, "git_dirty", lambda: None)
     run = fake_runner({"relationships.py": Outcome(1, [], ["boom"], 0.1)})

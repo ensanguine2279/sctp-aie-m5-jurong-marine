@@ -1,0 +1,97 @@
+# Pipeline log, started 2026-11-03 13:57:41 +0800
+# Command: python scripts/pipeline.py --save-log
+# Everything the steps printed, as it happened ([stderr] = error output). Employee names appear masked (last 4 characters); still keep this file private: don't commit or share it.
+
+=== [1/4] Sensor logs: python scripts/ingest_logs.py data/logs/vibration_temp_2026H1.csv
+Loading data/logs/vibration_temp_2026H1.csv into ingest@localhost:3307/jurong_marine (password hidden) tables vibration_temp, vibration_temp_raw
+  chunk 1: 10000 raw rows, 10000 clean rows
+  chunk 2: 10000 raw rows, 10000 clean rows
+  chunk 3: 10000 raw rows, 10000 clean rows
+  chunk 4: 10000 raw rows, 10000 clean rows
+  chunk 5: 10000 raw rows, 10000 clean rows
+  chunk 6: 10000 raw rows, 10000 clean rows
+  chunk 7: 10000 raw rows, 10000 clean rows
+  chunk 8: 10000 raw rows, 10000 clean rows
+  chunk 9: 10000 raw rows, 10000 clean rows
+  chunk 10: 10000 raw rows, 10000 clean rows
+  chunk 11: 6384 raw rows, 6384 clean rows
+Recorded as run 22 in ingest_runs.
+
+Rows read: 106384   loaded: 106384   rejected: 0
+Timestamp formats: epoch_ms=26788, iso_offset=79596 (total 106384)
+Temperature units: C=90578, F=15806 (total 106384)
+Done.
+--- ok, exit code 0, 10.7s
+
+=== [2/4] Critical spares: python scripts/ingest_spares.py data/tabular/critical_spares.xlsx
+Loading data/tabular/critical_spares.xlsx into ingest@localhost:3307/jurong_marine (password hidden)
+Recorded as run 23 in ingest_runs.
+
+Rev 11: rows_read=10, parts_loaded=10, rejected=0, machine_links=13, below_min_qty=3, size_in_inches=4, size_in_mm=1, no_explicit_size=5
+Done.
+--- ok, exit code 0, 0.7s
+
+=== [3/4] CMMS dump: python scripts/ingest_cmms.py data/sql/jurongmarine_cmms.sql
+Loading data/sql/jurongmarine_cmms.sql into ingest@localhost:3307/jurong_marine (password hidden) tables cmms_*
+  cmms_machines: 12 raw rows, 12 clean rows
+  cmms_employees: 32 raw rows, 32 clean rows
+  cmms_work_orders: 1603 raw rows, 1603 clean rows
+  cmms_safety_incidents: 85 raw rows, 85 clean rows
+Recorded as run 24 in ingest_runs.
+
+Rows read: 1732   loaded: 1732   rejected: 0
+Statements in dump: create=1, create_table=4, drop=4, insert=7, set=3, use=1 (total 20)
+
+machines: read 12, loaded 12, rejected 0
+
+employees: read 32, loaded 32, rejected 0
+  trade: crane op=2, electrician=4, fitter=10, machinist=5, qa inspector=11 (total 32)
+  shift: day=20, night=12 (total 32)
+
+work_orders: read 1603, loaded 1603, rejected 0
+  wo_type: breakdown=279, corrective=647, preventive=677 (total 1603)
+  status: awaiting parts=12, closed=1569, open=22 (total 1603)
+
+safety_incidents: read 85, loaded 85, rejected 0
+  Loaded with gaps: severity_scale_ambiguous=2 (total 2)
+  severity_scale: 1_worst=48, 5_worst=35, ambiguous=2 (total 85)
+  reporting: found during audit=35, reported next day=25, reported same day=25 (total 85)
+
+Severity: before 2025-07-01 the scale was 1 = worst (converted); from then 5 = worst.
+          Incidents 2025-07-01 to 2025-07-31 left unconverted (switch-over date unconfirmed).
+Done.
+--- ok, exit code 0, 1.2s
+
+=== [4/4] Links between sources: python scripts/relationships.py --mermaid docs/er_diagram.md
+Linking tables in ingest@localhost:3307/jurong_marine (password hidden)
+
+Relationships (child -> parent)
+  wo_machine         cmms_work_orders.machine_id -> cmms_machines.machine_id  [soft]
+      rows=1603  matched=1603  null=0  orphans=0
+  incident_machine   cmms_safety_incidents.machine_id -> cmms_machines.machine_id  [soft]
+      rows=85  matched=85  null=0  orphans=0
+  reading_machine    vibration_temp.machine_id -> cmms_machines.machine_id  [soft]
+      rows=106384  matched=106384  null=0  orphans=0
+  spare_machine      critical_spare_machines.machine_code -> cmms_machines.machine_id  [soft]
+      rows=13  matched=13, ALL=1  null=0  orphans=0
+  spare_part         critical_spare_machines.part_no -> critical_spares.part_no  [fk]
+      rows=13  matched=13  null=0  orphans=0
+  wo_employee        cmms_work_orders.emp_code -> cmms_employees.emp_code  [soft]
+      rows=1603  matched=1603  null=0  orphans=0
+  incident_employee  cmms_safety_incidents.emp_code -> cmms_employees.emp_code  [soft]
+      rows=85  matched=85  null=0  orphans=0
+
+Views:
+  machine_spares             created
+  work_order_detail          created
+  incident_detail            created
+  work_order_sensor_window   created
+  machine_overview           created
+
+Catalog written to table_relationships.
+Recorded as run 25 in ingest_runs.
+ER diagram written to docs/er_diagram.md
+Done. 0 orphan row(s) in total.
+--- ok, exit code 0, 0.6s
+
+# Finished 2026-11-03 13:57:54 +0800

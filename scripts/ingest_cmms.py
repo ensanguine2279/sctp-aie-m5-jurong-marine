@@ -836,10 +836,66 @@ def print_report(stats: Counter) -> None:
                 print(f"  {c}: {items}")
 
 
-def rejected_rows(tables: dict) -> pd.DataFrame:
-    frames = [raw[raw["status"] == "rejected"].assign(table=name)
-              for name, (raw, _) in tables.items()]
-    frames = [f for f in frames if len(f)]
+# ------------------------------------------------------------- personal data ---
+# PDPA: personal columns are never printed in full. Dry runs show only the last MASK_KEEP
+# characters, behind a fixed-length mask so the length isn't shown either. The raw and
+# clean tables keep the full value; only what goes to the screen (and so to any log) is masked.
+
+PERSONAL_COLUMNS = {"employees": ("emp_name",)}
+MASK_KEEP = 4
+MASK = "****"
+HIDDEN_TUPLE = "<hidden: unreadable row with personal data>"
+
+
+def mask_name(v) -> str | None:
+    """'Seah Jia Hui' -> '**** Hui'. A value of MASK_KEEP characters or fewer is masked
+    completely, so a short name isn't shown in full."""
+    s = _text(v)
+    if s is None:
+        return None
+    return MASK + s[-MASK_KEEP:] if len(s) > MASK_KEEP else MASK
+
+
+def _sql_forms(s: str) -> list[str]:
+    """How a value can be written inside a dump tuple: as is, '' or \\' for quotes."""
+    return sorted({s, s.replace("'", "''"), s.replace("'", "\\'")}, key=len, reverse=True)
+
+
+def mask_tuple(raw_tuple: str, values) -> str:
+    """The tuple text with each personal value masked. If a value isn't known (the tuple
+    couldn't be parsed) or can't be found in the text, the whole tuple is hidden: a name
+    is never shown because masking missed it."""
+    out = raw_tuple
+    for v in values:
+        if v is None or (isinstance(v, float) and pd.isna(v)) or not str(v).strip():
+            return HIDDEN_TUPLE
+        forms = [f for f in _sql_forms(str(v)) if f in out]
+        if not forms:
+            return HIDDEN_TUPLE
+        for f in forms:
+            out = out.replace(f, mask_name(v))
+    return out
+
+
+def for_display(name: str, df: pd.DataFrame) -> pd.DataFrame:
+    """A copy of rows from table `name`, with its personal columns masked for printing."""
+    cols = [c for c in PERSONAL_COLUMNS.get(name, ()) if c in df]
+    return df.assign(**{c: df[c].map(mask_name) for c in cols}) if cols else df
+
+
+def rejected_rows(tables: dict, mask: bool = False) -> pd.DataFrame:
+    """Rejected rows of every table. mask=True for printing: raw_tuple of tables with
+    personal columns gets those values masked (see mask_tuple)."""
+    frames = []
+    for name, (raw, _) in tables.items():
+        rej = raw[raw["status"] == "rejected"].assign(table=name)
+        personal = PERSONAL_COLUMNS.get(name, ())
+        if mask and personal and len(rej):
+            raw_cols = [SPEC_BY_NAME[name].raw_names[c] for c in personal]
+            rej = rej.assign(raw_tuple=[mask_tuple(t, [row[c] for c in raw_cols])
+                                        for t, (_, row) in zip(rej["raw_tuple"], rej.iterrows())])
+        if len(rej):
+            frames.append(rej)
     cols = ["table", "source_line", "tuple_no", "raw_tuple", "reject_reason", "duplicate_of_raw_id"]
     return pd.concat(frames)[cols] if frames else pd.DataFrame(columns=cols)
 
@@ -877,11 +933,15 @@ def main() -> None:
             for name, (_, clean) in tables.items():
                 if len(clean):
                     print(f"\n{name} (first 5 clean rows):")
-                    print(clean.head().to_string(index=False))
-            rej = rejected_rows(tables)
+                    print(for_display(name, clean.head()).to_string(index=False))
+            rej = rejected_rows(tables, mask=True)
             if len(rej):
                 print("\nRejected rows (first 10):")
                 print(rej.head(10).to_string(index=False))
+            if any(len(tables[t][0]) for t in PERSONAL_COLUMNS if t in tables):
+                print(f"\n(Personal data masked: only the last {MASK_KEEP} characters of "
+                      f"{', '.join(c for cols in PERSONAL_COLUMNS.values() for c in cols)} "
+                      f"are shown.)")
     else:
         try:
             cfg = load_db_config(a.env_file)

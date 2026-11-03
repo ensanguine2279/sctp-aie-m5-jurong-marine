@@ -9,6 +9,7 @@ python scripts/pipeline.py --dry-run                      # check everything; no
 python scripts/pipeline.py --recreate                     # first load (drops and recreates the tables)
 python scripts/pipeline.py                                # later loads
 python scripts/pipeline.py --foreign-keys --agent check   # with foreign keys, then check the app user
+python scripts/pipeline.py --save-log                     # also keep the full on-screen log
 ```
 
 With uv (personal repo): `uv run python scripts/pipeline.py ...`.
@@ -50,6 +51,7 @@ still writes the report, marked "interrupted".
 | `--mermaid PATH` / `--no-mermaid` | `docs/er_diagram.md` | Where `relationships.py` writes the ER diagram, or don't |
 | `--keep-going` | off | Run the remaining steps after a failure |
 | `--report PATH` | `reports/pipeline_<date>-<time>.md` | Report file (`_dry-run` added for dry runs) |
+| `--save-log` | off | Also save everything shown on screen to `logs/<report name>.log` next to the report, i.e. `reports/logs/` by default ([see below](#the-full-log)) |
 | `--env-file PATH` | nearest `.env` | Passed to every script |
 
 Exit code: 0 if every step succeeded, 1 otherwise, so it can run in CI.
@@ -58,7 +60,7 @@ Exit code: 0 if every step succeeded, 1 otherwise, so it can run in CI.
 
 | Section | What's in it |
 |---|---|
-| Header | result, start and finish time, mode and options, database (`user@host:port/db`, password hidden), git commit, and a warning if the code has uncommitted changes |
+| Header | result, start and finish time, mode and options, database (`user@host:port/db`, password hidden), git commit, a warning if the code has uncommitted changes, and with `--save-log` a link to the full log |
 | Steps | one row per step: status, time, `run_id`, rows read / loaded / rejected |
 | Input files | each input's size and SHA-256, and for a load whether it is **the same file** `ingest_runs` recorded |
 | Links between sources | after a load: `table_relationships`, i.e. each link's rows, matched, orphans and orphan keys ([`relationships.md`](relationships.md#relationships)) |
@@ -74,14 +76,39 @@ need to re-run a load later and compare (see
 [Lineage](../README.md#lineage-traceability-and-reproducibility) in the README). If the header
 says "with uncommitted changes", commit and run again before a load that matters.
 
+## The full log
+
+Without `--save-log`, the scripts' full output only goes to the terminal. With it, the same
+output is also written to `reports/logs/pipeline_<date>-<time>.log`, with the same name as
+the report, and the report's header links to it. Use it to debug a failed step when the
+report's last 20 lines of error output aren't enough, or to compare two runs line by line.
+
+- **Everything, in order:** a header line per step (`=== [2/4] Critical spares: python
+  scripts/ingest_spares.py ...`), every line the step printed, then its outcome
+  (`--- failed, exit code 1, 0.4s`). Lines from the error stream start with `[stderr]`.
+- **Written as it goes**, not at the end: if a step hangs or you press Ctrl+C, the log
+  shows how far it got.
+- **Kept out of git:** the script puts a `.gitignore` in `reports/logs/` that ignores
+  everything there, so logs can't be committed by accident. The file is readable only by
+  you (permissions `600`, on Linux and macOS).
+
+**Names in the log are masked.** A dry run of `ingest_cmms.py` prints sample employee
+rows, but the script masks names before printing them: only the last 4 characters show
+(`**** Hui`); see [Personal data on screen](ingest_cmms.md#personal-data-on-screen). The log
+still holds employee codes with trade and shift, which in a 32-person shop can point to a
+person, so keep it private: don't attach a log to the data quality report or share it;
+share the report instead. Delete logs you no longer need.
+
 ## Personal data (PDPA)
 
 The report never copies a script's full output: only summary lines that match a fixed
-list of patterns (counts and categories). A dry run of `ingest_cmms.py` prints sample
-employee rows, names included; those stay in the terminal. Only the last lines of a
-failed step's error output go in verbatim; database errors don't include row values
-(`hide_parameters` in `db_config.py`). How the app is kept away from names in the database
-is in [`agent_user.md`](agent_user.md).
+list of patterns (counts and categories). The full output is only kept with `--save-log`,
+in a git-ignored log file ([The full log](#the-full-log)). Employee names never appear in
+full in either, or on screen: `ingest_cmms.py` masks them before printing, to their last
+4 characters ([Personal data on screen](ingest_cmms.md#personal-data-on-screen)). Only the
+last lines of a failed step's error output go into the report verbatim; database errors
+don't include row values (`hide_parameters` in `db_config.py`). How the app is kept away
+from names in the database is in [`agent_user.md`](agent_user.md).
 
 Reports hold row counts, file hashes, orphan keys (machine ids, employee codes) and the
 database host. That's fine to commit as audit evidence; leave out reports from a hosted
@@ -94,8 +121,10 @@ order and flags (foreign keys dropped first and added last, never in a dry run; 
 summary lines kept and sample rows with names dropped, counts read from each script's
 summary format, `run_id` found in normal and error output, a failure stopping the rest,
 `--keep-going`, Ctrl+C, the report's tables (hash match, uncommitted code, escaped pipes),
-and `main` writing the report and returning 1 on failure. One test runs a real process to
-check that both output streams are captured.
+`main` writing the report and returning 1 on failure, and `--save-log`: both streams
+logged as they arrive, a header and outcome per step, the log git-ignored and readable
+only by you, linked from the report, with names in the log but not in the report. Two tests run a real process to
+check that both output streams are captured and logged.
 
 **Not covered:** the real scripts and database. The first `pipeline.py --dry-run` on your
 data, then a real load, are the real test.

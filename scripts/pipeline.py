@@ -19,7 +19,10 @@ recorded. For a dry run, from the scripts' printed summaries.
 
 PDPA: the report never copies a script's full output, only its summary lines (counts and
 categories), because a dry run prints sample rows that can include employee names. The
-last lines of a failed step's error output are included.
+last lines of a failed step's error output are included. --save-log keeps the full output
+in reports/logs/<report name>.log, written as the run goes; that folder gets its own
+.gitignore so logs never reach git. ingest_cmms.py masks employee names before printing
+them (last 4 characters only), so the log holds only the masked form.
 
 The first failed step stops the run (the steps after it are listed as not run), so
 relationships.py never links half-loaded data; --keep-going runs them anyway. Ctrl+C stops
@@ -31,6 +34,7 @@ Usage
     python scripts/pipeline.py                                    # later loads
     python scripts/pipeline.py --foreign-keys --agent check       # drop/re-add FKs, check the app user
     python scripts/pipeline.py --only cmms,relationships          # some steps only
+    python scripts/pipeline.py --save-log                         # keep the full on-screen log too
     python scripts/pipeline.py --logs data/logs/vibration_temp_sample.csv --dry-run
 """
 from __future__ import annotations
@@ -151,23 +155,37 @@ class Outcome:
     interrupted: bool = False
 
 
-def run_command(cmd: list[str], cwd: Path = ROOT, echo: bool = True) -> Outcome:
-    """Run cmd, echoing its output live and keeping it. Ctrl+C stops it cleanly."""
+STDERR_PREFIX = "[stderr] "  # marks error-stream lines in the saved log
+
+
+def run_command(cmd: list[str], cwd: Path = ROOT, echo: bool = True, log=None) -> Outcome:
+    """Run cmd, echoing its output live and keeping it. Ctrl+C stops it cleanly.
+
+    With `log` (an open text file), every line also goes there as it arrives, error-stream
+    lines marked with STDERR_PREFIX, so a step that hangs is logged up to where it stopped.
+    """
     start = time.monotonic()
     proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, bufsize=1, env={**os.environ, "PYTHONUNBUFFERED": "1"})
     out: list[str] = []
     err: list[str] = []
+    lock = threading.Lock()
 
-    def pump(stream, sink, target):
+    def pump(stream, sink, target, prefix):
         for line in stream:
             sink.append(line.rstrip("\n"))
             if echo:
                 target.write(line)
                 target.flush()
+            if log is not None:
+                with lock:
+                    log.write(prefix + line.rstrip("\n") + "\n")
+                    log.flush()
 
-    threads = [threading.Thread(target=pump, args=(proc.stdout, out, sys.stdout), daemon=True),
-               threading.Thread(target=pump, args=(proc.stderr, err, sys.stderr), daemon=True)]
+    threads = [threading.Thread(target=pump, args=(proc.stdout, out, sys.stdout, ""),
+                                daemon=True),
+               threading.Thread(target=pump, args=(proc.stderr, err, sys.stderr, STDERR_PREFIX),
+                                daemon=True)]
     for t in threads:
         t.start()
     interrupted = False
@@ -258,16 +276,28 @@ class Result:
 
 
 def run_pipeline(plan: list[Planned], runner=run_command, keep_going: bool = False,
-                 echo=print) -> list[Result]:
+                 echo=print, log=None) -> list[Result]:
+    """Run each step in order. `log` (an open text file) gets a header and the outcome of
+    every step; pass it to the runner too for the steps' own output."""
+    def to_log(line: str) -> None:
+        if log is not None:
+            log.write(line + "\n")
+            log.flush()
+
     results: list[Result] = []
     stop = False
     for i, p in enumerate(plan, 1):
+        header = f"=== [{i}/{len(plan)}] {p.step.title}: {p.display()}"
         if stop:
             results.append(Result(p, "not run"))
+            to_log(f"\n{header}\n--- not run: an earlier step didn't succeed")
             continue
-        echo(f"\n=== [{i}/{len(plan)}] {p.step.title}: {p.display()}", flush=True)
+        echo("\n" + header, flush=True)
+        to_log("\n" + header)
         o = runner([sys.executable, str(SCRIPTS / p.step.script), *p.args])
         status = ("interrupted" if o.interrupted else "ok" if o.exit_code == 0 else "failed")
+        to_log(f"--- {status}" + (f", exit code {o.exit_code}" if o.exit_code is not None else "")
+               + f", {_duration(o.seconds)}")
         results.append(Result(
             p, status, o.exit_code, o.seconds, summary_lines(o.stdout),
             parse_counts(o.stdout), parse_run_id(o.stdout + o.stderr),
@@ -371,7 +401,12 @@ def render_report(meta: dict, results: list[Result], inputs: list[InputFile],
          f"| Mode | {'dry run: nothing written to the database' if meta['dry_run'] else 'load'} |",
          f"| Options | {_cell(' '.join(meta.get('options') or []) or None)} |",
          f"| Database | {_cell(meta.get('database'))} |",
-         f"| Code | {code} |", ""]
+         f"| Code | {code} |"]
+    if meta.get("log"):
+        name, link = meta["log"]
+        L.append(f"| Full log | [`{name}`]({link}): everything shown on screen, employee "
+                 f"names masked to their last 4 characters. Git-ignored; keep it private |")
+    L.append("")
 
     L += ["## Steps", "",
           "| # | Step | Script | Status | Time | Run | Read | Loaded | Rejected |",
@@ -424,10 +459,28 @@ def render_report(meta: dict, results: list[Result], inputs: list[InputFile],
             L += [f"Error output (last {ERROR_TAIL} lines at most):", "", "```text",
                   *r.error_tail, "```", ""]
     L += ["---", "",
-          "Generated by `scripts/pipeline.py`. Only summary lines are copied here; the "
-          "scripts' full output went to the terminal, because dry runs print sample rows "
-          "that can include personal data."]
+          "Generated by `scripts/pipeline.py`. Only summary lines are copied here, because "
+          "dry runs print sample rows that can include personal data. The scripts' full "
+          "output " + ("is in the log file linked above." if meta.get("log") else
+                       "went to the terminal; `--save-log` keeps it in a file.")]
     return "\n".join(L) + "\n"
+
+
+LOG_GITIGNORE = "# Written by scripts/pipeline.py: full logs can hold personal data.\n*\n"
+
+
+def open_log(path: Path):
+    """Create the log file, readable only by you, in a folder git ignores."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ignore = path.parent / ".gitignore"
+    if not ignore.exists():
+        ignore.write_text(LOG_GITIGNORE, encoding="utf-8")
+    fh = open(path, "w", encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:  # e.g. some Windows file systems: the .gitignore still applies
+        pass
+    return fh
 
 
 # --------------------------------------------------------------------- main ---
@@ -453,6 +506,9 @@ def main(argv: list[str] | None = None, runner=run_command) -> int:
                     help="run the remaining steps after a failure")
     ap.add_argument("--report", metavar="PATH",
                     help="report file (default reports/pipeline_<date>-<time>.md)")
+    ap.add_argument("--save-log", action="store_true",
+                    help="also save everything shown on screen to logs/<report name>.log next "
+                         "to the report (git-ignored: it can hold personal data)")
     add_common_args(ap)
     a = ap.parse_args(argv)
 
@@ -485,8 +541,23 @@ def main(argv: list[str] | None = None, runner=run_command) -> int:
             database = f"not configured: {e}"
 
     inputs_info = describe_inputs(plan)
-    results = run_pipeline(plan, runner, a.keep_going)
-    finished = datetime.now().astimezone()
+    log_path, log = None, None
+    if a.save_log:
+        log_path = report.parent / "logs" / f"{report.stem}.log"
+        log = open_log(log_path)
+        log.write(f"# Pipeline log, started {started:%Y-%m-%d %H:%M:%S %z}\n"
+                  f"# Command: python scripts/pipeline.py {' '.join(argv if argv is not None else sys.argv[1:])}\n"
+                  f"# Everything the steps printed, as it happened ({STDERR_PREFIX.strip()} = "
+                  f"error output). Employee names appear masked (last 4 characters); still keep "
+                  f"this file private: don't commit or share it.\n")
+    try:
+        step_runner = (lambda cmd: runner(cmd, log=log)) if log else runner
+        results = run_pipeline(plan, step_runner, a.keep_going, log=log)
+    finally:
+        finished = datetime.now().astimezone()
+        if log:
+            log.write(f"\n# Finished {finished:%Y-%m-%d %H:%M:%S %z}\n")
+            log.close()
 
     runs, links = {}, None
     if not a.dry_run:
@@ -499,13 +570,15 @@ def main(argv: list[str] | None = None, runner=run_command) -> int:
             except Exception as e:  # noqa: BLE001 - the report must still be written
                 links = f"{type(e).__name__} (counts below are from the scripts' summaries)"
     meta = {"started": started, "finished": finished, "dry_run": a.dry_run, "options": options,
-            "database": database, "git_commit": git_commit(), "git_dirty": git_dirty()}
+            "database": database, "git_commit": git_commit(), "git_dirty": git_dirty(),
+            "log": (rel(log_path), f"logs/{log_path.name}") if log_path else None}
 
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(render_report(meta, results, inputs_info, runs, links), encoding="utf-8")
     ok = all(r.status == "ok" for r in results)
     print(f"\n{'Succeeded' if ok else 'FAILED'}: {sum(r.status == 'ok' for r in results)}"
-          f"/{len(results)} steps ok. Report written to {rel(report)}")
+          f"/{len(results)} steps ok. Report written to {rel(report)}"
+          + (f"; full log in {rel(log_path)}" if log_path else ""))
     if meta["git_dirty"] and not a.dry_run:
         print("Note: uncommitted code changes; commit before a load that matters.")
     return 0 if ok else 1

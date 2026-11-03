@@ -78,7 +78,7 @@ python scripts/ingest_cmms.py [DUMP] [options]
 | Option | Default | What it does |
 |---|---|---|
 | `DUMP` | `$CMMS_DUMP`, else `data/sql/jurongmarine_cmms.sql` | Dump to load |
-| `--dry-run` | off | Read and clean only; print sample rows, rejects and the summary. Nothing is written to the database. |
+| `--dry-run` | off | Read and clean only; print sample rows, rejects and the summary. Nothing is written to the database. Employee names are masked in what it prints ([see below](#personal-data-on-screen)). |
 | `--recreate` | off | Drop and recreate the `cmms_*` tables and audit views before loading. Use on the first load and after any schema change. `ingest_runs` is never dropped. |
 | `--env-file PATH` | nearest `.env` | Which settings file to use |
 | `--prefix` | `cmms_` | Table name prefix, so we never touch the tables the dump itself describes |
@@ -300,6 +300,22 @@ erDiagram
 
 `cmms_employees.emp_name` is personal data (PDPA). It's kept for joins; the app should
 answer with `emp_code` and keep names out of LLM prompts and answers.
+
+### Personal data on screen
+
+Nothing the script prints shows an employee name in full: only its last 4 characters,
+behind a fixed `****` so the length isn't shown either (`Seah Jia Hui` → `**** Hui`). A name
+of 4 characters or fewer is masked completely. This covers the dry run's sample rows and
+its rejected rows; in a rejected row's `raw_tuple`, the name is masked inside the text, and
+if the row couldn't be parsed, so the name's position is unknown, the whole tuple is shown as
+`<hidden: unreadable row with personal data>`. Because the masking happens before printing,
+the terminal, a screen share and a saved pipeline log (`pipeline.py --save-log`) all get the
+masked form.
+
+The data itself is not masked: `cmms_employees` and `cmms_employees_raw` keep the full name.
+The `--rejects` CSV also keeps the full `raw_tuple`, because that file is for fixing the
+rows; keep it out of git and delete it when done. Which columns are masked is set in
+`PERSONAL_COLUMNS` in the script.
 
 ---
 
