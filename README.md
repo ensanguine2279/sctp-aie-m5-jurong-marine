@@ -12,6 +12,7 @@ you can paste into the data quality report.
 | `scripts/ingest_cmms.py` | CMMS SQL dump (`jurongmarine_cmms.sql`) | [`ingest_cmms.md`](docs/ingest_cmms.md) |
 | `scripts/relationships.py` | The loaded tables: links the three sources | [`relationships.md`](docs/relationships.md), [ER diagram](docs/er_diagram.md) |
 | `scripts/agent_user.py` | Creates the app's read-only database user (PDPA) | [`agent_user.md`](docs/agent_user.md) |
+| `scripts/pipeline.py` | Runs all of the above in order, writes a Markdown report | [`pipeline.md`](docs/pipeline.md) |
 
 ```bash
 python -m venv .venv
@@ -32,6 +33,14 @@ python scripts/ingest_cmms.py   data/sql/jurongmarine_cmms.sql --recreate       
 
 python scripts/relationships.py --mermaid docs/er_diagram.md   # link the sources (after the loads)
 python scripts/agent_user.py                                   # the app's read-only user, then a check
+```
+
+Or run the loads and `relationships.py` in one go, with a report of the results in
+`reports/` ([`pipeline.md`](docs/pipeline.md)):
+
+```bash
+python scripts/pipeline.py --dry-run     # check everything first
+python scripts/pipeline.py --recreate    # first load; later loads without --recreate
 ```
 
 Use `--recreate` on the first load and after any schema change; afterwards run
@@ -484,6 +493,7 @@ With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
 | `tests/test_spares.py` | [`ingest_spares.py`](docs/ingest_spares.md): costs (`$38/spool`), lead times (`2-3 weeks (Germany)`, `local`), metric/imperial sizes, machine lists; on a messy sheet: raw rows and row numbers, `raw_id`, duplicate/missing part numbers, warnings for unreadable values | 18 |
 | `tests/test_cmms.py` | [`ingest_cmms.py`](docs/ingest_cmms.md): dump parsing (`;` and quotes inside strings, comments, multi-row INSERTs with line and tuple numbers, column lists, malformed tuples); ids, numbers (`S$1,050`), day-first dates; the severity flip (old scale inverted, July 2025 left unconverted, a confirmed cutover, out-of-range values never guessed); on a messy dump: duplicates and conflicting duplicates, orphan machines/employees flagged not dropped, raw text kept, `work_orders.status` not clashing with the load status | 21 |
 | `tests/test_relationships.py` | [`relationships.py`](docs/relationships.md): orphan/NULL/`ALL` counting, keys compared like MySQL (case, spaces), when a foreign key is added or skipped, table prefixes, no view exposes `emp_name`, incidents only offer `severity_5_worst`, the ER diagram, the run fingerprint, successful and failed runs recorded in `ingest_runs` | 33 |
+| `tests/test_pipeline.py` | [`pipeline.py`](docs/pipeline.md): step order and flags, foreign keys dropped first and re-added last (never in a dry run), sample rows with names kept out of the report, counts from every script's summary, a failure stopping the rest, `--keep-going`, Ctrl+C, the report's tables | 21 |
 | `tests/test_agent_user.py` | `agent_user.py`: the allow-list never includes employees or raw tables, objects with `emp_name` refused, missing objects skipped, `SELECT`-only grants after a full reset, password never written into SQL or output, bad user/host/database names rejected, MySQL error codes read correctly, errors never include the password, failed steps named with MySQL's message, no statement needing rights over every database, the access check reads no rows | 20 |
 | `tests/test_shared.py` | `db_config.py`, `lineage.py`: password never printed, passwords with special characters, values of a failed query kept out of error messages, table-name check, file SHA-256, a run recorded without a file, values passed to MySQL are plain Python types | 7 |
 
@@ -496,13 +506,14 @@ for the app user's grants, `agent_user.py --check` is the real test.
 ### Reading the output
 
 ```
-tests/test_agent_user.py ....................                       [ 19%]
-tests/test_cmms.py .....................                            [ 35%]
-tests/test_logs.py ........                                         [ 44%]
-tests/test_relationships.py .................................       [ 78%]
-tests/test_shared.py .......                                        [ 85%]
+tests/test_agent_user.py ....................                       [ 16%]
+tests/test_cmms.py .....................                            [ 32%]
+tests/test_logs.py ........                                         [ 38%]
+tests/test_pipeline.py .....................                        [ 55%]
+tests/test_relationships.py .................................       [ 80%]
+tests/test_shared.py .......                                        [ 86%]
 tests/test_spares.py ..................                             [100%]
-========== 107 passed in 0.85s ==========
+========== 128 passed in 1.15s ==========
 ```
 
 | Mark | Meaning |
