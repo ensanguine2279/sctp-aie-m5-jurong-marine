@@ -220,6 +220,66 @@ def test_machine_id_check_allows_a_letter_but_not_a_misread_digit():
     assert not ii.VALIDATORS["nameplate"]["asset_tag"]("BLAST-O1")
 
 
+# ------------------------------------------------- severity from the value ink ---
+# The new form's label runs into the value column: OCR reads the line as
+# 'Severity (5 = MOST SEVERE, new W8H matrix):' and the blue number under it is lost (I12).
+NEW_FORM = FORM_GRAY.replace("Severity (1 = MOST SEVERE): 4",
+                             "Severity (5 = MOST SEVERE, new W8H matrix):").replace(
+    "IR-2024-900", "IR-2025-904").replace("01/07/2024", "29/12/2025")
+
+
+def test_value_ink_reading_recovers_a_severity_the_page_text_lost():
+    out, _ = run(Extraction(ii.TESSERACT_TAG, texts={"gray": NEW_FORM, "otsu": NEW_FORM},
+                            signature=1, ink={"severity": "2"}))
+    r = out["incident_report"].iloc[0]
+    assert (r["incident_id"], r["severity_scale"], r["severity_5_worst"]) == (904, "5_worst", 2)
+    assert "read_from_value_ink_severity" in out["documents"].iloc[0]["warnings"]
+
+
+def test_value_ink_never_outvotes_page_readings_that_agree():
+    ex = Extraction(ii.TESSERACT_TAG, texts=FORM.texts, signature=1, ink={"severity": "5"})
+    out, _ = run(ex)
+    assert out["incident_report"].iloc[0]["severity_as_logged"] == 4      # 3 page reads say 4
+    assert "read_from_value_ink" not in out["documents"].iloc[0]["warnings"]
+
+
+def test_without_a_value_ink_reading_the_severity_stays_unread():
+    out, _ = run(Extraction(ii.TESSERACT_TAG, texts={"gray": NEW_FORM}, signature=1))
+    assert ii.pd.isna(out["incident_report"].iloc[0]["severity_5_worst"])
+
+
+@pytest.mark.parametrize("readings,digit", [
+    ({0: "3", 1: "3", 2: "3", 3: "3", 4: "3"}, "3"),
+    ({0: "2", 1: "2", 2: "2", 3: "4"}, "2"),               # 3 vs 1: clear majority
+    ({0: "3", 1: "3", 2: "3", 3: "4", 4: "4"}, None),      # 3 vs 2: too close, abstain
+    ({0: "5", 1: "5"}, None),                              # only 2 masks: too few
+    ({}, None),
+])
+def test_ink_vote_abstains_rather_than_guess(readings, digit):
+    assert ii.ink_majority(readings) == digit
+
+
+def _mock_new_form_line(digit: str):
+    """Like the real forms: grey label, small navy value printed over its 'WSH'."""
+    import cv2
+    import numpy as np
+    img = np.full((60, 760, 3), 240, np.uint8)
+    cv2.putText(img, "Severity (5 = MOST SEVERE, new WSH matrix):", (10, 35),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (100, 98, 95), 1, cv2.LINE_AA)
+    cv2.putText(img, digit, (282, 37), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (125, 72, 78), 2,
+                cv2.LINE_AA)
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
+    return cv2.imdecode(buf, cv2.IMREAD_COLOR)
+
+
+@pytest.mark.skipif(shutil.which("tesseract") is None, reason="needs Tesseract")
+def test_value_ink_reader_never_returns_a_wrong_digit():
+    """On a mock of the overlapping line: the right digit, or nothing. Never another digit."""
+    for d in "12345":
+        assert ii.severity_from_ink(_mock_new_form_line(d)) in (d, None)
+    assert ii.severity_from_ink(_mock_new_form_line(" ")) is None
+
+
 # ----------------------------------------------------------- incident forms ---
 
 def test_incident_form_end_to_end():
@@ -461,3 +521,12 @@ def test_the_real_scans_read_correctly():
         ("1_worst", 2, 1)
     assert (p["asset_tag"], p["serial_no"], p["grease_interval_h"], p["lubricant"]) == \
         ("BLAST-01", "CU6744884", 1000, "Shell Tonna S3 M68")
+
+
+@pytest.mark.skipif(shutil.which("tesseract") is None or not (SCANS / "IR-2025-904.jpg").is_file()
+                    or not (SCANS / "IR-2025-906.jpg").is_file(),
+                    reason="needs Tesseract and the scans in data/images/")
+def test_the_real_new_forms_give_their_severity_from_the_value_ink():
+    """I12: the CMMS logs 904 as 2 and 906 as 3; the page text loses both."""
+    assert ii.severity_from_ink(ii.read_image(SCANS / "IR-2025-904.jpg")) == "2"
+    assert ii.severity_from_ink(ii.read_image(SCANS / "IR-2025-906.jpg")) == "3"

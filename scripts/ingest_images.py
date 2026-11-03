@@ -19,7 +19,9 @@ checked, like the other sources:
 Pipeline (each step is a small function you can test on its own):
     folder_files           every .jpg / .png / .tif ... in the folder, by name
       -> extract           OCR. tesseract (default): three preprocessed versions of each
-                           image, read separately; the class LLM endpoint with --engine llm
+                           image, read separately; on incident forms the severity value is
+                           also read from the blue value ink alone (severity_from_ink); the
+                           class LLM endpoint with --engine llm
       -> classify          incident_report | nameplate | unknown
       -> parse_*_text      label -> value, as written
       -> vote              per field, the value most versions agree on, checked against the
@@ -80,7 +82,8 @@ DEFAULT_FOLDER = "data/images"
 DEFAULT_CACHE = ROOT / ".cache" / "ingest_images"
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp")
 DOC_TYPES = ("incident_report", "nameplate")
-TESSERACT_TAG = "tesseract-v1"     # change when preprocessing changes: invalidates the cache
+TESSERACT_TAG = "tesseract-v2"     # change when preprocessing changes: invalidates the cache
+                                   # v2: severity also read from the blue value ink
 DEFAULT_LLM_MODEL = "gpt-4o-mini"
 TABLES = {"nameplate": "nameplates", "incident_report": "incident_reports"}
 KEYS = {"nameplate": "asset_tag", "incident_report": "incident_id"}
@@ -96,6 +99,8 @@ class Extraction:
     fields: dict | None = None        # llm: field -> value as written (+ doc_type)
     signature: int | None = None      # 1 = ink in the signature box, 0 = none, None = unsure
     error: str | None = None
+    ink: dict | None = None           # tesseract: fields read from the blue value ink alone,
+                                      # e.g. {"severity": "3"}; one more reading in the vote
 
 
 def read_image(path: Path):
@@ -169,15 +174,97 @@ def signature_ink(bw) -> int | None:
     return None
 
 
+# --------------------------------------------------- severity from the value ink ---
+# On the new WSH-F02 form (from July 2025) the label "Severity (5 = MOST SEVERE, new WSH
+# matrix):" runs into the value column, and the severity number is printed in blue over its
+# "WSH". OCR then reads the line as 'new W8H matrix' and the number is lost (trap list I12).
+# Every value on the form is printed in blue; every label is grey/black. Keeping only blue
+# pixels leaves the number on its own. One mask doesn't suit every scan (a low threshold
+# keeps thin strokes where blue crosses grey, but merges a bold digit with the print), so
+# the digit is read through several masks and voted, like the three page versions.
+
+INK_DIGITS = {"1", "2", "3", "4", "5"}
+INK_OCR = "--psm 7 -c tessedit_char_whitelist=12345"
+# (kind, scale, threshold, blur, closing kernel). 'excess': blue minus red above the
+# threshold, which still holds where blue ink overlaps grey print. 'hsv': blue hue with at
+# least the threshold's saturation.
+INK_MASKS = [("excess", 1, 10, 0, 1), ("excess", 1, 15, 0, 1), ("excess", 1, 20, 0, 1),
+             ("excess", 4, 8, 0, 3), ("excess", 4, 12, 5, 3), ("excess", 4, 16, 5, 3),
+             ("hsv", 1, 40, 0, 1), ("hsv", 1, 60, 0, 1), ("hsv", 4, 40, 5, 3),
+             ("hsv", 4, 60, 5, 3)]
+
+
+def value_ink_mask(band, kind: str, scale: int, thr: int, blur: int, close: int):
+    """Blue value ink -> black on white; grey/black print and paper -> white."""
+    import cv2
+
+    up = band if scale == 1 else cv2.resize(band, None, fx=scale, fy=scale,
+                                            interpolation=cv2.INTER_CUBIC)
+    if blur:
+        up = cv2.GaussianBlur(up, (blur, blur), 0)
+    if kind == "excess":
+        b, g, r = (c.astype(int) for c in cv2.split(up))
+        mask = (((b - r) > thr) & ((b + g + r) < 600)).astype(np.uint8) * 255
+    else:
+        mask = cv2.inRange(cv2.cvtColor(up, cv2.COLOR_BGR2HSV), (95, thr, 30), (145, 255, 255))
+    if close > 1:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((close, close), np.uint8))
+    if scale == 1:
+        mask = cv2.resize(mask, None, fx=3, fy=3, interpolation=cv2.INTER_NEAREST)
+    return cv2.copyMakeBorder(255 - mask, 30, 30, 30, 30, cv2.BORDER_CONSTANT, value=255)
+
+
+def severity_band(img):
+    """The line of the 'Severity' label, from the label to the right edge; None if the
+    label can't be found."""
+    import cv2
+    import pytesseract
+
+    data = pytesseract.image_to_data(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), config="--psm 6",
+                                     output_type=pytesseract.Output.DICT)
+    for i, word in enumerate(data["text"]):
+        if word.lower().startswith("severity"):
+            y, h = data["top"][i], max(data["height"][i], 10)
+            return img[max(0, y - h): y + 2 * h, data["left"][i]:]
+    return None
+
+
+def ink_majority(readings: dict, need: int = 3) -> str | None:
+    """The digit at least `need` masks read, and more than twice as often as any other;
+    otherwise None. Abstaining is safe: the value then stays unread and is flagged."""
+    counts = Counter(readings.values()).most_common()
+    if not counts or counts[0][1] < need or (len(counts) > 1 and counts[1][1] * 2 > counts[0][1]):
+        return None
+    return counts[0][0]
+
+
+def severity_from_ink(img) -> str | None:
+    """The severity digit read from the blue value ink on its line, or None."""
+    import pytesseract
+
+    band = severity_band(img)
+    if band is None or band.size == 0:
+        return None
+    readings = {}
+    for i, params in enumerate(INK_MASKS):
+        d = pytesseract.image_to_string(value_ink_mask(band, *params), config=INK_OCR).strip()
+        if d in INK_DIGITS:
+            readings[i] = d
+    return ink_majority(readings)
+
+
 def extract_tesseract(path: Path) -> Extraction:
     import pytesseract
 
     pytesseract.pytesseract.tesseract_cmd = find_tesseract()
-    variants = preprocess_variants(read_image(path))
+    img = read_image(path)
+    variants = preprocess_variants(img)
     texts = {k: pytesseract.image_to_string(im, config="--psm 6") for k, im in variants.items()}
-    sig = signature_ink(variants["otsu"]) if classify("\n".join(texts.values())) == \
-        "incident_report" else None
-    return Extraction(TESSERACT_TAG, texts=texts, signature=sig)
+    if classify("\n".join(texts.values())) != "incident_report":
+        return Extraction(TESSERACT_TAG, texts=texts)
+    severity = severity_from_ink(img)
+    return Extraction(TESSERACT_TAG, texts=texts, signature=signature_ink(variants["otsu"]),
+                      ink={"severity": severity} if severity else None)
 
 
 LLM_PROMPT = """You are reading one scanned document from a ship-repair workshop.
@@ -670,14 +757,17 @@ def add_nameplate_warnings(df: pd.DataFrame, machine_ids: set | None = None) -> 
 
 # ----------------------------------------------------------------- common ---
 
+NOTE_WARNINGS = {"disagreed": "ocr_disagreed", "failed_format": "failed_format",
+                 "read_from_value_ink": "read_from_value_ink"}
+
+
 def _with_warnings(df: pd.DataFrame, flags: dict) -> pd.DataFrame:
     """Comma-separated warning names; OCR notes become ocr_disagreed_<field> /
-    failed_format_<field>."""
+    failed_format_<field> / read_from_value_ink_<field>."""
     f = pd.DataFrame({k: _bool(pd.Series(v, index=df.index)) for k, v in flags.items()},
                      index=df.index)
     ocr = df["ocr_notes"].map(lambda notes: [
-        f"{'ocr_disagreed' if n['issue'] == 'disagreed' else 'failed_format'}_{n['field']}"
-        for n in (notes or [])])
+        f"{NOTE_WARNINGS.get(n['issue'], n['issue'])}_{n['field']}" for n in (notes or [])])
     df["warnings"] = [",".join([*f.columns[row].tolist(), *extra]) or None
                       for row, extra in zip(f.to_numpy(), ocr)]
     return df
@@ -823,7 +913,14 @@ def interpret(ex: Extraction) -> tuple[str, dict, list, str | None]:
         doc_type = classify(joined)
         if doc_type not in PARSERS:
             return doc_type, {}, [], joined
-        fields, notes = vote({k: PARSERS[doc_type](t) for k, t in ex.texts.items()}, doc_type)
+        candidates = {k: PARSERS[doc_type](t) for k, t in ex.texts.items()}
+        if ex.ink and doc_type == "incident_report":
+            candidates["blue_ink"] = dict(ex.ink)        # last: loses ties to the page reads
+        fields, notes = vote(candidates, doc_type)
+        for fld, value in (ex.ink or {}).items():
+            page = {_same(c.get(fld)) for n, c in candidates.items() if n != "blue_ink"}
+            if fields.get(fld) == value and _same(value) not in page:
+                notes.append({"field": fld, "issue": "read_from_value_ink", "chose": value})
         return doc_type, fields, notes, joined
     fields = dict(ex.fields or {})
     raw_type = (fields.pop("doc_type", None) or "").lower().replace(" ", "_")

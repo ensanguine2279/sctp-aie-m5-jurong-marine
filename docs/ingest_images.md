@@ -1,4 +1,4 @@
-# ingest_images.py: scanned nameplates and incident forms
+=# ingest_images.py: scanned nameplates and incident forms
 
 `scripts/ingest_images.py` reads every image in a folder (by default `data/images/`), works
 out whether it is a **machine nameplate** or a **WSH-F02 incident report form**, reads its
@@ -50,19 +50,86 @@ employee codes included, through the proxy: say so if asked about PDPA.
 | Step | What it does |
 |---|---|
 | `folder_files` | Every `.jpg .jpeg .png .tif .tiff .bmp .webp` directly in the folder, by name |
-| `extract` | Tesseract reads **three versions** of the image: plain grey, Otsu threshold, adaptive threshold. No single version reads every field right: on the BLAST-01 plate Otsu reads `1000 h` as `1660 h` and the tag as `BLAST!`, plain grey reads `M68` as `M66`. Results are cached by the image's SHA-256 in `.cache/ingest_images/` (git-ignored), so unchanged images aren't read again; `--no-cache` turns it off |
+| `extract` | Tesseract reads **three versions** of the page (below). On incident forms it also reads the severity digit from the **blue value ink** alone (below). Results are cached by the image's SHA-256 in `.cache/ingest_images/` (git-ignored), so unchanged images aren't read again; `--no-cache` turns it off |
 | `classify` | `incident_report` (title, `WSH-F02`, `Report No`), `nameplate` (`SERIAL`, `ASSET TAG`, `MFG DATE`), or `unknown` |
 | `parse_*_text` | Label -> value, tolerant of OCR splitting a word (`Loc ation/machine`) |
-| `vote` | Per field, the reading most versions agree on, among those that pass the field's format check (`IR-yyyy-nnn`, `EMP001`, a tag like `BLAST-01`, an ISO VG oil grade, `1000 h`). Ties go to plain grey. Every disagreement is kept in `ocr_notes` and flagged `ocr_disagreed_<field>`; a value that fails its check is kept and flagged `failed_format_<field>` |
+| `vote` | Per field, up to **four readings** are voted: the three page versions plus, for severity on a form, the blue-ink reading (below) |
 | `clean_*` | Ids (`IR-2024-9OO` -> `IR-2024-900`, `EMPOO1` -> `EMP001`; letters->digits only where digits belong, so `BLAST` stays `BLAST`), numbers and units (weight in lb or t -> kg, flagged), dates (same day-first parser as `ingest_cmms.py`), severity (below) |
 | `split_rejects` | Image rejected: `unreadable_image`, `unknown_document_type`, `duplicate_image` (same bytes as another image), `missing_key` (no readable tag or report no), `duplicate_key` / `duplicate_key_conflict` (a second image for the same machine or incident; conflict = its values differ, so review it) |
 | `add_*_warnings` | Loaded, but flagged (table below) |
 | `load` | One transaction; a failed load changes nothing |
 
+### Four-pass voting
+
+No single reading gets every field right, so each image is read several ways and the
+fields are voted (`preprocess_variants`, `vote`):
+
+| Pass | How the image is prepared | Why it's there |
+|---|---|---|
+| 1. `gray` | Grey, upscaled 2x (cubic) | Keeps thin and faint strokes. Wins ties |
+| 2. `otsu` | Denoised (`fastNlMeansDenoising`), then one global Otsu threshold | Cleanest on evenly lit scans. Also used to find signature ink |
+| 3. `adaptive` | Light blur, then a local (Gaussian, 31 px) threshold | Copes with shadows and uneven lighting on photos |
+| 4. `blue_ink` | Incident forms only: the severity digit read from the blue value ink (next section) | Recovers the severity when the label print covers it |
+
+Each page pass is OCR'd in full (`--psm 6`) and parsed on its own. Then, per field:
+
+1. **Format check first.** Only readings that pass the field's check are counted
+   (`IR-yyyy-nnn`, `EMP001`, a machine id like `BLAST-01`, an ISO VG oil grade, `1000 h`).
+   If none passes, all are counted and the result is flagged `failed_format_<field>`.
+2. **Majority.** Readings that differ only in case, spaces or punctuation count as the same.
+   The value most passes agree on wins.
+3. **Ties** go to the earlier pass: gray, otsu, adaptive, then blue ink. The blue-ink pass
+   is last on purpose, so it **can never outvote page readings that agree**. It only
+   decides the severity when the page passes lost it.
+4. **Nothing is thrown away.** Every disagreement is kept in `ocr_notes` with each pass's
+   reading and the one chosen, flagged `ocr_disagreed_<field>`.
+
+Example from the BLAST-01 plate: Otsu reads `1000 h` as `1660 h` and the tag as `BLAST!`,
+gray reads `M68` as `M66`. The vote gets all three right: `1000 h` (2 of 3), `BLAST-01`
+(Otsu's `BLAST!` fails the tag check, so it isn't counted), `M68` (2 of 3).
+
+### Colour separation: severity from the blue value ink
+
+On the new WSH-F02 form (from July 2025) the label `Severity (5 = MOST SEVERE, new WSH
+matrix):` runs into the value column, and the severity number is printed **in blue over the
+grey word "WSH"**. All three page passes then read the line as something like
+`new W8H matrix`, and the number is lost ([trap list I12](trap_list.md)).
+
+The form prints every **value in blue** and every **label in grey/black**, so separating by
+colour leaves the digit on its own (`severity_from_ink`):
+
+1. **Find the line.** `severity_band` locates the word "Severity" with
+   `image_to_data` and crops its line, from the label to the right edge.
+2. **Keep only blue ink.** `value_ink_mask` turns blue pixels black and everything else
+   (grey print, paper) white. Two kinds of mask:
+   - **`excess`:** blue channel minus red channel above a threshold (and not near white).
+     Grey print has blue ≈ red, so it drops out, and blue ink still shows **where it
+     overlaps the grey letters**, which a hue test misses.
+   - **`hsv`:** hue 95–145 (blue) with at least a set saturation. Cleaner strokes on parts
+     of the digit that don't overlap the print.
+3. **Read each mask.** Tesseract in single-line mode (`--psm 7`) with only `12345` allowed,
+   so it can't return a letter or a digit outside the scale.
+4. **Vote across 10 masks** (`INK_MASKS`: both kinds, at 1x and 4x scale, with different
+   thresholds, blur and closing). One mask doesn't suit every scan: a low threshold keeps
+   thin strokes where blue crosses grey but merges a bold digit with the print, and a high
+   one breaks strokes. `ink_majority` accepts a digit only if **at least 3 masks** read it
+   **and more than twice as many as any other digit**. Otherwise it **abstains**: the
+   severity stays unread and flagged, never guessed.
+5. The digit joins the field vote as the fourth pass. When it supplies a value no page pass
+   read, the note `read_from_value_ink` is added, flagged `read_from_value_ink_severity`.
+
+Result on the 9 new-scale forms: 6 read, **0 wrong**. 904, 913, 939, 953 and 975 agree
+with the CMMS; 906 reads 3 (its CMMS row is `ambiguous`, July 2025). The reader abstained
+on 911, 922 and 955, which stay NULL. Query: [trap list I12](trap_list.md).
+
+The cache file name carries the engine tag (`tesseract-v2` since the blue-ink pass was
+added). Change `TESSERACT_TAG` whenever preprocessing changes, so old cached reads are
+ignored; old-tag files can then be deleted.
+
 ## Severity: the scale printed on the form
 
 The CMMS severity scale flipped in July 2025 and old records were never converted
-([trap list C1-C3](trap_list.md#cmms-dump-jurongmarine_cmmssql)). `ingest_cmms.py` converts **by date**. The forms print
+([trap list C1-C3](trap_list.md)). `ingest_cmms.py` converts **by date**. The forms print
 their scale next to the field: `Severity (1 = MOST SEVERE): 4`. So for every incident with a
 scanned form, the form says which scale that number is on:
 
@@ -79,6 +146,7 @@ Warnings that matter for the audit:
 | `form_scale_contradicts_date_rule` | The form's printed scale is not the one its date implies. Evidence for C3 (some old records already on the new scale?). The form's value is kept; the CMMS value is not changed |
 | `form_scale_in_cutover_month` | A July 2025 form: the date rule leaves it unconverted (`ambiguous`); the form settles it. If incident 907's form is among the scans, this answers client question Q1 for it |
 | `severity_scale_not_on_form` | The label couldn't be read: `severity_5_worst` is NULL |
+| `read_from_value_ink_severity` | The number came from the blue-ink pass only; the page passes lost it |
 
 `incident_report_vs_cmms` (made by `relationships.py`) compares the form's
 `severity_5_worst` with the CMMS's, field by field.
@@ -87,7 +155,7 @@ Warnings that matter for the audit:
 
 | Table / view | What it holds |
 |---|---|
-| `img_documents_raw` | One row per image: `source_folder`, `source_file`, `image_sha256`, `doc_type`, `ocr_engine`, `fields_raw` (JSON, each field as read), `ocr_notes` (JSON, disagreements), `ocr_text` (everything Tesseract read, all three versions), `status`, `reject_reason`, `duplicate_of_raw_id`, `warnings` |
+| `img_documents_raw` | One row per image: `source_folder`, `source_file`, `image_sha256`, `doc_type`, `ocr_engine`, `fields_raw` (JSON, each field as read), `ocr_notes` (JSON, disagreements and blue-ink reads), `ocr_text` (everything Tesseract read, all three page versions), `status`, `reject_reason`, `duplicate_of_raw_id`, `warnings` |
 | `img_nameplates` | One per machine, key `asset_tag`: manufacturer, model, serial_no, mfg_month, power_kw, phases, voltage_min_v / max, capacity_raw, rated_current_a, duty_cycle_pct, weight_kg, lubricant, grease_interval_h |
 | `img_incident_reports` | One per incident, key `incident_id`: report_no, incident_date, machine_id, location_raw, emp_code, description, severity (3 columns above), lost_days, reporting, immediate_action, root_cause, root_cause_attached, signature_present |
 | `img_nameplates_audit`, `img_incident_reports_audit` (views) | Clean + image file + its SHA-256 + run. **Cite these**: "nameplate photo `nameplate_BLAST-01.jpg`" |
@@ -104,8 +172,9 @@ as loaded" column.
 
 | Warning | On | Meaning |
 |---|---|---|
-| `ocr_disagreed_<field>` | both | The three readings differed; see `ocr_notes` for each one and which was kept |
+| `ocr_disagreed_<field>` | both | The passes' readings differed; see `ocr_notes` for each one and which was kept |
 | `failed_format_<field>` | both | No reading passed the field's format check; the value is kept as read |
+| `read_from_value_ink_<field>` | form | The value came only from the blue-ink pass (so far only `severity`) |
 | `unknown_machine` | both | Tag / machine not in `cmms_machines` (only checked when the CMMS is loaded; `relationships.py` checks again) |
 | `placeholder_manufacturer` | plate | `CUSTOM`, `GENERIC`, ... : the real maker is unknown |
 | `duty_cycle_rating_on_non_welder` | plate | A rating like `450 A @ 60%` (how welding power sources are rated) on a machine that isn't a `WELD-*` |
@@ -127,7 +196,8 @@ as loaded" column.
   read (`agent_user.py` grants only the `*_audit` views and the linking views, never `*_raw`).
 - The audit views give the file name and hash for citations, not the OCR text.
 - The OCR cache (`.cache/ingest_images/`) holds the same text as the raw table; it is
-  git-ignored. Delete it with the rest of the data after the project.
+  git-ignored. Delete files from old engine tags once the new ones exist, and the whole
+  cache with the rest of the data after the project.
 - `--engine llm` sends the images through the class proxy (Singapore VM) to the model.
 
 ## Run summary
@@ -135,7 +205,7 @@ as loaded" column.
 ```
 Rows read: 2   loaded: 2   rejected: 0
 Document types: incident_report=1, nameplate=1 (total 2)
-OCR engine: tesseract-v1=2 (total 2)
+OCR engine: tesseract-v2=2 (total 2)
 
 nameplates: loaded 1
   Loaded with warnings: duty_cycle_rating_on_non_welder=1, ocr_disagreed_asset_tag=1, ocr_disagreed_grease_interval=1, ocr_disagreed_lubricant=1, ocr_disagreed_power=1, placeholder_manufacturer=1 (total 6)
@@ -147,7 +217,8 @@ incident_reports: loaded 1
 Machine ids: checked against cmms_machines (12 machines)
 ```
 
-One row is one image. `Rows read` = loaded + rejected.
+One row is one image. `Rows read` = loaded + rejected. (Sample run on the first two scans;
+the full folder is 42 images: 30 forms, 12 nameplates.)
 
 ## Audit queries
 
@@ -169,6 +240,14 @@ SELECT r.source_file, r.incident_id, r.incident_date, r.severity_as_logged, r.se
 FROM img_incident_reports_audit r JOIN img_documents_raw d ON d.raw_id = r.raw_id
 WHERE d.warnings LIKE '%form_scale%';
 
+-- Severities recovered from the blue value ink, and how they compare with the CMMS
+SELECT r.incident_id, r.severity_5_worst AS form, c.logged_value AS cmms, c.agrees
+FROM img_incident_reports_audit r
+JOIN img_documents_raw d ON d.raw_id = r.raw_id
+LEFT JOIN incident_report_vs_cmms c
+       ON c.incident_id = r.incident_id AND c.field = 'severity_5_worst'
+WHERE d.warnings LIKE '%read_from_value_ink%';
+
 -- Every reading of every field OCR was unsure about (as the ingest user)
 SELECT source_file, warnings, ocr_notes FROM img_documents_raw WHERE ocr_notes IS NOT NULL;
 
@@ -179,17 +258,25 @@ WHERE status = 'rejected';
 
 ## Tests
 
-`tests/test_images.py` (35 tests, no database, Tesseract or LLM needed): the OCR text the
-two sample scans actually produced, with Tesseract's mistakes, is passed in directly.
+`tests/test_images.py` (56 tests, no database, Tesseract or LLM needed): the OCR text the
+sample scans actually produced, with Tesseract's mistakes, is passed in directly.
 Covers classifying, label parsing (`Loc ation`), the printed-scale label in every form
 (`1 = MOST SEVERE`, `5=WORST`, `1 = least severe`, unreadable), voting (majority, format
-checks, ties, spacing-only differences), id fixes that keep `BLAST` as `BLAST`, both
-document types end to end, a form contradicting the date rule, a July 2025 form settling
-the ambiguity, an unreadable scale never guessed, a name instead of an `EMP` code never
-stored, welding ratings, lb -> kg, every reject reason, duplicates against earlier folders,
-the LLM engine's fields, the cache, the folder hash, the audit views leaving OCR text out,
-and a dry run the pipeline can parse. `test_the_real_scans_read_correctly` OCRs the two
-real scans when Tesseract and `data/images/` are present, and is skipped otherwise.
+checks, ties, spacing-only differences, the only reading shaped like a machine id), id fixes
+that keep `BLAST` as `BLAST`, both document types end to end, a form contradicting the date
+rule, a July 2025 form settling the ambiguity, an unreadable scale never guessed, a name
+instead of an `EMP` code never stored, welding ratings, lb -> kg, every reject reason,
+duplicates against earlier folders, the LLM engine's fields, the cache, the folder hash, the
+audit views leaving OCR text out, and a dry run the pipeline can parse.
+
+Blue-ink pass: it recovers a severity the page text lost (and flags it), it never outvotes
+page readings that agree, without it the severity stays unread, `ink_majority` abstains on
+weak or split votes, and on a drawn mock of the overlapping line it returns the right digit
+or nothing, never another digit.
+
+`test_the_real_scans_read_correctly` and `test_the_real_new_forms_give_their_severity_from_the_value_ink`
+(904 -> 2, 906 -> 3) OCR the real scans when Tesseract and `data/images/` are present, and
+are skipped otherwise.
 
 **Not covered:** the MySQL DDL, the load and the two views in `relationships.py` against a
 real server. Check with `pipeline.py --recreate`, then the audit queries above.
