@@ -101,3 +101,62 @@ def test_duplicates_against_rows_already_in_db():
              .pipe(logs.clean_values).pipe(logs.split_rejects, seen=seen))
     assert out["reject_reason"].tolist() == ["duplicate_reading"]
     assert out["duplicate_of_raw_id"].tolist() == [55]
+
+
+# ------------------------------------------------------------ line endings ---
+# TRAP_LIST.md L8: the client's vibration_temp_2026H1.csv has Windows (CRLF) line
+# endings. A reader that splits on '\n' only leaves '\r' on the last field, so the
+# header becomes 'temp_unit\r' and the load stops. These check that a CRLF file is
+# read exactly like the same file with LF endings.
+
+# First lines of vibration_temp_2026H1.csv verbatim, plus a Fahrenheit reading on a
+# last line with no trailing newline (where a stray '\r' is most often left).
+CRLF_ROWS = [
+    "timestamp,machine_id,vib_rms_mms,temp,temp_unit",
+    "2026-01-01T00:00:00+08:00,CNC-01,1.78,39.4,C",
+    "2026-01-01T00:00:00+08:00,CNC-02,2.35,56.6,C",
+    "1767196800000,CNC-03,2.19,141.4,F",
+    "1767196800000,CMP-01,3.32,112.2,F",
+    "1767196800000,PMP-T01,2.68,46.7,C",
+    "1767197520000,CNC-01,2.01,47.4,C",
+    "2026-01-01T00:12:00+08:00,CNC-03,2.21,140.0,F",
+]
+
+
+def _process_file(path):
+    stats = Counter()
+    chunks = list(logs.process(str(path), chunk_size=3, source_tz="Asia/Singapore",
+                               stats=stats))
+    raw = pd.concat([c[0] for c in chunks], ignore_index=True)
+    clean = pd.concat([c[1] for c in chunks], ignore_index=True)
+    return raw, clean, stats
+
+
+def test_crlf_file_keeps_every_temperature(tmp_path):
+    path = tmp_path / "crlf.csv"
+    path.write_bytes("\r\n".join(CRLF_ROWS).encode())
+    assert path.read_bytes().count(b"\r\n") == len(CRLF_ROWS) - 1  # really CRLF
+
+    raw, clean, stats = _process_file(path)
+
+    assert stats["rows_read"] == len(CRLF_ROWS) - 1
+    assert stats["rows_rejected"] == 0
+    assert not any(k.startswith("warn:") for k in stats), dict(stats)
+    assert not raw["temp_unit"].str.contains("\r").any()  # raw text stored without '\r'
+    assert set(raw["temp_unit"]) == {"C", "F"}
+    assert clean["temp_c"].tolist() == [39.4, 56.6, 60.78, 44.56, 46.7, 47.4, 60.0]
+    assert raw["source_line"].tolist() == list(range(2, len(CRLF_ROWS) + 1))
+
+
+def test_crlf_and_lf_give_the_same_result(tmp_path):
+    crlf, lf = tmp_path / "crlf.csv", tmp_path / "lf.csv"
+    crlf.write_bytes(("\r\n".join(CRLF_ROWS) + "\r\n").encode())
+    lf.write_bytes(("\n".join(CRLF_ROWS) + "\n").encode())
+
+    raw_c, clean_c, stats_c = _process_file(crlf)
+    raw_l, clean_l, stats_l = _process_file(lf)
+
+    pd.testing.assert_frame_equal(clean_c, clean_l)
+    pd.testing.assert_frame_equal(raw_c.drop(columns="source_file"),
+                                  raw_l.drop(columns="source_file"))
+    assert stats_c == stats_l

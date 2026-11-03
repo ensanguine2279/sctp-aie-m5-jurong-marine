@@ -9,6 +9,7 @@ in it can drop or overwrite our tables.
 - **Script:** `scripts/ingest_cmms.py`
 - **Shared modules:** `scripts/db_config.py` (settings, DB connection), `scripts/lineage.py` (run log)
 - **Tests:** `tests/test_cmms.py` (`pytest`, no database needed)
+- **Data audit:** problems found in the client's dump, with record IDs, in [`TRAP_LIST.md`](TRAP_LIST.md#cmms-dump-jurongmarine_cmmssql)
 
 ---
 
@@ -56,16 +57,22 @@ A MySQL dump (mysqldump or a DBeaver export; backtick or double-quoted names bot
 Only `INSERT` statements are read as data; `CREATE TABLE` is read for column order only;
 everything else (`DROP`, `LOCK`, `SET`, comments) is counted and ignored.
 
-| Table | Columns | Key |
-|---|---|---|
-| `machines` | `machine_id`, `machine_name`, `model`, `year_installed` | `machine_id` |
-| `employees` | `emp_id`, `emp_code`, `emp_name`, `trade`, `shift` | `emp_id` |
-| `work_orders` | `wo_id`, `machine_id`, `wo_type`, `description`, `wo_date`, `duration_hrs`, `cost_sgd`, `emp_code`, `status` | `wo_id` |
-| `safety_incidents` | `incident_id`, `incident_date`, `machine_id`, `description`, `severity`, `lost_days`, `emp_code`, `reporting` | `incident_id` |
+| Table | Columns | Key | In the client's dump |
+|---|---|---|---|
+| `machines` | `machine_id`, `machine_name`, `model`, `year_installed` | `machine_id` | 12 rows |
+| `employees` | `emp_id`, `emp_code`, `emp_name`, `trade`, `shift` | `emp_id` | 32 rows, `EMP001`–`EMP032` |
+| `work_orders` | `wo_id`, `machine_id`, `wo_type`, `description`, `wo_date`, `duration_hrs`, `cost_sgd`, `emp_code`, `status` | `wo_id` | 1,603 rows (10001–11603) in 4 INSERTs, 2024-01-01 to 2026-06-30 |
+| `safety_incidents` | `incident_id`, `incident_date`, `machine_id`, `description`, `severity`, `lost_days`, `emp_code`, `reporting` | `incident_id` | 85 rows (900–984), 2024-01-24 to 2026-06-18 |
 
 Values are matched to columns by the INSERT's column list if it has one, otherwise by
 the dump's `CREATE TABLE` order. Any other table in the dump is listed in the summary
 and **not** loaded (add a `TableSpec` to load it).
+
+The client's dump is clean in form: every date is `YYYY-MM-DD`, every number is plain,
+and every key is present and unique. Its problems are in the meaning of the data (the
+severity flip, descriptions that don't fit the machine, coded `lost_days`), which is why
+most of them are client questions rather than reject rules. See
+[`TRAP_LIST.md`](TRAP_LIST.md#cmms-dump-jurongmarine_cmmssql).
 
 ---
 
@@ -181,6 +188,8 @@ silently loaded as NULL. Negative values are kept and flagged (`negative_<column
 | blank | NULL | `missing_date` |
 | `0000-00-00`, anything else | NULL | `bad_date` |
 
+All dates in the client's dump are `YYYY-MM-DD`, so the day-first rule isn't used on it.
+
 ### Severity: `normalise_severity`
 
 The scale flipped from **1 = worst** to **5 = worst** in July 2025 and old records were
@@ -197,12 +206,21 @@ unconverted until the client confirms the exact switch-over day; then re-run wit
 `--severity-cutover 2025-07-14 --severity-ambiguous-until none`. The distinct values of
 `reporting` (in the summary) may show which form, and so which scale, each record used.
 
+The data supports the rule. Before the cutover, 36 of 48 incidents are logged 4 or 5;
+after it, 24 of 37 are logged 1 or 2. Converted with `6 − s`, the old period has the
+same shape as the new one. Only two incidents fall in July 2025: **906** (logged 3, the
+same on both scales) and **907** (logged 2, so 2 or 4 depending on the cutover day).
+Details in [`TRAP_LIST.md`](TRAP_LIST.md) (C1, C2).
+
 ### Duplicates: `split_rejects`
 
 A row is a duplicate if another row has the same **key**. The first one seen is kept;
 later ones are rejected with `duplicate_of_raw_id` pointing at the kept row. If the
 values differ from the kept row the reason is `duplicate_key_conflict`, so it gets
 reviewed. Keys already loaded from **other** files count too.
+
+This only catches a repeated **key**. A work order entered twice under two different
+`wo_id`s isn't caught; see [Assumptions and limitations](#assumptions-and-limitations).
 
 ### References: `check_references`
 
@@ -354,6 +372,10 @@ WHERE warnings LIKE '%unknown_%';
 SELECT d.source_line, d.raw_tuple, d.reject_reason, k.source_line AS kept_line, k.raw_tuple AS kept
 FROM cmms_work_orders_raw d JOIN cmms_work_orders_raw k ON k.raw_id = d.duplicate_of_raw_id;
 
+-- Possible double entries the key check can't see: same machine, day and type
+SELECT machine_id, wo_date, wo_type, COUNT(*) AS n, GROUP_CONCAT(wo_id) AS wo_ids
+FROM cmms_work_orders GROUP BY machine_id, wo_date, wo_type HAVING n > 1 ORDER BY wo_date;
+
 -- Load history
 SELECT run_id, source_file, status, rows_read, rows_loaded, rows_rejected, started_at, error
 FROM ingest_runs WHERE script = 'ingest_cmms.py' ORDER BY run_id DESC;
@@ -364,7 +386,37 @@ FROM ingest_runs WHERE script = 'ingest_cmms.py' ORDER BY run_id DESC;
 ## Run summary
 
 Every run (dry or real) ends with counts you can copy into the data quality report.
-Example from a deliberately messy test dump:
+
+**On the client's dump** (`--dry-run`, 3 Nov 2026):
+
+```
+Rows read: 1732   loaded: 1732   rejected: 0
+Statements in dump: create=1, create_table=4, drop=4, insert=7, set=3, use=1 (total 20)
+
+machines: read 12, loaded 12, rejected 0
+
+employees: read 32, loaded 32, rejected 0
+  trade: crane op=2, electrician=4, fitter=10, machinist=5, qa inspector=11 (total 32)
+  shift: day=20, night=12 (total 32)
+
+work_orders: read 1603, loaded 1603, rejected 0
+  wo_type: breakdown=279, corrective=647, preventive=677 (total 1603)
+  status: awaiting parts=12, closed=1569, open=22 (total 1603)
+
+safety_incidents: read 85, loaded 85, rejected 0
+  Loaded with gaps: severity_scale_ambiguous=2 (total 2)
+  severity_scale: 1_worst=48, 5_worst=35, ambiguous=2 (total 85)
+  reporting: found during audit=35, reported next day=25, reported same day=25 (total 85)
+
+Severity: before 2025-07-01 the scale was 1 = worst (converted); from then 5 = worst.
+          Incidents 2025-07-01 to 2025-07-31 left unconverted (switch-over date unconfirmed).
+```
+
+No orphan machines or employees, no duplicates, no unreadable values. The only
+warnings are the two July 2025 incidents (906, 907) waiting on the cutover date. If a
+dry run of the same dump shows anything different, the file or the code has changed.
+
+Example from a deliberately messy test dump, showing the other lines that can appear:
 
 ```
 Rows read: 17   loaded: 15   rejected: 2
@@ -400,14 +452,18 @@ and the first shows the confirmed date.
 
 ## Assumptions and limitations
 
-- **Severity cutover** is assumed to be 1 July 2025, with all of July left unconverted. Confirm the exact day with the client.
-- **Slash dates are day-first** (Singapore convention). Each one is warned; check the count on the real dump.
-- **Category synonyms aren't merged.** Only case and spacing are normalised.
+- **Severity cutover** is assumed to be 1 July 2025, with all of July left unconverted. Confirm the exact day with the client; on the client's dump this decides only incident 907.
+- **Severity is converted by date alone.** Several old-scale incidents have lost days that don't fit their severity (e.g. 982 logged 4, minor on the old scale, with 14 lost days). If some old records already used the new scale, a per-record rule is needed. Client question Q2 in the [README](../README.md#needs-the-clients-input).
+- **`lost_days` is loaded as a count,** but in the client's dump it only ever takes 0, 1, 2, 5 or 14, which looks like a coded band. Don't sum it until the client confirms what it means.
+- **Slash dates are day-first** (Singapore convention). Each one is warned; the client's dump has none.
+- **Duplicates are found by key only.** Two work orders with different `wo_id`s but the same machine, date, type and technician (10727 and 10728) both load. Use the double-entries audit query above to list candidates.
+- **Descriptions are loaded as written,** even where they don't fit the machine (e.g. `crane limit switch fault` on CNC-02). Cite them; don't reason from them.
+- **Category synonyms aren't merged.** Only case and spacing are normalised. The client's dump has none to merge.
 - **Foreign keys aren't enforced** between the clean tables, so orphans can be kept and flagged. Fix them, then add constraints (`add_foreign_keys.sql`).
 - **Only four tables have specs.** Other tables in the dump are reported and skipped.
 - **Re-loading is keyed on the file name,** not its content. A renamed copy of the same dump is treated as a new file, and its rows become duplicates.
 - **Line numbers** are where each tuple *starts*; `tuple_no` gives its position in a multi-row INSERT.
-- **Not yet run against a live MySQL.** Parsing and cleaning are tested; do a `--dry-run` on the real dump, then a first load on a scratch database.
+- **Not yet run against a live MySQL.** Parsing and cleaning are tested, and the dry run on the client's dump matches the summary above; do a first load on a scratch database next.
 
 ---
 

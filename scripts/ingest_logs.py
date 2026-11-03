@@ -319,7 +319,7 @@ def print_report(stats: Counter) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("csv", nargs="?", default=os.getenv("CSV_FILE", "./log/vibration_temp_sample.csv"))
+    ap.add_argument("csv", nargs="?", default=os.getenv("CSV_FILE", "data/logs/vibration_temp_2026H1.csv"))
     ap.add_argument("--table", default="vibration_temp")
     ap.add_argument("--chunk-size", type=int, default=10_000)
     ap.add_argument("--source-tz", default=STORE_TZ,

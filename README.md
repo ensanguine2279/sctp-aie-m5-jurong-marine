@@ -10,9 +10,14 @@ you can paste into the data quality report.
 | `scripts/ingest_logs.py` | Sensor log CSV (`vibration_temp_*.csv`) | [`ingest_logs.md`](docs/ingest_logs.md) |
 | `scripts/ingest_spares.py` | Critical spares sheet (`critical_spares.xlsx`) | [`ingest_spares.md`](docs/ingest_spares.md) |
 | `scripts/ingest_cmms.py` | CMMS SQL dump (`jurongmarine_cmms.sql`) | [`ingest_cmms.md`](docs/ingest_cmms.md) |
-| `scripts/relationships.py` | The loaded tables: links the three sources | [`relationships.md`](docs/relationships.md), [ER diagram](docs/er_diagram.md) |
+| `scripts/ingest_images.py` | Scanned nameplates and incident report forms (`data/images/`) | [`ingest_images.md`](docs/ingest_images.md) |
+| `scripts/relationships.py` | The loaded tables: links the four sources | [`relationships.md`](docs/relationships.md), [ER diagram](docs/er_diagram.md) |
 | `scripts/agent_user.py` | Creates the app's read-only database user (PDPA) | [`agent_user.md`](docs/agent_user.md) |
 | `scripts/pipeline.py` | Runs all of the above in order, writes a Markdown report | [`pipeline.md`](docs/pipeline.md) |
+| `scripts/audit_sensor_csv.py` | Profiles a sensor CSV without loading it: formats, units, ids, gaps, duplicates, outliers, with line numbers | [`TRAP_LIST.md`](docs/TRAP_LIST.md#sensor-log-vibration_temp_2026h1csv) |
+
+Every data-quality problem found so far, with evidence, is in
+[`TRAP_LIST.md`](docs/TRAP_LIST.md).
 
 ```bash
 python -m venv .venv
@@ -30,10 +35,19 @@ python scripts/ingest_spares.py data/tabular/critical_spares.xlsx --dry-run
 python scripts/ingest_spares.py data/tabular/critical_spares.xlsx --recreate     # first load
 python scripts/ingest_cmms.py   data/sql/jurongmarine_cmms.sql --dry-run
 python scripts/ingest_cmms.py   data/sql/jurongmarine_cmms.sql --recreate        # first load
+python scripts/ingest_images.py data/images --dry-run                            # needs Tesseract, see below
+python scripts/ingest_images.py data/images --recreate                           # first load
 
 python scripts/relationships.py --mermaid docs/er_diagram.md   # link the sources (after the loads)
 python scripts/agent_user.py                                   # the app's read-only user, then a check
 ```
+
+**The images need Tesseract** (free, offline OCR), installed once: Windows from
+[UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki) (default folder), WSL/Ubuntu
+`sudo apt install tesseract-ocr`, macOS `brew install tesseract`. The Python side is
+`pytesseract` and `opencv-python-headless` (add them to `requirements.txt`). `--engine llm`
+uses the class LLM endpoint's vision model instead
+([`ingest_images.md`](docs/ingest_images.md#setup-tesseract)).
 
 Or run the loads and `relationships.py` in one go, with a report of the results in
 `reports/` ([`pipeline.md`](docs/pipeline.md)):
@@ -101,7 +115,7 @@ The [ER diagram](docs/er_diagram.md) shows the cleaned tables and how they link;
 
 | Table | What it holds | Made by |
 |---|---|---|
-| `ingest_runs` | One row per run: script, file name, file SHA-256, git commit, time, row counts, `success`/`failed` + error. `relationships.py` runs appear as source `(database)` | every script |
+| `ingest_runs` | One row per run: script, file name, file SHA-256, git commit, time, row counts, `success`/`failed` + error. `relationships.py` runs appear as source `(database)`; image loads as the folder, with one hash over all its images | every script |
 | `vibration_temp_raw` | Every CSV row exactly as in the file (text), with `source_line`, `status` (`loaded`/`rejected`), `reject_reason`, `duplicate_of_raw_id`, `warnings` | [`ingest_logs`](docs/ingest_logs.md) |
 | `vibration_temp` | Cleaned readings only; `raw_id` links each to its raw row | [`ingest_logs`](docs/ingest_logs.md) |
 | `vibration_temp_audit` (view) | Clean + raw + run joined: use this for citations | [`ingest_logs`](docs/ingest_logs.md) |
@@ -112,16 +126,23 @@ The [ER diagram](docs/er_diagram.md) shows the cleaned tables and how they link;
 | `cmms_<table>_raw` | For `machines`, `employees`, `work_orders`, `safety_incidents`: every INSERT tuple exactly as in the dump (text), with `source_line`, `tuple_no`, `raw_tuple`, `status`, `reject_reason`, `duplicate_of_raw_id`, `warnings`. The dump's `work_orders.status` is stored as `status_src` | [`ingest_cmms`](docs/ingest_cmms.md) |
 | `cmms_<table>` | Cleaned rows only; `raw_id` links each to its raw row. Incidents carry `severity_as_logged`, `severity_scale` and `severity_5_worst` | [`ingest_cmms`](docs/ingest_cmms.md) |
 | `cmms_<table>_audit` (view) | Clean + raw + run joined: use this for citations | [`ingest_cmms`](docs/ingest_cmms.md) |
+| `img_documents_raw` | One row per image: file name, its SHA-256, document type, OCR engine, each field as read (JSON), where the OCR readings disagreed, the OCR text, `status`, `reject_reason`, `warnings` | [`ingest_images`](docs/ingest_images.md) |
+| `img_nameplates` | One per machine (`asset_tag` = `machine_id`): serial, power, weight, **lubricant**, **grease interval**, ... | [`ingest_images`](docs/ingest_images.md) |
+| `img_incident_reports` | One per incident (`IR-2024-900` -> `incident_id` 900): immediate action, root cause, signature, severity on the **scale printed on the form** | [`ingest_images`](docs/ingest_images.md) |
+| `img_nameplates_audit`, `img_incident_reports_audit` (views) | Clean + image file + its SHA-256 + run: use these for citations | [`ingest_images`](docs/ingest_images.md) |
 | `table_relationships` | One row per link between sources (see below): child and parent column, `fk`/`soft`, rows checked, matched, orphans and which keys, `run_id` of the run that checked it | [`relationships`](docs/relationships.md) |
 | `machine_overview` (view) | One row per machine: work orders, breakdowns, open WOs, incidents, lost days, spares, spares below min, sensor readings and their date range | [`relationships`](docs/relationships.md#views) |
 | `machine_spares` (view) | Spares per machine, with `ALL` expanded to every machine | [`relationships`](docs/relationships.md#views) |
 | `work_order_detail` (view) | Work orders + machine + employee trade/shift (no names) | [`relationships`](docs/relationships.md#views) |
 | `incident_detail` (view) | Incidents + machine + employee trade/shift; severity as `severity_5_worst` only | [`relationships`](docs/relationships.md#views) |
 | `work_order_sensor_window` (view) | Each work order with the sensor readings in the 7 days up to it (`--window-days`) | [`relationships`](docs/relationships.md#views) |
+| `machine_nameplate` (view) | Every machine with its nameplate's values; `has_nameplate = 0` if there is no photo | [`relationships`](docs/relationships.md#views) |
+| `incident_report_vs_cmms` (view) | Scanned form vs CMMS, one row per field: `form_value`, `logged_value`, `agrees` | [`relationships`](docs/relationships.md#views) |
 
 Re-loading a sensor file or a CMMS dump replaces that file's rows (other files are
 kept). The spares sheet is a complete list, so each spares load replaces all spares
-rows with the new sheet; `ingest_runs` keeps the history of what was loaded when.
+rows with the new sheet; the images folder likewise replaces every row from that folder.
+`ingest_runs` keeps the history of what was loaded when.
 Spares `raw_id` = `run_id * 100000 + sheet row`, so `300008` is run 3, row 8.
 
 ## Linking the sources
@@ -138,13 +159,22 @@ through their shared keys and is safe to run after every load:
 | `critical_spare_machines.part_no` -> `critical_spares.part_no` | FK, made by `ingest_spares.py` |
 | `cmms_work_orders.emp_code` -> `cmms_employees.emp_code` | soft: `emp_code` is not unique by design |
 | `cmms_safety_incidents.emp_code` -> `cmms_employees.emp_code` | soft: `emp_code` is not unique by design |
+| `img_nameplates.asset_tag` -> `cmms_machines.machine_id` | FK with `--foreign-keys`, if no orphans |
+| `img_incident_reports.incident_id` -> `cmms_safety_incidents.incident_id` | FK with `--foreign-keys`, if no orphans |
+| `img_incident_reports.machine_id` -> `cmms_machines.machine_id` | FK with `--foreign-keys`, if no orphans |
 
 Each run checks every link (rows, matched, NULL, **orphans**: child keys with no
 parent), prints the result, writes it to `table_relationships`, creates the views
 above, and records itself in `ingest_runs`. Orphans are flagged in the views
-(`machine_known`, `employee_known`), never dropped. Look at the orphan keys after
-loading the full sensor CSV: lookalikes of real machine ids (`CNC2` for `CNC-02`)
-mean the sources spell machines differently.
+(`machine_known`, `employee_known`), never dropped.
+
+On the client's data we expect no orphans on the sensor link: the five machine ids in
+`vibration_temp_2026H1.csv` (CMP-01, CNC-01, CNC-02, CNC-03, PMP-T01) are spelled exactly
+as in the CMMS. The other seven CMMS machines have no sensor readings, so
+`machine_overview` shows them with zero readings; that's missing coverage, not an
+orphan. If a later sensor file gives orphans, lookalike ids (`CNC2` for `CNC-02`) would
+need a `machine_aliases` table. On the image links, an orphan asset tag or incident id
+means OCR misread it or the scan isn't in the CMMS; check `img_documents_raw.ocr_notes`.
 
 ```bash
 python scripts/relationships.py --dry-run --mermaid docs/er_diagram.md   # no database needed
@@ -170,7 +200,7 @@ user that can only `SELECT` from an allow-list:
 
 | The app user can read | It can't |
 |---|---|
-| the linking views (`machine_overview`, `machine_spares`, `work_order_detail`, `incident_detail`, `work_order_sensor_window`), `table_relationships`, and the `*_audit` views for citations (machines, work orders, incidents, sensor readings, spares) | `cmms_employees`, `cmms_employees_raw`, `cmms_employees_audit`, any `*_raw` table, any write, any schema change |
+| the linking views (`machine_overview`, `machine_spares`, `work_order_detail`, `incident_detail`, `work_order_sensor_window`, `machine_nameplate`, `incident_report_vs_cmms`), `table_relationships`, and the `*_audit` views for citations (machines, work orders, incidents, sensor readings, spares, nameplates, incident forms) | `cmms_employees`, `cmms_employees_raw`, `cmms_employees_audit`, any `*_raw` table (including `img_documents_raw`, which keeps OCR text as read), any write, any schema change |
 
 Views run with their creator's rights (MySQL's default), so the app user reads
 `work_order_detail` without any access to the tables underneath. Before granting, the
@@ -206,8 +236,8 @@ and what an auditor will test.
 
 ```mermaid
 flowchart LR
-    A["answer / view row"] -->|raw_id| B["clean table<br/>vibration_temp, cmms_*, critical_spares"]
-    B -->|raw_id| C["*_raw table<br/>value exactly as written,<br/>source_line / source_row / tuple_no"]
+    A["answer / view row"] -->|raw_id| B["clean table<br/>vibration_temp, cmms_*, critical_spares, img_*"]
+    B -->|raw_id| C["*_raw table<br/>value exactly as written,<br/>source_line / source_row / tuple_no / image file"]
     C -->|run_id| D["ingest_runs<br/>file name, file_sha256,<br/>git_commit, counts"]
     D -->|file_sha256| E["source file<br/>(bytes provably the same)"]
     D -->|git_commit| F["code version<br/>that cleaned it"]
@@ -216,15 +246,17 @@ flowchart LR
 | Link | Where it is | What it proves |
 |---|---|---|
 | clean row -> raw row | `raw_id` on every clean table, joined in the `*_audit` views | which input row produced this value |
-| raw row -> place in the file | `source_line` (CSV, header is line 1), `source_line` + `tuple_no` (SQL dump), `source_row` + `source_rev` (spreadsheet) | where to look in the original |
+| raw row -> place in the file | `source_line` (CSV, header is line 1), `source_line` + `tuple_no` (SQL dump), `source_row` + `source_rev` (spreadsheet), `source_file` + `image_sha256` (scans) | where to look in the original |
 | raw row -> load | `run_id` on every raw row | which load brought it in, and when |
-| load -> file | `ingest_runs.file_sha256` | the file you hold is byte-for-byte the one that was loaded |
+| load -> file | `ingest_runs.file_sha256` (for the images: one hash over the folder, `lineage.folder_sha256`) | the file you hold is byte-for-byte the one that was loaded |
 | load -> code | `ingest_runs.git_commit` | which version of the cleaning rules ran |
 | rejected rows | `*_raw` with `status = 'rejected'`, `reject_reason`, `duplicate_of_raw_id` | nothing was dropped silently |
 | links between sources | `table_relationships.run_id`; `relationships.py` runs in `ingest_runs` with a fingerprint of the check | how well the sources linked up at that moment |
 
 The views made by `relationships.py` keep `raw_id`, so a row from `work_order_detail` or
-`incident_detail` traces through `cmms_work_orders_audit` / `cmms_safety_incidents_audit`.
+`incident_detail` traces through `cmms_work_orders_audit` / `cmms_safety_incidents_audit`,
+and a row from `machine_nameplate` or `incident_report_vs_cmms` through the `img_*_audit`
+views to the image file.
 
 ### Demonstrating traceability
 
@@ -252,9 +284,9 @@ git show --stat <git_commit>                                  # 5. the code that
 
 On Windows: `Get-FileHash -Algorithm SHA256 data\logs\vibration_temp_2026H1.csv`.
 
-Point out what changed on the way. In the sample file, CNC-03's first reading was logged
-as `141.4` with unit `F` and is stored as `temp_c = 60.78`; the rule is
-`clean_temperatures` in `ingest_logs.py` at that commit.
+That reading is line 42343 of the 2026H1 file. Point out what changed on the way. The
+file's first CNC-03 reading (line 4) was logged as `141.4` with unit `F` and is stored
+as `temp_c = 60.78`; the rule is `clean_temperatures` in `ingest_logs.py` at that commit.
 
 **A safety incident** (the severity flip the auditor will test):
 
@@ -270,6 +302,21 @@ sed -n '<source_line>p' data/sql/jurongmarine_cmms.sql   # the INSERT line holdi
 
 Incident 902 (16 Apr 2024) was logged as `5` on the old scale (1 = worst), so it appears
 as `severity_5_worst = 1`: same incident, translated, with the original kept beside it.
+
+**A scanned form** (and the printed scale behind the conversion):
+
+```sql
+SELECT incident_id, severity_as_logged, severity_scale, severity_5_worst, source_file, image_sha256
+FROM img_incident_reports_audit WHERE incident_id = 900;
+SELECT field, form_value, logged_value, agrees FROM incident_report_vs_cmms WHERE incident_id = 900;
+```
+
+```bash
+sha256sum data/images/IR-2024-900.jpg   # must equal image_sha256; then open the image
+```
+
+The form says `Severity (1 = MOST SEVERE): 4`, so it is `severity_5_worst = 2`, the same
+value the CMMS date rule gives.
 
 **A spare part:** `critical_spares_audit` gives `source_row` and `source_rev`; open
 `critical_spares.xlsx` at that row and check the title says the same revision.
@@ -304,7 +351,8 @@ repeated and compared.
    ```
 
    `Rows read / loaded / rejected` and the reject reasons must match that run's row in
-   `ingest_runs` and the `GROUP BY` above.
+   `ingest_runs` and the `GROUP BY` above. For the client's 2026H1 file that's
+   106,384 read, 106,384 loaded, 0 rejected ([Run summary](docs/ingest_logs.md#run-summary)).
 3. **Linking reproduces too.** Run `relationships.py` twice with no load in between: both
    runs get the same `file_sha256` (the fingerprint of the check results).
 
@@ -321,50 +369,74 @@ Compare by `source_file` + `source_line` / `source_row` and by the counts.
 loaded from *other* files, which a dry run can't see. The counts match exactly for the
 first file of a source; for later files, the difference is the `duplicate_*` rejects.
 
+**OCR is the exception:** another Tesseract version can read a bad photo differently.
+Each image's OCR result is cached by its SHA-256 (`.cache/ingest_images/`) and
+`img_documents_raw` keeps what was read, so a re-run on the same machine gives the same
+result; across machines, compare `fields_raw` and `ocr_notes`.
+
 ## Data concerns and open questions
 
 What we know is uncertain in the client's data, what the scripts do about it now, and
 what we need from someone else to settle it. Keep this list current: it feeds the data
-quality report, and the client will be asked these questions.
+quality report, and the client will be asked these questions. The evidence for every
+problem, by source, is in [`TRAP_LIST.md`](docs/TRAP_LIST.md); the `C`, `S`, `L` and `I`
+numbers below refer to it.
 
 ### Needs the client's input
 
 | # | Question | Evidence and why it matters | What we do now | Once answered |
 |---|---|---|---|---|
-| 1 | **On which day did incident severity switch to 5 = worst?** (safety officer) | The dump's header note says 1 Jul 2025, but forms in use may have lagged. In this dump only two incidents fall in July 2025: **906** (11 Jul, logged 3) and **907** (4 Jul, logged 2). A 3 means the same on both scales, so **907 is the only incident whose meaning changes**: severity 2 on the new scale, or 4 converted from the old. The auditor will test this. | Before 1 Jul 2025 converted (`6 − s`); all of July left `ambiguous`, `severity_5_worst = NULL` | `ingest_cmms.py --severity-cutover <date> --severity-ambiguous-until none`, then `relationships.py` |
-| 2 | **Do old-scale severities agree with lost days?** (safety officer) | Several pre-July-2025 incidents logged `5` (least severe on the old scale) have 5 lost days, e.g. 901, 919, 920, 937; incident 982 logged `4` (minor) has 14. Either lost days aren't tied to severity, or some old records already used the new scale. Check with the query below. | Rule applied as stated | If records were mixed, the rule needs a per-record source (e.g. which form, the `reporting` field) |
-| 3 | **Are work order and incident descriptions reliable for the machine they're on?** (maintenance) | Many don't fit the machine type: 10018 `crane limit switch fault` on the test pump rig, 10045 `weld porosity complaints` on the overhead crane, 10005 `spindle vibration high` on a welding bay; incident 923 `finger caught in chuck` on a crane. Either the machine id or the description is wrong. | Loaded as written | Decide which field to trust; until then the app should cite descriptions, not reason from them |
-| 4 | **What vibration and temperature levels count as "off" for CNC-02?** (maintenance / OEM) | The night shift's question needs a threshold or a baseline; the data has none. | Readings stored; no alarm levels | Add the limits to the analysis and the chart |
-| 5 | **Is "Nurul Aisyah binte Hassan" one person or two?** (HR) | Same name on EMP015 (QA, night) and EMP026 (QA, night). Affects any per-person count. | Treated as two employees (two codes) | Merge or keep; the app never shows names either way |
-| 6 | **What's the difference between `corrective` and `breakdown` work orders?** (maintenance) | Both are unplanned repairs; "breakdowns per machine" depends on the definition. | Kept as logged | Document the definition, or map one to the other |
-| 7 | **What does `cost_sgd` on an open work order mean?** (finance / maintenance) | Open and `awaiting parts` WOs already have costs, e.g. 11550 (open, S$941.13). Estimate or spend so far? | Summed like closed WOs | Exclude open WOs from cost totals, or label them estimates |
-| 8 | **Which currency are spares costs in?** (storeman) | The sheet only shows `$`; the bearing from Germany may be priced differently. | Stored without a currency | Add the currency per part |
-| 9 | **Which part is an `awaiting parts` work order waiting for?** (maintenance) | Work orders don't record parts, so spares can't be linked to WOs; the app can't answer "what's holding up WO 11552". | Not linked | A part field in the CMMS export, or a separate list |
+| 1 | **On which day did incident severity switch to 5 = worst?** (safety officer) | The dump's header note says 1 Jul 2025, but forms in use may have lagged. In this dump only two incidents fall in July 2025: **906** (11 Jul, logged 3) and **907** (4 Jul, logged 2). A 3 means the same on both scales, so **907 is the only incident whose meaning changes**: severity 2 on the new scale, or 4 converted from the old. The auditor will test this. (C1, C2) | Before 1 Jul 2025 converted (`6 − s`); all of July left `ambiguous`, `severity_5_worst = NULL`. If 907's scanned form is among the 30, its printed scale settles 907 (`form_scale_in_cutover_month`, I5) | `ingest_cmms.py --severity-cutover <date> --severity-ambiguous-until none`, then `relationships.py` |
+| 2 | **Do old-scale severities agree with lost days?** (safety officer) | Several pre-July-2025 incidents logged `5` (least severe on the old scale) have 5 lost days, e.g. 901, 919, 920, 937; incident 982 logged `4` (minor) has 14. Either lost days aren't tied to severity, or some old records already used the new scale. Check with the query below. (C3) | Rule applied as stated. Each scanned form prints its scale; `form_scale_contradicts_date_rule` flags a form on the "wrong" scale for its date (I5) | If records were mixed, use each form's printed scale as the per-record source |
+| 3 | **Are work order and incident descriptions reliable for the machine they're on?** (maintenance) | Many don't fit the machine type: 10018 `crane limit switch fault` on the test pump rig, 10045 `weld porosity complaints` on the overhead crane, 10005 `spindle vibration high` on a welding bay; incident 923 `finger caught in chuck` on a crane. Either the machine id or the description is wrong. The paper form for incident 900 has the same mismatch (`weld flash burn` on the manual lathe), so it isn't just a CMMS typing error. (C6, I6) | Loaded as written | Decide which field to trust; until then the app should cite descriptions, not reason from them |
+| 4 | **What vibration and temperature levels count as "off" for CNC-02?** (maintenance / OEM) | The night shift's question needs a threshold or a baseline, and the data has none. It's now urgent: CNC-02's monthly mean vibration rises from 2.31 mm/s (Jan–Mar 2026) to 2.71 (Apr), 3.56 (May) and 4.41 (Jun), and its temperature from 52.0 to 56.0 °C, while the other four sensored machines stay flat. Day and night shifts read the same. | Readings stored; no alarm levels. The trend can be shown, but not judged against a limit | Add the limits to the analysis and the chart |
+| 5 | **Is "Nurul Aisyah binte Hassan" one person or two?** (HR) | Same name on EMP015 (QA, night) and EMP026 (QA, night). Affects any per-person count. (C8) | Treated as two employees (two codes) | Merge or keep; the app never shows names either way |
+| 6 | **What's the difference between `corrective` and `breakdown` work orders?** (maintenance) | Both are unplanned repairs; `coolant leak` appears as both. "Breakdowns per machine" depends on the definition. (C12) | Kept as logged | Document the definition, or map one to the other |
+| 7 | **What does `cost_sgd` on an open work order mean?** (finance / maintenance) | All 34 open and `awaiting parts` WOs (June 2026) already have costs and hours, e.g. 11550 (open, S$941.13). Estimate or spend so far? (C10) | Summed like closed WOs | Exclude open WOs from cost totals, or label them estimates |
+| 8 | **Which currency are spares costs in?** (storeman) | The sheet only shows `$`; the bearing from Germany may be priced differently. (S2) | Stored without a currency | Add the currency per part |
+| 9 | **Which part is an `awaiting parts` work order waiting for?** (maintenance) | Work orders don't record parts, so spares can't be linked to WOs; the app can't answer "what's holding up WO 11552". The likeliest case: WO 11570 (CRN-01 crane limit switch, awaiting parts) and spare LS-CXT-11 at 0 in stock. (C11) | Not linked | A part field in the CMMS export, or a separate list |
+| 10 | **What do the `lost_days` values mean?** (safety officer) | Across all 85 incidents `lost_days` is only ever 0, 1, 2, 5 or 14, never 3, 4 or 6–13. That looks like a coded band, not a count. (C4) | Loaded as a number | If it's a code, map it to a band and stop summing it |
+| 11 | **Why do QA inspectors and crane operators log repairs?** (maintenance / HR) | 11 of 32 staff are QA Inspectors, and they do repairs (10001: EMP002, QA, on a crane gearbox). Crane operators work on CNCs (10029, 10042: EMP005 on CNC-02). Either `emp_code` records who raised the WO rather than who did it, or trades are out of date. (C7) | Loaded as written | Say which it is; "who fixed it" answers depend on it |
+| 12 | **Are same-day PM pairs double entries?** (maintenance) | Same machine, day and type twice, e.g. 10727 + 10728 (CNC-02 PM, 2025-02-01, both EMP009). They have different `wo_id`s, so the duplicate check keeps both. (C9) | Both loaded | Give a rule (e.g. same machine, day, type and technician = one job), or confirm they're separate |
+| 13 | **Is WO 11512's 24.1 hours real?** (maintenance) | MILL-01 PM, 2026-05-05; the next longest WO is 18.9 h. Could be a long job or a typo for 2.41. (C13) | Loaded as written | Correct it, or leave it |
+| 14 | **Where are the 5-Why root-cause sheets?** (safety officer) | Incident forms say `Root cause (5-Why attached?): see attached`; no attachment is in the scans or the data package. "Why did incident 900 happen" can't be answered. (I7) | `root_cause_attached = 1`, flagged `root_cause_in_attachment`; the app says the root cause isn't in the data | Scan and load them, or confirm they don't exist |
+| 15 | **Is BLAST-01's nameplate on the right machine, and which oil does it take?** (maintenance) | The plate rates the blasting chamber `450 A @ 60%` (how welding power sources are rated) and names `Shell Tonna S3 M68` (a slideway oil); the spares sheet lists only the `ALL` hydraulic oil for it. (I2, I3) | Loaded as read, flagged `duty_cycle_rating_on_non_welder`; the app cites both sources for "what oil" | Correct the plate record or the asset tag |
 
 ```sql
 -- Evidence for question 2: lost days by scale and logged severity
 SELECT severity_scale, severity_as_logged, COUNT(*) AS incidents, ROUND(AVG(lost_days), 1) AS avg_lost_days
 FROM cmms_safety_incidents GROUP BY severity_scale, severity_as_logged ORDER BY 1, 2;
+
+-- Questions 1 and 2: the scale each scanned form printed, vs the CMMS date rule
+SELECT incident_id, form_value AS printed_scale, logged_value AS date_rule_scale, agrees
+FROM incident_report_vs_cmms WHERE field = 'severity_scale' ORDER BY incident_id;
+
+-- Evidence for question 12: candidate double entries
+SELECT machine_id, wo_date, wo_type, COUNT(*) AS n, GROUP_CONCAT(wo_id) AS wo_ids
+FROM cmms_work_orders GROUP BY 1, 2, 3 HAVING n > 1 ORDER BY wo_date;
 ```
 
 ### Assumptions we made (state them in the data quality report)
 
 | Assumption | Where | Check |
 |---|---|---|
-| Sensor timestamps without an offset are Singapore time | [`ingest_logs.md`](docs/ingest_logs.md) | `iso_naive` count in the run summary |
-| Slash dates in the CMMS are day first (`05/02/2026` = 5 Feb) | [`ingest_cmms.md`](docs/ingest_cmms.md) | `date_assumed_day_first` warnings |
-| Lead-time months are 30 days; `local` has no lead time in days | [`ingest_spares.md`](docs/ingest_spares.md) | `lead_time_unparsed` warnings |
-| Only sizes written with a unit are converted; bearing numbers (`6205`) aren't decoded | [`ingest_spares.md`](docs/ingest_spares.md) | `no_explicit_size` count |
-| Duplicates keep the first row seen, even if later ones differ | all three ingest docs | `duplicate_*` rejects |
+| Sensor timestamps without an offset are Singapore time | [`ingest_logs.md`](docs/ingest_logs.md) | The 2026H1 file has none (`iso_naive` = 0), so this doesn't affect the client's data; every ISO time carries `+08:00` |
+| Slash dates are day first (`05/02/2026` = 5 Feb) | [`ingest_cmms.md`](docs/ingest_cmms.md), [`ingest_images.md`](docs/ingest_images.md) | The client's dump has none; every date is `YYYY-MM-DD`. The scanned forms do use them, and form IR-2024-900's `01/07/2024` matches the CMMS's `2024-07-01` (I8) |
+| A form's printed severity scale is right for that form, even where it contradicts the date rule (flagged, not overruled; the CMMS value is not changed) | [`ingest_images.md`](docs/ingest_images.md#severity-the-scale-printed-on-the-form) | `form_scale_contradicts_date_rule` warnings |
+| When OCR readings of a field disagree, the majority reading that passes the field's format check is right | [`ingest_images.md`](docs/ingest_images.md#how-an-image-is-read) | `ocr_disagreed_*` warnings; each reading in `ocr_notes` |
+| Lead-time months are 30 days; `local` has no lead time in days | [`ingest_spares.md`](docs/ingest_spares.md) | `lead_time_unparsed` warnings (none in rev 11; no lead time uses months) |
+| Only sizes written with a unit are converted; bearing numbers (`6205`) aren't decoded | [`ingest_spares.md`](docs/ingest_spares.md) | `no_explicit_size` count (5 in rev 11) |
+| Part numbers aren't read for size (`BELT-5V-850` is 85.0 in, not 850 mm) | [`ingest_spares.md`](docs/ingest_spares.md) | agent instructions |
+| Duplicates keep the first row seen, even if later ones differ | all four ingest docs | `duplicate_*` rejects (none in the client's files) |
 | Category values aren't merged, only case and spacing normalised. This dump has none to merge: statuses are only `CLOSED`, `OPEN`, `AWAITING PARTS`; types only `CORRECTIVE`, `PREVENTIVE`, `BREAKDOWN` | [`ingest_cmms.md`](docs/ingest_cmms.md) | distinct `status` / `wo_type` values in the run summary of a new dump |
-| No plausibility checks: a 900 °C reading or negative quantity loads as written | [`ingest_logs.md`](docs/ingest_logs.md), [`ingest_spares.md`](docs/ingest_spares.md) | add a rule if the data audit finds one |
-| Time gaps in the sensor log aren't detected at ingest | [`ingest_logs.md`](docs/ingest_logs.md) | analysis step |
+| No plausibility checks: a 900 °C reading or negative quantity loads as written. The client's sensor file stays within 28.1–79.8 °C and 0.2–5.81 mm/s, so nothing is affected today | [`ingest_logs.md`](docs/ingest_logs.md), [`ingest_spares.md`](docs/ingest_spares.md) | add a rule if a later file needs one |
+| Time gaps in the sensor log aren't detected at ingest. In 2026H1, 2,216 of 108,600 expected readings are missing, none more than two 12-minute slots in a row | [`ingest_logs.md`](docs/ingest_logs.md) | `audit_sensor_csv.py`; analysis groups by time, not by row |
 
 ### Still to check ourselves
 
 | Item | How |
 |---|---|
-| Machine ids in the full sensor CSV (~106k rows) may be spelled differently from the CMMS | load it, run `relationships.py`, read `orphan_values` in `table_relationships`; lookalikes need a `machine_aliases` table |
+| Only 2 of the 42 scans are audited (`IR-2024-900.jpg`, `nameplate_BLAST-01.jpg`); the other 11 nameplates, 29 forms and the SOPs aren't | `pipeline.py --only images,relationships`, then the audit queries in [`ingest_images.md`](docs/ingest_images.md#audit-queries); add findings to [`TRAP_LIST.md`](docs/TRAP_LIST.md#images-images-first-two-scans). Try `--engine llm` on scans that are rejected or full of `ocr_disagreed_*` |
 | Whether `emp_code` with trade and shift identifies a person in a 32-person shop (PDPA) | team decision: if so, drop `emp_code` from `incident_detail` / `work_order_detail` |
 | Names also appear in the spares sheet title (`storeman: Halim`) | stored only in `critical_spares_raw.source_title`, which the app user can't read; keep it that way |
 | Views, grants and run logging have only been tested without a database | run `relationships.py` and `agent_user.py --check` on the real database |
@@ -379,12 +451,13 @@ Timestamp formats: epoch_ms=4, iso_naive=1, iso_offset=2, unknown=2 (total 9)
 Rejected rows: bad_timestamp=2, duplicate_reading=1, missing_machine_id=1 (total 4)
 ```
 
-Category totals (timestamp formats, temperature units, `trade`, `severity_scale`, ...)
-add up to the rows read or loaded, which is a quick check that no row was missed.
+Category totals (timestamp formats, temperature units, `trade`, `severity_scale`, document
+types, ...) add up to the rows read or loaded, which is a quick check that no row was missed.
 `Rejected rows` totals equal the rejected count. Warning totals (`Loaded with gaps`,
 `Loaded with warnings`) count **warnings**, not rows: one row can carry several.
 Each script's doc shows a full example: [`ingest_logs.md`](docs/ingest_logs.md),
-[`ingest_spares.md`](docs/ingest_spares.md), [`ingest_cmms.md`](docs/ingest_cmms.md).
+[`ingest_spares.md`](docs/ingest_spares.md), [`ingest_cmms.md`](docs/ingest_cmms.md),
+[`ingest_images.md`](docs/ingest_images.md#run-summary).
 `relationships.py` prints a per-link check instead
 (see [`relationships.md`](docs/relationships.md#relationships)).
 
@@ -424,6 +497,12 @@ FROM cmms_safety_incidents WHERE severity_5_worst IS NULL;
 SELECT source_line, wo_id, machine_id, emp_code, warnings FROM cmms_work_orders_raw
 WHERE warnings LIKE '%unknown_%';
 
+-- What oil and grease interval does each machine's nameplate give?
+SELECT machine_id, has_nameplate, lubricant, grease_interval_h FROM machine_nameplate;
+
+-- Where scanned forms and the CMMS disagree
+SELECT incident_id, field, form_value, logged_value FROM incident_report_vs_cmms WHERE agrees = 0;
+
 -- How well do the sources link up? (paste into the data quality report)
 SELECT name, child_table, child_column, enforced, child_rows, matched_rows, orphan_rows, orphan_values
 FROM table_relationships;
@@ -444,8 +523,8 @@ FROM ingest_runs ORDER BY run_id DESC;
 
 The tests check the reading and cleaning logic of every script, plus the shared
 modules. They run in a few seconds and **need no database, Docker or `.env`**:
-each test builds a small messy CSV, spreadsheet or SQL dump (in a temporary folder
-or as a string), runs the script's cleaning steps on it, and checks the result.
+each test builds a small messy CSV, spreadsheet, SQL dump or OCR text (in a temporary
+folder or as a string), runs the script's cleaning steps on it, and checks the result.
 
 ### Setup
 
@@ -476,6 +555,8 @@ pytest tests/test_spares.py -v                      # one line per test, with na
 pytest -k lead_time                                 # only tests whose name contains "lead_time"
 pytest -k "spares and not size"                     # combine name filters
 pytest -k severity                                  # the CMMS severity-scale tests
+pytest -k crlf                                      # the Windows line-ending tests
+pytest tests/test_images.py                         # the scans (OCR text given; no Tesseract needed)
 pytest tests/test_relationships.py                  # the linking script
 pytest tests/test_logs.py::test_temperature_units   # one specific test
 pytest -x                                           # stop at the first failure
@@ -489,12 +570,13 @@ With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
 
 | File | Covers | Tests |
 |---|---|---|
-| `tests/test_logs.py` | [`ingest_logs.py`](docs/ingest_logs.md): ISO/epoch timestamps (incl. the 8-hour bug), timezones, °C/°F, unknown units, every CSV line kept in raw with its line number, clean rows linked to raw, reject reasons, duplicates within the file and against rows already loaded | 8 |
+| `tests/test_logs.py` | [`ingest_logs.py`](docs/ingest_logs.md): ISO/epoch timestamps (incl. the 8-hour bug), timezones, °C/°F, unknown units, every CSV line kept in raw with its line number, clean rows linked to raw, reject reasons, duplicates within the file and against rows already loaded, Windows (CRLF) line endings read exactly like LF | 10 |
 | `tests/test_spares.py` | [`ingest_spares.py`](docs/ingest_spares.md): costs (`$38/spool`), lead times (`2-3 weeks (Germany)`, `local`), metric/imperial sizes, machine lists; on a messy sheet: raw rows and row numbers, `raw_id`, duplicate/missing part numbers, warnings for unreadable values | 18 |
-| `tests/test_cmms.py` | [`ingest_cmms.py`](docs/ingest_cmms.md): dump parsing (`;` and quotes inside strings, comments, multi-row INSERTs with line and tuple numbers, column lists, malformed tuples); ids, numbers (`S$1,050`), day-first dates; the severity flip (old scale inverted, July 2025 left unconverted, a confirmed cutover, out-of-range values never guessed); on a messy dump: duplicates and conflicting duplicates, orphan machines/employees flagged not dropped, raw text kept, `work_orders.status` not clashing with the load status | 21 |
-| `tests/test_relationships.py` | [`relationships.py`](docs/relationships.md): orphan/NULL/`ALL` counting, keys compared like MySQL (case, spaces), when a foreign key is added or skipped, table prefixes, no view exposes `emp_name`, incidents only offer `severity_5_worst`, the ER diagram, the run fingerprint, successful and failed runs recorded in `ingest_runs` | 33 |
-| `tests/test_pipeline.py` | [`pipeline.py`](docs/pipeline.md): step order and flags, foreign keys dropped first and re-added last (never in a dry run), sample rows with names kept out of the report, counts from every script's summary, a failure stopping the rest, `--keep-going`, Ctrl+C, the report's tables, `--save-log` | 25 |
-| `tests/test_agent_user.py` | `agent_user.py`: the allow-list never includes employees or raw tables, objects with `emp_name` refused, missing objects skipped, `SELECT`-only grants after a full reset, password never written into SQL or output, bad user/host/database names rejected, MySQL error codes read correctly, errors never include the password, failed steps named with MySQL's message, no statement needing rights over every database, the access check reads no rows | 20 |
+| `tests/test_cmms.py` | [`ingest_cmms.py`](docs/ingest_cmms.md): dump parsing (`;` and quotes inside strings, comments, multi-row INSERTs with line and tuple numbers, column lists, malformed tuples); ids, numbers (`S$1,050`), day-first dates; the severity flip (old scale inverted, July 2025 left unconverted, a confirmed cutover, out-of-range values never guessed); on a messy dump: duplicates and conflicting duplicates, orphan machines/employees flagged not dropped, raw text kept, `work_orders.status` not clashing with the load status; employee names masked to their last 4 characters in everything printed | 27 |
+| `tests/test_images.py` | [`ingest_images.py`](docs/ingest_images.md): the sample scans' real OCR text (mistakes included); label parsing, the printed severity scale, voting across three readings, id fixes (`BLAST` stays `BLAST`), forms that contradict the date rule or settle July 2025, an unreadable scale never guessed, a name never stored as `emp_code`, welding ratings, lb -> kg, every reject reason, the LLM engine, the cache, the folder hash, audit views without OCR text; reads the real scans if Tesseract is installed | 35 |
+| `tests/test_relationships.py` | [`relationships.py`](docs/relationships.md): orphan/NULL/`ALL` counting, keys compared like MySQL (case, spaces), when a foreign key is added or skipped, table prefixes, no view exposes `emp_name`, incidents (and the form comparison) only offer `severity_5_worst`, the form comparison on one collation with July left open, machines without a nameplate kept, the ER diagram, the run fingerprint, successful and failed runs recorded in `ingest_runs` | 44 |
+| `tests/test_pipeline.py` | [`pipeline.py`](docs/pipeline.md): step order and flags (images after the CMMS), foreign keys dropped first and re-added last (never in a dry run), sample rows with names kept out of the report, counts from every script's summary, the images folder hashed like the load, a failure stopping the rest, `--keep-going`, Ctrl+C, the report's tables, `--save-log` | 29 |
+| `tests/test_agent_user.py` | `agent_user.py`: the allow-list never includes employees or raw tables (nor the raw OCR), the scans' audit views granted, objects with `emp_name` refused, missing objects skipped, `SELECT`-only grants after a full reset, password never written into SQL or output, bad user/host/database names rejected, MySQL error codes read correctly, errors never include the password, failed steps named with MySQL's message, no statement needing rights over every database, the access check reads no rows | 21 |
 | `tests/test_shared.py` | `db_config.py`, `lineage.py`: password never printed, passwords with special characters, values of a failed query kept out of error messages, table-name check, file SHA-256, a run recorded without a file, values passed to MySQL are plain Python types | 7 |
 
 **Not covered:** anything that needs MySQL, i.e. creating tables, views and users,
@@ -506,14 +588,15 @@ for the app user's grants, `agent_user.py --check` is the real test.
 ### Reading the output
 
 ```
-tests/test_agent_user.py ....................                       [ 15%]
-tests/test_cmms.py .....................                            [ 31%]
-tests/test_logs.py ........                                         [ 37%]
-tests/test_pipeline.py .........................                    [ 56%]
-tests/test_relationships.py .................................       [ 81%]
-tests/test_shared.py .......                                        [ 86%]
+tests/test_agent_user.py .....................                      [ 10%]
+tests/test_cmms.py ...........................                      [ 25%]
+tests/test_images.py ...................................            [ 43%]
+tests/test_logs.py ..........                                       [ 48%]
+tests/test_pipeline.py .............................                [ 63%]
+tests/test_relationships.py ............................................ [ 86%]
+tests/test_shared.py .......                                        [ 90%]
 tests/test_spares.py ..................                             [100%]
-========== 132 passed in 1.20s ==========
+========== 191 passed in 9.80s ==========
 ```
 
 | Mark | Meaning |
@@ -521,7 +604,7 @@ tests/test_spares.py ..................                             [100%]
 | `.` | passed |
 | `F` | failed: an `assert` was false. pytest prints the values on both sides |
 | `E` | error: the test couldn't run (e.g. an import failed) |
-| `s` | skipped: the tests that build a SQLAlchemy engine or URL skip if SQLAlchemy isn't installed; installing `requirements-dev.txt` fixes it |
+| `s` | skipped: the tests that build a SQLAlchemy engine or URL skip if SQLAlchemy isn't installed; installing `requirements-dev.txt` fixes it. `test_the_real_scans_read_correctly` skips without Tesseract or the scans |
 
 ### When it doesn't work
 
@@ -529,14 +612,14 @@ tests/test_spares.py ..................                             [100%]
 |---|---|---|
 | `collected 0 items` | pytest isn't running from the repo root, or `tests/` is missing | `cd` to the folder with `pytest.ini`; check `ls tests` |
 | `ModuleNotFoundError: No module named 'ingest_logs'` (or `db_config`, `relationships`) | `pytest.ini` not found, or the scripts aren't in `scripts/` | Run from the repo root; check `pythonpath = scripts` matches the folder name |
-| `ModuleNotFoundError: No module named 'pandas'` (or `openpyxl`, ...) | Virtual environment not active, or requirements not installed | Activate `.venv`, then `pip install -r requirements-dev.txt` |
+| `ModuleNotFoundError: No module named 'pandas'` (or `openpyxl`, `cv2`, ...) | Virtual environment not active, or requirements not installed | Activate `.venv`, then `pip install -r requirements-dev.txt` |
 | `pytest: command not found` | pytest not installed in the active environment | `pip install -r requirements-dev.txt`, or use `python -m pytest` |
 
 ### Adding a test
 
-- Put it in the file for the script it tests (`test_logs.py`, `test_spares.py`, `test_cmms.py`, `test_relationships.py`), or `test_shared.py` for `db_config.py` / `lineage.py`.
+- Put it in the file for the script it tests (`test_logs.py`, `test_spares.py`, `test_cmms.py`, `test_images.py`, `test_relationships.py`), or `test_shared.py` for `db_config.py` / `lineage.py`.
 - Name the function `test_...`, otherwise pytest won't find it.
-- Test the cleaning functions directly with a small `DataFrame` (see `test_temperature_units`), or a whole file through `process()` / `prepare()` using the `tmp_path` fixture (see the `lineage_run` and `messy_sheet` fixtures). For the CMMS script, pass a dump as a string to `parse_dump()` and then `process()` (see `test_pipeline_end_to_end`). For `relationships.py`, pass key counts to `check_relationship()` (see `test_check_counts_matched_null_and_orphans`).
+- Test the cleaning functions directly with a small `DataFrame` (see `test_temperature_units`), or a whole file through `process()` / `prepare()` using the `tmp_path` fixture (see the `lineage_run` and `messy_sheet` fixtures). For the CMMS script, pass a dump as a string to `parse_dump()` and then `process()` (see `test_pipeline_end_to_end`). For the scans, pass OCR text as an `Extraction` to `process()` (see `test_incident_form_end_to_end`); copy the text from `img_documents_raw.ocr_text` when a real scan misreads. For `relationships.py`, pass key counts to `check_relationship()` (see `test_check_counts_matched_null_and_orphans`).
 - When you find a new problem in the client's data, add a test with that exact value **before** fixing the code. It fails first, then passes with the fix, and it keeps the problem from coming back. The harness checklist asks for this pattern in your git history.
 
 ## Rules worth knowing
@@ -558,12 +641,19 @@ lead times like `2-3 weeks (Germany)` become day ranges. See
 `severity_as_logged`. Incidents from July 2025 are left unconverted until the client
 confirms the switch-over day; then re-run `ingest_cmms.py` with
 `--severity-cutover <date> --severity-ambiguous-until none`. See
-[`ingest_cmms.md`](docs/ingest_cmms.md).
+[`ingest_cmms.md`](docs/ingest_cmms.md). Scanned forms print their own scale;
+`img_incident_reports.severity_5_worst` uses it, and `incident_report_vs_cmms` shows
+where form and CMMS disagree ([`ingest_images.md`](docs/ingest_images.md)).
+
+**Scans:** cite the image file (`img_*_audit.source_file`), and treat a value flagged
+`ocr_disagreed_*` as read from a poor photo. A machine with `has_nameplate = 0` has no
+nameplate photo: say so rather than answer from model memory.
 
 **Employee names (PDPA):** `emp_name` stays in `cmms_employees`. None of the linking
 views select it; they give `emp_code`, trade and shift only. The app connects as the
 read-only user from `agent_user.py`, which the database stops from reading names, so
-this holds whatever the model is asked. See
+this holds whatever the model is asked. Scanned forms keep only `EMP` codes and whether
+the form was signed. See
 [Database access for the app](#database-access-for-the-app-pdpa) and
 [`relationships.md`](docs/relationships.md#views).
 

@@ -8,6 +8,7 @@ from, and every load is recorded.
 - **Script:** `scripts/ingest_logs.py`
 - **Shared modules:** `scripts/db_config.py` (settings, DB connection), `scripts/lineage.py` (run log)
 - **Tests:** `tests/test_logs.py` (`pytest`, no database needed)
+- **Data audit:** `scripts/audit_sensor_csv.py` profiles a sensor file without loading it; findings in [`TRAP_LIST.md`](TRAP_LIST.md#sensor-log-vibration_temp_2026h1csv)
 
 ---
 
@@ -51,13 +52,18 @@ filled-in `.env` (see [Configuration](#configuration-env)).
 
 A CSV with a header row and these five columns (others are ignored):
 
-| Column | Example values | Notes |
+| Column | Formats the script handles | In `vibration_temp_2026H1.csv` |
 |---|---|---|
-| `timestamp` | `2026-01-01T00:00:00+08:00`, `1767196800000`, `2026-01-01 00:12:00` | ISO 8601 with or without offset, or epoch milliseconds |
-| `machine_id` | `CNC-02`, `cnc-02 ` | Trimmed and upper-cased |
-| `vib_rms_mms` | `2.35` | Vibration RMS in mm/s |
-| `temp` | `56.6`, `141.4` | Number; the unit is in the next column |
-| `temp_unit` | `C`, `F`, `°C`, `degF` | Mixed Celsius and Fahrenheit |
+| `timestamp` | ISO 8601 with offset (`2026-01-01T00:00:00+08:00`, `...Z`), ISO without offset (`2026-01-01 00:12:00`), epoch milliseconds (`1767196800000`) | ISO with `+08:00` (79,596 rows) and epoch ms (26,788), mixed row by row; none without an offset, none with `Z` |
+| `machine_id` | Any case, surrounding spaces (`cnc-02 ` → `CNC-02`) | `CMP-01`, `CNC-01`, `CNC-02`, `CNC-03`, `PMP-T01`, all already clean and all in the CMMS |
+| `vib_rms_mms` | Number, vibration RMS in mm/s | 0.2–5.81, none blank |
+| `temp` | Number; the unit is in the next column | 28.1–79.8 when logged in C, 88.5–165.6 when logged in F |
+| `temp_unit` | `C`, `F`, `°C`, `degF`, `Celsius`, `Fahrenheit`, any case | Only `C` (90,578) and `F` (15,806), mixed reading by reading |
+
+The 2026H1 file has 106,384 readings: 5 machines, one reading every 12 minutes, from
+2026-01-01 00:00 to 2026-06-30 23:48 Singapore time, in time order, with Windows (CRLF)
+line endings. The other formats in the middle column aren't in this file; the rules
+stay in case a later file has them.
 
 The script exits with an error if any of the five columns is missing.
 
@@ -71,7 +77,7 @@ python scripts/ingest_logs.py [CSV] [options]
 
 | Option | Default | What it does |
 |---|---|---|
-| `CSV` | `$CSV_FILE`, else `./log/vibration_temp_sample.csv` | File to load |
+| `CSV` | `$CSV_FILE`, else `data/logs/vibration_temp_2026H1.csv` | File to load |
 | `--dry-run` | off | Read and clean only; print sample rows, rejects and the summary. Nothing is written to the database. |
 | `--recreate` | off | Drop and recreate `vibration_temp`, `vibration_temp_raw` and the audit view before loading. Use on the first load and after any schema change. `ingest_runs` is never dropped. |
 | `--env-file PATH` | nearest `.env` | Which settings file to use |
@@ -79,6 +85,8 @@ python scripts/ingest_logs.py [CSV] [options]
 | `--chunk-size N` | `10000` | Rows read and inserted per batch (affects memory, not results) |
 | `--source-tz TZ` | `Asia/Singapore` | Timezone assumed for ISO timestamps that have no offset |
 | `--rejects PATH` | off | Also write rejected rows, with reasons, to a CSV file |
+
+The default input path is relative to the repo root, so run the script from there.
 
 ---
 
@@ -173,7 +181,9 @@ Every timestamp is converted to UTC first, then stored two ways:
 
 > Fixed bug: the original script kept the `+08:00` offset on ISO rows but
 > converted epoch rows to UTC, so the same moment was stored 8 hours apart.
-> `test_iso_with_offset_and_epoch_give_same_time` guards against this.
+> `test_iso_with_offset_and_epoch_give_same_time` guards against this. In the
+> 2026H1 file a quarter of all readings are epoch ms, so this bug would have
+> shifted 26,788 readings.
 
 ### Temperature: `clean_temperatures`
 
@@ -187,6 +197,10 @@ Every reading is converted to **Celsius** in `temp_c`, rounded to 2 decimals.
 
 The original reading and unit stay in `vibration_temp_raw.temp` / `.temp_unit`.
 A non-numeric reading gives `temp_c = NULL` and the warning `missing_temp`.
+
+The unit labels in the 2026H1 file can be trusted: after conversion, readings logged
+in F average 51.9 °C and readings logged in C average 52.3 °C, and no reading looks
+mislabelled (no F value below 80, no C value above 80).
 
 ### Machine ID and vibration: `clean_values`
 
@@ -222,6 +236,8 @@ comma-separated list in `vibration_temp_raw.warnings`:
 | `unknown_temp_unit` | Reading present but unit not recognised; `temp_c` is NULL |
 | `missing_temp` | No usable temperature reading |
 | `missing_vibration` | No usable vibration reading |
+
+The 2026H1 file produces no rejects and no warnings.
 
 ---
 
@@ -315,6 +331,10 @@ JOIN vibration_temp_raw k ON k.raw_id = d.duplicate_of_raw_id;
 SELECT ts_format, COUNT(*) FROM vibration_temp GROUP BY ts_format;
 SELECT temp_unit, COUNT(*) FROM vibration_temp_raw GROUP BY temp_unit;
 
+-- Missing readings per machine (expected: 21,720 slots of 12 minutes in 2026H1)
+SELECT machine_id, COUNT(*) AS readings, 21720 - COUNT(*) AS missing
+FROM vibration_temp GROUP BY machine_id;
+
 -- Load history
 SELECT run_id, source_file, status, rows_read, rows_loaded, rows_rejected, started_at, error
 FROM ingest_runs WHERE script = 'ingest_logs.py' ORDER BY run_id DESC;
@@ -325,7 +345,17 @@ FROM ingest_runs WHERE script = 'ingest_logs.py' ORDER BY run_id DESC;
 ## Run summary
 
 Every run (dry or real) ends with counts you can copy into the data quality
-report. Example from a deliberately messy test file:
+report. For the client's `vibration_temp_2026H1.csv` (SHA-256 `05c18527…6bd023`):
+
+```
+Rows read: 106384   loaded: 106384   rejected: 0
+Timestamp formats: epoch_ms=26788, iso_offset=79596 (total 106384)
+Temperature units: C=90578, F=15806 (total 106384)
+```
+
+If a dry run of that file shows anything different, the file or the code has changed.
+
+When a file has rejects or gaps, more lines appear. Example from a deliberately messy test file:
 
 ```
 Rows read: 9   loaded: 5   rejected: 4
@@ -343,12 +373,13 @@ row was missed. `Loaded with gaps` counts **warnings**, not rows: one row can ca
 
 ## Assumptions and limitations
 
-- **Timestamps without an offset** are assumed to be Singapore time (`--source-tz`). Check the `iso_naive` count on the full file and state this assumption in the data quality report.
+- **Timestamps without an offset** are assumed to be Singapore time (`--source-tz`). The 2026H1 file has none (`iso_naive` = 0), so the assumption isn't used on the client's data; state it in the data quality report only for later files.
 - **`sampled_at` holds no timezone:** it's Singapore time by convention, documented in the column comment. `epoch_ms` is the unambiguous value.
-- **Duplicates keep the first row seen.** If two duplicate rows have *different* readings, the second is still rejected; review them with the duplicates query.
-- **No plausibility checks:** values like a 900 °C temperature or negative vibration are loaded as logged. Add a rule (and a warning code) if the data audit finds such values.
-- **Time gaps are not detected.** Missing periods in the log are an analysis question, not an ingest one.
-- **Line numbers** assume one CSV record per line (no line breaks inside quoted fields).
+- **Duplicates keep the first row seen.** If two duplicate rows have *different* readings, the second is still rejected; review them with the duplicates query. The 2026H1 file has none.
+- **No plausibility checks:** values are loaded as logged. The 2026H1 file stays within 28.1–79.8 °C and 0.2–5.81 mm/s, with only 9 readings more than 4 standard deviations from their machine's mean, so there's nothing to reject. If a rule is added, those ranges are a starting point for its bounds.
+- **Time gaps are not detected at ingest.** In the 2026H1 file, 2,216 of the expected 108,600 readings are missing (about 2% per machine), each gap one or two 12-minute slots. Charts and window queries should group by time, not assume one row every 12 minutes.
+- **Only 5 machines have sensors** (CMP-01, CNC-01, CNC-02, CNC-03, PMP-T01). The other seven CMMS machines have no readings at all.
+- **Line numbers** assume one CSV record per line (no line breaks inside quoted fields). The 2026H1 file has CRLF line endings; pandas handles them.
 - **Re-loading is keyed on the file name,** not its content. A renamed copy of the same file is treated as a new file, and its rows become duplicates.
 
 ---
@@ -357,6 +388,7 @@ row was missed. `Loaded with gaps` counts **warnings**, not rows: one row can ca
 
 | Error | Likely cause | Fix |
 |---|---|---|
+| `CSV not found: data/logs/vibration_temp_2026H1.csv` | Script run from outside the repo root, or the file isn't in `data/logs/` | `cd` to the repo root, or pass the path |
 | `Missing setting(s) ...` | No `.env` found, or keys missing | Copy `.env.example` to `.env`, or pass `--env-file` |
 | `Can't connect ... Connection refused` | Nothing listening on `DB_HOST:DB_PORT` | `docker compose ps` shows the published port; it must match `DB_PORT`. Check `env \| grep DB_PORT` for a shell override. |
 | `Access denied ... (using password: NO)` | Empty `DB_PASSWORD` reached the script | `unset DB_PASSWORD` in the shell, or pass `--env-file .env` |

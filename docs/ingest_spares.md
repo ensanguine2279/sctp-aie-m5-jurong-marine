@@ -10,6 +10,7 @@ load is recorded.
 - **Shared modules:** `scripts/db_config.py` (settings, DB connection), `scripts/lineage.py` (run log)
 - **Tests:** `tests/test_spares.py` (`pytest`, no database needed)
 - **Companion:** [`ingest_logs.md`](ingest_logs.md) for the sensor log script, which uses the same structure
+- **Data audit:** problems found in the client's sheet, cell by cell, in [`TRAP_LIST.md`](TRAP_LIST.md#critical-spares-sheet-critical_sparesxlsx)
 
 ---
 
@@ -234,6 +235,9 @@ They're stored as a comma-separated list in `critical_spares_raw.warnings`:
 | `unit_cost_unparsed` | Unit Cost has text but no readable amount |
 | `lead_time_unparsed` | Lead Time has text that isn't a duration or `local` |
 
+The client's rev 11 sheet produces no rejects and no warnings; the examples above
+(`ask Halim`, `when available`) come from the test sheet.
+
 ---
 
 ## Database tables
@@ -383,8 +387,11 @@ line has no total, because its figures are separate counts rather than one break
 
 - **Currency:** costs are stored as numbers without a currency; the sheet only shows `$`.
 - **Months are 30 days** when converting lead times.
-- **`local` supply** has no lead time in days; filter on `is_local_supply = 1`.
+- **`local` supply** has no lead time in days; filter on `is_local_supply = 1`. Four of the ten parts in rev 11 are `local`.
 - **Sizes:** only sizes written with a unit are converted; bearing designations aren't decoded, and only one size is captured per description (inch forms take priority over mm).
+- **Part numbers aren't parsed for size, and can mislead.** `BELT-5V-850` is a 5V belt 85.0 in long (belt numbers give length in tenths of an inch), not 850 mm. The size comes from the description only; the agent shouldn't read sizes out of part numbers.
+- **Quantity units are implicit.** `qty` counts the unit of issue, which the sheet doesn't name: spools for `WIRE-ER70S`, 20 L drums for `HYD-32` (so 9 means 180 L), single pieces otherwise. An answer about how much stock there is should say "9 drums of 20 L", not "9".
+- **Not every machine has spares.** Rev 11 lists nothing for MILL-01, CRN-02 or BLAST-01 apart from the `ALL` hydraulic oil.
 - **Duplicates keep the first row.** A later row with the same part number is rejected even if its quantity is different; review with the rejected-rows query.
 - **Only the active worksheet is read.** If the workbook gains more sheets, make sure the spares list is the one shown when it's saved.
 - **Formula cells** are read as their last calculated value. A file saved by a tool that doesn't store calculated values (some scripts, not Excel) would show those cells as blank.
