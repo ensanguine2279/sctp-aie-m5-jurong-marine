@@ -354,4 +354,6 @@ key with `--foreign-keys`, and creates the `machine_sops` view: every machine wi
 current SOPs that name it, `has_sop = 0` when none does
 ([`relationships.md`](relationships.md#views)). Run it again after every SOP load.
 
-**Not wired in yet:** `pipeline.py` doesn't run this step.
+**In the pipeline:** `pipeline.py` runs this step after the CMMS (so names can be matched)
+and before `relationships.py`; `--only sops,relationships` reloads just the SOPs
+([`pipeline.md`](pipeline.md)).

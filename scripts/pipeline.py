@@ -8,6 +8,7 @@ Runs, in order, each as its own process exactly as you would by hand:
     ingest_spares.py    critical spares sheet
     ingest_cmms.py      CMMS SQL dump
     ingest_images.py    scanned nameplates and incident report forms (a folder)
+    ingest_sops.py      SOP documents (a folder); after the CMMS, to match machine names
     relationships.py    link the sources, refresh the views and the ER diagram
     agent_user.py       optional (--agent): check or set up the app's read-only user
 
@@ -17,8 +18,9 @@ input files' SHA-256, the run summaries, how the sources linked up, and the code
 
 Where the numbers come from: for a real load, from each run's row in ingest_runs (the
 database's own record), and the report checks each file's SHA-256 against the one
-recorded. For a dry run, from the scripts' printed summaries. A folder input (the images)
-is fingerprinted with lineage.folder_sha256, the same hash ingest_images.py records.
+recorded. For a dry run, from the scripts' printed summaries. A folder input (the images,
+the SOPs) is fingerprinted with lineage.folder_sha256 over the same file types its script
+reads, the same hash that script records.
 
 PDPA: the report never copies a script's full output, only its summary lines (counts and
 categories), because a dry run prints sample rows that can include employee names. The
@@ -37,6 +39,7 @@ Usage
     python scripts/pipeline.py                                    # later loads
     python scripts/pipeline.py --foreign-keys --agent check       # drop/re-add FKs, check the app user
     python scripts/pipeline.py --only cmms,relationships          # some steps only
+    python scripts/pipeline.py --only sops,relationships          # reload the SOPs
     python scripts/pipeline.py --save-log                         # keep the full on-screen log too
     python scripts/pipeline.py --dry-run --audit                  # new sensor file: profile it first
     python scripts/pipeline.py --logs data/logs/vibration_temp_sample.csv --dry-run
@@ -78,18 +81,32 @@ STEPS = [
     Step("spares", "ingest_spares.py", "Critical spares"),
     Step("cmms", "ingest_cmms.py", "CMMS dump"),
     Step("images", "ingest_images.py", "Scanned images"),
+    Step("sops", "ingest_sops.py", "SOP documents"),
     Step("relationships", "relationships.py", "Links between sources"),
     Step("agent_user", "agent_user.py", "App user (PDPA)"),
 ]
 BY_KEY = {s.key: s for s in STEPS}
-INGEST_KEYS = ("logs", "spares", "cmms", "images")
+INGEST_KEYS = ("logs", "spares", "cmms", "images", "sops")
 DROP_FKS = Step("drop_fks", "relationships.py", "Drop foreign keys before loading")
 DEFAULT_INPUTS = {
     "logs": "data/logs/vibration_temp_2026H1.csv",
     "spares": "data/tabular/critical_spares.xlsx",
     "cmms": "data/sql/jurongmarine_cmms.sql",
     "images": "data/images",
+    "sops": "data/sops",
 }
+
+
+def folder_extensions(step_key: str) -> set[str]:
+    """The file types a folder step reads, so the report hashes the same files the script
+    does (lineage.folder_sha256) and 'Same file as loaded' can match ingest_runs."""
+    if step_key == "sops":
+        from ingest_sops import EXTENSIONS
+
+        return EXTENSIONS
+    from ingest_images import IMAGE_EXTS
+
+    return IMAGE_EXTS
 
 
 @dataclass
@@ -227,10 +244,13 @@ _COLON_PREFIXES = ("Rows read:", "Statements in dump:", "Tables with no spec", "
                    "Temperature units:", "Rejected rows:", "Loaded with gaps:",
                    "Loaded with warnings:", "Severity:", "orphan keys:",
                    "parent key not unique:", "not checked:", "Document types:", "OCR engine:",
-                   "Severity scale on forms:", "Machine ids:")
+                   "Severity scale on forms:", "Machine ids:",
+                   # ingest_sops.py
+                   "Rejected files:", "Machine links by kind:",
+                   "Steps referring to documents not in the data:", "Machine names:")
 _PLAIN_PREFIXES = ("Incidents ", "Done.", "Dropped ", "Recorded as run", "Passed", "REFUSED",
                    "Skipped, not created yet", "NO ROWS FOUND", "Catalog written",
-                   "ER diagram written")
+                   "ER diagram written", "FULLTEXT indexes rebuilt")
 _SUMMARY_RES = [
     re.compile(r"^Rev \S+: rows_read=\d+"),                                  # spares
     re.compile(r"^[a-z_]+: read \d+, loaded \d+, rejected \d+$"),           # cmms per table
@@ -241,6 +261,10 @@ _SUMMARY_RES = [
     re.compile(r"^[a-z_]+\s+\S+\.\S+ -> \S+\.\S+\s+\[(fk|soft)\]$"),         # relationships link
     re.compile(r"^[a-z_]+\s+(added fk_rel_\w+|exists|skip: .+|FAILED: .+)$"),  # foreign keys
     re.compile(r"^[a-z_]+\s+(created|skipped: .+)$"),                        # views
+    # ingest_sops.py, one line per SOP: doc no, revision, steps, current, machines. Its step
+    # table ('SOP-LOTO-01  1  2  1.  Identify ...') has numbers after the doc no, not 'rev'.
+    re.compile(r"^SOP-[A-Z]+-\d+\s+(rev \d+, \w{3} \d{4}|no revision)\s+\d+ steps\s+"
+               r"(current|superseded)\s+machines: "),
 ]
 
 
@@ -259,7 +283,7 @@ def summary_lines(lines: list[str]) -> list[str]:
 
 
 _COUNT_RES = [
-    re.compile(r"Rows read: (\d+)\s+loaded: (\d+)\s+rejected: (\d+)"),        # logs, cmms, images
+    re.compile(r"Rows read: (\d+)\s+loaded: (\d+)\s+rejected: (\d+)"),        # logs, cmms, images, sops
     re.compile(r"rows_read=(\d+), parts_loaded=(\d+), rejected=(\d+)"),        # spares
 ]
 _RUN_RE = re.compile(r"Recorded as run (\d+) in ingest_runs")
@@ -383,10 +407,10 @@ class InputFile:
 
 
 def describe_inputs(plan: list[Planned]) -> list[InputFile]:
-    """Size and SHA-256 of each input. A folder (the images) gets the total size of its
-    images and lineage.folder_sha256, the hash ingest_images.py records in ingest_runs.
-    A file read by two steps (the audit and the sensor load) is listed once, under the step
-    that loads it, so 'Same file as loaded' can be checked."""
+    """Size and SHA-256 of each input. A folder (the images, the SOPs) gets the total size
+    of the files its script reads and lineage.folder_sha256 over them, the hash that script
+    records in ingest_runs. A file read by two steps (the audit and the sensor load) is
+    listed once, under the step that loads it, so 'Same file as loaded' can be checked."""
     out, seen = [], set()
     for p in sorted(plan, key=lambda p: p.step.full_output):   # loading steps first
         if not p.input or p.input in seen:
@@ -394,11 +418,10 @@ def describe_inputs(plan: list[Planned]) -> list[InputFile]:
         seen.add(p.input)
         f = Path(p.input) if Path(p.input).is_absolute() else ROOT / p.input
         if f.is_dir():
-            from ingest_images import IMAGE_EXTS
-
-            files = folder_files(f, IMAGE_EXTS)
+            exts = folder_extensions(p.step.key)
+            files = folder_files(f, exts)
             out.append(InputFile(p.step.key, p.input, sum(x.stat().st_size for x in files),
-                                 folder_sha256(f, IMAGE_EXTS)) if files
+                                 folder_sha256(f, exts)) if files
                        else InputFile(p.step.key, p.input))
         else:
             out.append(InputFile(p.step.key, p.input, f.stat().st_size, file_sha256(str(f)))
@@ -466,7 +489,8 @@ def render_report(meta: dict, results: list[Result], inputs: list[InputFile],
                  f"{_cell(r.run_id)} | {_cell(c.get('rows_read'))} | "
                  f"{_cell(c.get('rows_loaded'))} | {_cell(c.get('rows_rejected'))} |")
     L += ["", "For `relationships.py`, Read / Loaded / Rejected are rows checked / matched / "
-          "orphans. For `ingest_images.py`, one row is one image. `audit_sensor_csv.py` "
+          "orphans. For `ingest_images.py`, one row is one image; for `ingest_sops.py`, one "
+          "file (the GM's email is the expected reject). `audit_sensor_csv.py` "
           "loads nothing: Read is the rows it profiled, and \"ok\" means it ran, not that the "
           "file is clean; its findings are under Details. Counts for a load come from "
           "`ingest_runs`; for a dry run, from the scripts' summaries.", ""]

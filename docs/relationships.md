@@ -72,8 +72,9 @@ whole from `sop_steps_audit` and cites it through `sops_audit` (`raw_id`). On th
 data 7 of the 12 machines are named by an SOP (BLAST-01, PMP-T01, CRN-01, CRN-02, CNC-01,
 CNC-02, CNC-03) and 5 have none (CMP-01, LTH-01, MILL-01, WELD-01, WELD-02). The `is_current` filter sits
 inside a nested join, so a machine named only in a superseded revision gets `has_sop = 0`
-rather than a row with no title. After an `ingest_sops.py --recreate`, run this script
-again: MySQL keeps a view over a dropped table but fails when it's read.
+rather than a row with no title. An `ingest_sops.py --recreate` doesn't break the view:
+MySQL looks its tables up when it's read, and the load recreates them with the same names
+and columns. Run this script after every SOP load anyway, to re-check the links.
 
 `incident_report_vs_cmms` compares severity on the 5 = worst scale only (each side
 converted with its own rule: the scale printed on the form, the date rule in the CMMS), so a
