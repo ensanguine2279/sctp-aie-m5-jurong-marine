@@ -1,0 +1,9 @@
+JME SOP-LOTO-01 — LOCKOUT/TAGOUT PROCEDURE (rev 4, Jan 2026)
+1. Identify all energy sources (electrical, hydraulic, pneumatic, gravity).
+2. Notify affected personnel and shift supervisor.
+3. Shut down machine using normal stop procedure.
+4. Isolate at main breaker; apply personal lock + tag. One lock per person working.
+5. Verify zero energy: attempt restart, test with multimeter (electricians only).
+6. For CNC machines: also release residual hydraulic pressure via manual valve (see machine manual).
+7. After work: ensure all guards restored, all personnel clear, remove locks (owner only), notify supervisor.
+VIOLATION = immediate stop-work + incident report. No exceptions, including 'quick jobs'.

@@ -12,9 +12,9 @@ Week 1 checkpoint (due Thu 5 Nov 2026). Every problem we have found in the clien
 | `tabular/critical_spares.xlsx` | Every cell (openpyxl) | 1 sheet `Spares`, A1:H13, 10 parts, rev 11 |
 | `logs/vibration_temp_2026H1.csv` | Every row (`scripts/audit_sensor_csv.py`) | 106,384 readings + header, 4.6 MB, SHA-256 `05c18527…6bd023` |
 | `images/` (12 nameplates, 30 incident reports) | **All 30 incident forms loaded** and linked to the CMMS by `relationships.py`: 0 orphans after the I10 fix (was 1). All 30 forms compared field by field with the CMMS (`incident_report_vs_cmms`). **All 12 nameplates loaded** and compared with the CMMS (`machine_nameplate`), every OCR reading in `ocr_notes` reviewed. Checked by eye: `IR-2024-900.jpg`, `IR-2025-904.jpg`, `IR-2025-906.jpg`, `IR-2025-914.jpg`, and the plates of BLAST-01, CNC-03, CRN-02, CMP-01 and WELD-02; the other 7 plates only through their OCR readings | 30 incident forms (21 old-scale, 9 new-scale), 12 nameplates (one per CMMS machine) |
-| `docs/sops/` | **Not yet** | |
+| `docs/sops/` | **Every line** of all 4 files, and every SOP statement checked against the CMMS (machines, employees, all 85 incidents) and the nameplates | 3 SOPs (19 lines in all) + 1 email that isn't an SOP |
 
-`vibration_temp_sample.csv` is exactly the first 7 lines of the full file, so it adds nothing of its own. The SOPs will add traps. The brief warns the nameplate photos are bad, and they are: I14–I21.
+`vibration_temp_sample.csv` is exactly the first 7 lines of the full file, so it adds nothing of its own. The brief warns the nameplate photos are bad, and they are: I14–I21. The SOPs are short but contradict the CMMS in places: D1–D10.
 
 ---
 
@@ -116,9 +116,30 @@ Read with `python scripts/ingest_images.py data/images --dry-run` ([`ingest_imag
 
 ---
 
+## SOPs (`docs/sops/`)
+
+Four plain-text files, UTF-8, LF line endings: `SOP-LOTO-01.txt` (lockout/tagout, rev 4, Jan 2026, 8 lines), `SOP-CRANE-02.txt` (overhead crane lifting, rev 6, Mar 2026, 6 lines), `SOP-CONFINED-03.txt` (confined space entry, rev 2, Sep 2025, 5 lines), and `0000_gm_brief_email.txt`. Each SOP starts with one header line, `JME <doc no> — <TITLE> (rev N, Mon YYYY)`, followed by bullets (CRANE, CONFINED) or numbered steps (LOTO). Every SOP is under 1 KB, so a retrieved SOP is quoted whole: a step is never cut off from the rest of its procedure.
+
+| ID | Trap | Evidence | Why it matters | Status |
+|---|---|---|---|---|
+| D1 | **A file in the SOP folder isn't an SOP** | `0000_gm_brief_email.txt`: an email from the GM to `digital-project@`, 26 Jun 2026, with names and email addresses. It restates the asks (severity flip "old 1 = new 5", "we photographed all of them" — all 12 plates are there, CNC-02 "off") and says nothing about SOPs. | Indexed as an SOP, the app would quote an email as a procedure. It also holds personal data. | Handled: `ingest_sops.py` accepts only files whose first line is a `JME SOP-…` header; the email is rejected `not_an_sop`, kept in `sop_documents_raw` only (never granted to the app user), and the dry run prints only its file name. Test `test_the_gm_email_is_not_an_sop_and_keeps_only_its_raw_row` |
+| D2 | **Encoding and line endings** | Every title contains an em dash (U+2014, UTF-8 `E2 80 94`). Read with Windows' default encoding (cp1252), it becomes `â€”`: `JME SOP-LOTO-01 â€” LOCKOUT…`. The three SOPs have no final newline. | On Windows, `open()` without `encoding=` garbles every title, and an exact-match citation fails. | Handled: `ingest_sops.decode` always reads UTF-8 (BOM and CRLF allowed) and rejects anything else as `not_utf8`. Tests `test_em_dash_survives_where_the_windows_default_would_garble_it`, `test_bom_and_windows_line_endings_are_read_like_plain_utf8` |
+| D3 | **Most incident types have no SOP** | Of 85 CMMS incidents, 27 are of a kind an SOP covers: 20 crane-related (`falling object from crane path` 10, `sling snapped during lift` 5, `unsecured load shifted` 5) under SOP-CRANE-02, and 7 `heat stress - confined space` under SOP-CONFINED-03. The other **58** have none: `finger caught in chuck (glove)` 15, `weld flash burn` 14, `electric shock - faulty extension` 10, `foreign object in eye - grinding` 7, `slip on hydraulic oil` 6, `hand laceration - deburring` 6. No SOP covers hot work, PPE, machine guarding, portable electrical equipment or housekeeping. | The commonest incidents are exactly the ones with no procedure on file. "What's the SOP for welding?" must get "no SOP in the data", not a made-up one. | Client (Q17). Us: eval cases |
+| D4 | **The crane SOP cites a near-miss the CMMS doesn't have** | SOP-CRANE-02: "After the **Aug 2025** near-miss (sling snapped), ALL slings >2 years old were scrapped." The CMMS's five `near miss: sling snapped during lift` incidents are 917 (2024-01-24, CRN-01), 957 (2024-11-12, CNC-02), 941 (2024-11-20, PMP-T01), 973 (2025-10-14, CNC-02) and **944 (2026-04-28, CRN-01, 5 lost days)**. None is in August 2025. And 944 happened a month after rev 6 (Mar 2026) said the old slings were gone. | Either an incident is missing from the CMMS, or the SOP's date is wrong. "Has a sling snapped since the scrapping?" is yes (944). Three of the five are on machines that aren't cranes (C6). | Client (Q18) |
+| D5 | **Who was lifting?** | "Only certified crane operators (list with HR) may operate CRN-01/CRN-02." The CMMS has two Crane Ops, EMP005 (day) and EMP024 (night). The people on the five sling incidents are EMP007, EMP002 (twice), EMP009 (QA Inspectors) and EMP027 (Fitter): none a Crane Op. The certification list isn't in the data. | Either `emp_code` on an incident is the person hurt or reporting, not the operator, or non-certified staff were lifting. Same doubt as C7. | Client (Q19). The app must not say who operated a crane |
+| D6 | **Confined-space incidents logged on machines with no confined space** | SOP-CONFINED-03 applies to "blasting chamber (BLAST-01), ballast tanks on client vessels, test pump sump". The 7 `heat stress - confined space` incidents are on LTH-01 (907), CNC-03 (908), WELD-01 (926, 974), WELD-02 (933), CRN-02 (939) and PMP-T01 (955). Only 955 (the test pump rig, i.e. its sump) fits. **None is on BLAST-01.** | The machine field probably records the nearest asset or the requesting bay, or the work was in a client vessel's tank, which has no machine id. "Confined-space incidents in the blasting chamber" = 0 by the data, which may well be wrong. Linking SOPs to incidents by machine id would miss 6 of 7. | Client (with Q3, C6). Us: link SOPs to incidents by incident type, not machine |
+| D7 | **The crane SOP is the only clean source for crane capacity** (checked, no trap) | SOP-CRANE-02: "Max load: CRN-01 = 10,000 kg, CRN-02 = 2,000 kg." CMMS names agree (`Overhead Crane 10T`, `Jib Crane 2T`), and so does CRN-02's plate photo (2000 kg; OCR stored 2600, I15). CRN-01's plate carries a welder's rating (I19). | For "what's the max load of CRN-01", the SOP is the source to cite; the plate isn't. | Us: eval case; cite the SOP for crane loads |
+| D8 | **SOPs point to documents we don't have** | LOTO step 6: "release residual hydraulic pressure via manual valve (**see machine manual**)". CRANE: operator "**list with HR**"; tandem lifts need a "**lifting plan signed by PE**". CONFINED: entry **permit**, **gas test** records. None is in the data package. | "How do I release hydraulic pressure on CNC-02?" can only be answered with "see the machine manual, which isn't in the data". | Handled in the data: `sop_steps.refers_to` names the missing document on each step (machine manual, HR operator list, lifting plan, entry permit), flagged `refers_to_document_not_in_data`. Us: the app says it isn't available |
+| D9 | **Only the current revision, dated to the month** | One revision each: LOTO rev 4 (Jan 2026), CRANE rev 6 (Mar 2026), CONFINED rev 2 (Sep 2025). No earlier revisions, no effective day, no approver. | "What procedure was in force when incident X happened?" can't be answered for anything before the revision month, e.g. any LOTO question before Jan 2026, which was rev 3 or earlier. An auditor may ask exactly that. | Client (Q20). Handled in the data: `sops` keeps every revision loaded, keyed `(doc_no, revision)`, with `rev_month` and `is_current`; search uses current revisions only |
+| D10 | **No SOP mentions oil or grease** | No lubricant, grade or interval appears in any SOP. | Ask 1's "what oil / what grease interval" rests on the nameplates alone (with I14–I20's problems) and the spares sheet's one `ALL` oil: there's no third source to settle a conflict. | Us: the app cites the plate photo and flags OCR uncertainty |
+
+**How they're ingested ([`ingest_sops.py`](ingest_sops.md)):** read each file as UTF-8 (D2), accept only `JME SOP-…` headers (D1), parse doc no, title, revision and month from the header, and store one row per SOP plus one row per step or bullet with its line number, for citations. Retrieval picks the SOP by keyword (MySQL `FULLTEXT` is plenty for three documents) and returns it whole. A `sop_machines` table links SOPs to the machines they name (BLAST-01, CRN-01, CRN-02, PMP-T01 for "test pump sump", CNC-01/02/03 for LOTO step 6), and `relationships.py` checks those links like any other. Lineage, the raw table and the `_audit` view work as for the other sources.
+
+---
+
 ## Client questions raised by this list
 
-All of them are in one list, Q1–Q16 in [`README.md`](../README.md#needs-the-clients-input). This list added **Q10** (C4, what `lost_days` values mean), **Q11** (C7, why QA inspectors and crane operators log repairs), **Q12** (C9, are same-day PM pairs double entries) and **Q13** (C13, is 24.1 h real), and new evidence for **Q4** (the CNC-02 trend under L-items). The scans added **Q14** (I7, where are the 5-Why sheets) and **Q15** (I2–I3, is BLAST-01's nameplate on the right machine, and which oil does it take; I19 shows plate lines copied onto CRN-01, PMP-T01 and WELD-02 too) and **Q16** (I20: lubrication listed for the welders and the compressor), and new evidence for **Q1** (I5: the switch was between 1 and 11 Jul 2025; no form for 907), **Q2** (I5: the old forms confirm the date rule, so C3 is on paper) and **Q3** (I6, I13).
+All of them are in one list, Q1–Q20 in [`README.md`](../README.md#needs-the-clients-input). This list added **Q10** (C4, what `lost_days` values mean), **Q11** (C7, why QA inspectors and crane operators log repairs), **Q12** (C9, are same-day PM pairs double entries) and **Q13** (C13, is 24.1 h real), and new evidence for **Q4** (the CNC-02 trend under L-items). The scans added **Q14** (I7, where are the 5-Why sheets) and **Q15** (I2–I3, is BLAST-01's nameplate on the right machine, and which oil does it take; I19 shows plate lines copied onto CRN-01, PMP-T01 and WELD-02 too) and **Q16** (I20: lubrication listed for the welders and the compressor), The SOPs added **Q17** (D3, SOPs for the commonest incident types), **Q18** (D4, which incident is the "Aug 2025" sling near-miss, and incident 944 after the scrapping), **Q19** (D5, crane operator certification) and **Q20** (D9, earlier SOP revisions), and new evidence for **Q3** (D6). New evidence for **Q1** (I5: the switch was between 1 and 11 Jul 2025; no form for 907), **Q2** (I5: the old forms confirm the date rule, so C3 is on paper) and **Q3** (I6, I13).
 
 ## Reproducing the evidence
 
@@ -157,6 +178,18 @@ SELECT p.machine_id, p.logged_model, p.manufacturer, p.plate_model, p.year_insta
        p.lubricant, p.grease_interval_h, d.source_file, d.warnings, d.ocr_notes
 FROM machine_nameplate p JOIN img_documents_raw d ON d.raw_id = p.raw_id
 ORDER BY p.machine_id;
+
+-- D3: incidents by type (crane, confined space: covered by an SOP; the rest: not)
+SELECT description, COUNT(*) FROM cmms_safety_incidents GROUP BY 1 ORDER BY 2 DESC;
+
+-- D4, D5: every sling near-miss, with the trade of the person on it
+SELECT i.incident_id, i.incident_date, i.machine_id, i.lost_days, i.emp_code, e.trade
+FROM cmms_safety_incidents i LEFT JOIN cmms_employees e ON e.emp_code = i.emp_code
+WHERE i.description LIKE '%sling snapped%' ORDER BY i.incident_date;
+
+-- D6: confined-space incidents and the machine they're logged on
+SELECT incident_id, incident_date, machine_id FROM cmms_safety_incidents
+WHERE description LIKE '%confined space%' ORDER BY incident_date;
 
 -- I1: every field OCR was unsure about, with each reading
 SELECT source_file, ocr_notes FROM img_documents_raw WHERE ocr_notes IS NOT NULL;

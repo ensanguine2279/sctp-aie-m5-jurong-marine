@@ -38,6 +38,16 @@ def test_scanned_images_are_cited_but_raw_ocr_is_never_granted():
     assert not any("documents" in o for o in objs)
 
 
+def test_the_sops_are_granted_but_the_raw_sop_files_never_are():
+    """sops for MATCH ... AGAINST (the FULLTEXT index is on the table), the audit views to
+    quote an SOP whole with its citation, sop_machines to find SOPs by machine.
+    sop_documents_raw keeps the GM's email (names, addresses): never granted."""
+    objs = au.allowed_objects(Names())
+    assert {"sops", "sops_audit", "sop_steps_audit", "sop_machines"} <= set(objs)
+    assert "sop_documents_raw" not in objs
+    assert "sop_ft_stopwords" not in objs                 # the index's, not the app's
+
+
 def test_everything_allowed_and_existing_is_granted():
     p = au.plan_grants(Names(), _existing())
     assert p.grant == au.allowed_objects(Names())
@@ -102,10 +112,48 @@ def test_access_check_reads_no_rows():
         "SELECT * FROM `work_order_sensor_window` LIMIT 0"
 
 
+def test_a_denied_object_that_exists_fails_and_says_to_grant_it():
+    """MySQL says 'denied' (1142) for an object with no grant, whether or not it exists.
+    On 4 Nov 2026 the image and SOP objects existed but weren't granted yet."""
+    ok, line = au.denied_verdict("sops", missing=set())
+    assert not ok and "exists but not granted" in line and "without --check" in line
+
+
+def test_a_denied_object_not_created_yet_is_skipped():
+    ok, line = au.denied_verdict("sops", missing={"sops"})
+    assert ok and line == "  skip    sops: not created yet"
+
+
+def test_a_denied_object_fails_when_nobody_can_tell_whether_it_exists():
+    """No admin connection: never pass it, but say both causes are possible."""
+    ok, line = au.denied_verdict("sops", missing=None)
+    assert not ok and "not granted, or not created yet" in line
+
+
+def test_missing_objects_come_from_what_the_admin_sees():
+    class Conn:
+        def execute(self, stmt, params=None):   # information_schema.COLUMNS rows
+            return [(o, "raw_id") for o in au.allowed_objects(Names()) if o != "sop_machines"]
+
+    class Ctx:
+        def __enter__(self):
+            return Conn()
+
+        def __exit__(self, *a):
+            return False
+
+    class Engine:
+        def connect(self):
+            return Ctx()
+
+    assert au.missing_objects(Engine(), Names()) == {"sop_machines"}
+
+
 def test_probes_cover_names_raw_writes_and_schema():
     probes = dict(au.forbidden_probes(Names()))
     assert "emp_name" in probes["employee names"]
     assert "cmms_employees_raw" in probes["raw employee rows"]
+    assert "sop_documents_raw" in probes["raw SOP files (the GM's email)"]
     assert "WHERE 1 = 0" in probes["writing data"]          # harmless even if allowed
 
 
@@ -205,7 +253,9 @@ def test_dry_run_needs_no_database_and_hides_the_password(monkeypatch, capsys, c
     assert "App user 'agent_ro'@'%'" in out                        # the default user
     assert "GRANT SELECT ON `jurong`.`incident_detail`" in out
     assert "GRANT SELECT ON `jurong`.`img_incident_reports_audit`" in out
-    assert "cmms_employees" not in out.split("Will then check")[0]
+    assert "GRANT SELECT ON `jurong`.`sop_steps_audit`" in out
+    granted = out.split("Will then check")[0]
+    assert "cmms_employees" not in granted and "sop_documents_raw" not in granted
 
 
 def test_settings_with_windows_line_endings_still_work(monkeypatch, capsys, clean_env):

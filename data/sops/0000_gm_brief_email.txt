@@ -1,0 +1,13 @@
+From: kc.tan@jurongmarine.sg
+To: digital-project@jurongmarine.sg
+Date: Fri, 26 Jun 2026 08:15:30 +0800
+Subject: MOM audit coming + what I want from the AI tool
+
+Team,
+
+MOM WSH audit likely in Q4. I need: (1) our incident history queryable — but CAREFUL, we changed severity scale in Jul 2025, old 1 = new 5, auditors WILL catch us if we mix them up. (2) Techs keep asking 'what oil this machine use' / 'what's the grease interval' — answers are on the nameplates, we photographed all of them. (3) CNC-02 been feeling 'off' according to night shift — check the vibration logs? If we can show predictive maintenance to the auditor, big win.
+
+Also our sensor CSV is a mess — vendor mixed timestamp formats and half the temperature in Fahrenheit. Sort it out.
+
+KC Tan
+General Manager
