@@ -210,6 +210,79 @@ def test_mermaid_doc_is_markdown_with_a_mermaid_block():
     assert "raw_id" in doc                                      # lineage explained
 
 
+# ---------------------------------------------------------------- SOP links ---
+# sop_machine: sop_machines.machine_id -> cmms_machines.machine_id  (checked, FK if clean)
+# sop_doc:     sop_machines.doc_no     -> sops.doc_no               (FK made by ingest_sops.py)
+
+CMMS_MACHINES = ["BLAST-01", "CMP-01", "CNC-01", "CNC-02", "CNC-03", "CRN-01", "CRN-02",
+                 "LTH-01", "MILL-01", "PMP-T01", "WELD-01", "WELD-02"]   # the client's 12
+# sop_machines.machine_id on the client's three SOPs (ids and aliases; see test_sops.py)
+CLIENT_SOP_LINKS = {"BLAST-01": 1, "PMP-T01": 1, "CRN-01": 1, "CRN-02": 1,
+                    "CNC-01": 1, "CNC-02": 1, "CNC-03": 1}
+
+
+def test_sop_links_are_declared_on_known_columns():
+    m, d = BY_NAME["sop_machine"], BY_NAME["sop_doc"]
+    assert (m.child, m.child_col, m.parent, m.parent_col) == \
+        ("sop_machines", "machine_id", "machines", "machine_id")
+    assert (d.child, d.child_col, d.parent, d.parent_col) == \
+        ("sop_machines", "doc_no", "sops", "doc_no")
+
+
+def test_sop_tables_have_no_prefix():
+    """ingest_sops.py has no --prefix option: its tables keep their names whatever the
+    CMMS or image prefix is."""
+    n = Names("acme_", "sensors", "scan_")
+    assert (n["sops"], n["sop_machines"], n["machines"]) == ("sops", "sop_machines", "acme_machines")
+
+
+def test_the_client_sop_links_all_match_a_cmms_machine():
+    c = check_relationship(CLIENT_SOP_LINKS, {mid: 1 for mid in CMMS_MACHINES})
+    assert (c.rows, c.matched, c.orphan_rows) == (7, 7, 0)
+    assert plan_foreign_key(BY_NAME["sop_machine"], c, enforced=False) == ("add", "")
+
+
+def test_a_machine_an_sop_names_but_the_cmms_lacks_is_an_orphan():
+    """e.g. an SOP that says 'isolate CRN-03': ingest_sops flags unknown_machine, and this
+    check keeps the FOREIGN KEY off until it is fixed."""
+    c = check_relationship({"CRN-01": 1, "CRN-03": 1}, {mid: 1 for mid in CMMS_MACHINES})
+    assert c.orphans == {"CRN-03": 1}
+    action, reason = plan_foreign_key(BY_NAME["sop_machine"], c, enforced=False)
+    assert action == "skip" and "orphan" in reason
+
+
+def test_sop_doc_is_never_given_a_second_foreign_key():
+    """Its FK is ingest_sops.py's composite (doc_no, revision); doc_no alone repeats once
+    earlier revisions are loaded, so this script must not add one."""
+    action, reason = plan_foreign_key(BY_NAME["sop_doc"], Check(rows=7, matched=7), False)
+    assert action == "skip" and "ingest_sops.py" in reason
+
+
+def test_ingest_sops_composite_key_counts_as_enforcing_sop_doc():
+    """KEY_COLUMN_USAGE has one row per column of a composite key."""
+    fks = [("fk_sop_machines", "sop_machines", "doc_no", "sops", "doc_no"),
+           ("fk_sop_machines", "sop_machines", "revision", "sops", "revision")]
+    assert enforced_names(fks, Names()) == {"sop_doc"}
+
+
+def test_earlier_revisions_make_doc_no_ambiguous_but_never_an_orphan():
+    c = check_relationship({"SOP-LOTO-01": 6}, {"SOP-LOTO-01": 2})   # rev 3 and rev 4
+    assert c.matched == 6 and not c.orphans and c.ambiguous == ["SOP-LOTO-01"]
+
+
+def test_er_diagram_shows_the_sop_tables():
+    m = to_mermaid(Names(), enforced={"sop_doc"})
+    assert 'cmms_machines ||..o{ sop_machines : "covered by SOPs"' in m
+    assert 'sops ||--o{ sop_machines : "names machines"' in m        # solid: a real FK
+
+
+def test_dry_run_diagram_draws_the_sop_foreign_key_solid(tmp_path, monkeypatch):
+    out = tmp_path / "er.md"
+    monkeypatch.setattr("sys.argv", ["relationships.py", "--dry-run", "--mermaid", str(out)])
+    rel.main()
+    assert "sops ||--o{ sop_machines" in out.read_text(encoding="utf-8")
+
+
 # ------------------------------------------------------------------ run log ---
 
 def _checks(orphans=None):

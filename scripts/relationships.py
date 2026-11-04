@@ -7,6 +7,7 @@ Each ingest script loads one source on its own:
     ingest_logs.py    vibration_temp
     ingest_spares.py  critical_spares, critical_spare_machines
     ingest_images.py  img_nameplates, img_incident_reports
+    ingest_sops.py    sops, sop_steps, sop_machines
 
 They share keys (machine_id, emp_code, part_no, incident_id), but nothing ties the sources
 together in the database. This script does, in four steps:
@@ -30,6 +31,8 @@ Relationships (child -> parent):
     img_nameplates.asset_tag             -> cmms_machines.machine_id   nameplate photo -> CMMS
     img_incident_reports.incident_id     -> cmms_safety_incidents.incident_id   scanned form -> CMMS
     img_incident_reports.machine_id      -> cmms_machines.machine_id
+    sop_machines.machine_id              -> cmms_machines.machine_id   machine named in an SOP -> CMMS
+    sop_machines.doc_no                  -> sops.doc_no                FK (doc_no, revision) made by ingest_sops.py
 
 Views:
 
@@ -101,6 +104,8 @@ class Names:
             "spare_machines": "critical_spare_machines",
             "nameplates": f"{self.image_prefix}nameplates",
             "incident_reports": f"{self.image_prefix}incident_reports",
+            "sops": "sops",                          # ingest_sops.py has no prefix option
+            "sop_machines": "sop_machines",
         }
         return {k: safe_identifier(v) for k, v in m.items()}
 
@@ -169,6 +174,19 @@ ENTITIES: dict[str, list[tuple[str, str, str, str]]] = {
         ("int", "lost_days", "", ""), ("varchar", "immediate_action", "", ""),
         ("varchar", "root_cause", "", ""), ("tinyint", "signature_present", "", ""),
     ],
+    "sops": [
+        ("varchar", "doc_no", "PK", "e.g. SOP-LOTO-01"), ("int", "revision", "PK", ""),
+        ("varchar", "title", "", ""), ("char", "rev_month", "", "YYYY-MM"),
+        ("tinyint", "is_current", "", "highest revision loaded"),
+        ("int", "step_count", "", "steps in sop_steps, quoted whole"),
+        ("text", "search_text", "", "what the app searches (FULLTEXT)"),
+    ],
+    "sop_machines": [
+        ("varchar", "doc_no", "PK, FK", ""), ("int", "revision", "PK, FK", ""),
+        ("varchar", "machine_id", "PK, FK", ""),
+        ("varchar", "how", "", "id | name | alias"),
+        ("varchar", "evidence", "", "the SOP's words"),
+    ],
 }
 
 
@@ -214,6 +232,13 @@ RELATIONSHIPS = [
     Relationship("report_machine", "incident_reports", "machine_id", "machines", "machine_id",
                  "named on scanned forms", "|o", True,
                  note="machine on the scanned form -> CMMS machine"),
+    Relationship("sop_machine", "sop_machines", "machine_id", "machines", "machine_id",
+                 "covered by SOPs", "||", True,
+                 note="machine named in an SOP (id, CMMS name or alias) -> CMMS machine"),
+    Relationship("sop_doc", "sop_machines", "doc_no", "sops", "doc_no",
+                 "names machines", "||", False,
+                 note="FK fk_sop_machines on (doc_no, revision) made by ingest_sops.py; "
+                      "doc_no alone repeats across revisions"),
 ]
 
 
@@ -551,7 +576,9 @@ def existing_foreign_keys(conn) -> list[tuple[str, str, str, str, str]]:
 
 
 def enforced_names(fks: list[tuple], names: Names) -> set[str]:
-    """Relationships that have a FOREIGN KEY on exactly their columns, whoever made it."""
+    """Relationships that have a FOREIGN KEY on exactly their columns, whoever made it.
+    A composite key counts for each of its columns (KEY_COLUMN_USAGE has one row per
+    column): fk_sop_machines on (doc_no, revision) enforces sop_doc."""
     have = {fk[1:] for fk in fks}
     return {r.name for r in RELATIONSHIPS
             if (names[r.child].lower(), r.child_col, names[r.parent].lower(), r.parent_col)
@@ -733,7 +760,7 @@ def main() -> None:
 
     if a.dry_run:
         print_plan(names, a.window_days)
-        enforced = {"spare_part"}  # made by ingest_spares.py
+        enforced = {"spare_part", "sop_doc"}  # made by ingest_spares.py and ingest_sops.py
         if a.mermaid:
             Path(a.mermaid).parent.mkdir(parents=True, exist_ok=True)
             Path(a.mermaid).write_text(mermaid_doc(names, enforced), encoding="utf-8")

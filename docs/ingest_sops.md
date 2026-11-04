@@ -338,13 +338,18 @@ client folder end to end, and a dry run the pipeline can parse. `test_the_real_s
 **Checked on a real server (4 Nov 2026):** the DDL, the load (3 SOPs, 7 machine links,
 CMMS loaded with 12 machines), `MATCH` for "blasting chamber entry" (SOP-CONFINED-03
 only, 1.59), and the stopword rebuild: after it, the welding audit query returns no rows
-(60 stop words in `sop_ft_stopwords`). **Not yet on a real server:** `search_text` and its
-index. Load once with `--recreate`, then the plural and welding audit queries above.
+(60 stop words in `sop_ft_stopwords`). After the `search_text` change (`--recreate`):
+`MATCH (search_text)` finds SOP-CRANE-02 for "shackle kink" (0.46; nothing before), and
+the welding query on `search_text` returns no rows. `agent_user.py` then granted all 19
+objects, SOP ones included, and `--check` passed.
 
 **The app user** (`agent_user.py`) can read `sops` (for `MATCH`: the `FULLTEXT` index is on
 the table), `sops_audit`, `sop_steps_audit` and `sop_machines`. It can't read
 `sop_documents_raw`, which keeps the GM's email; `--check` proves that. Re-run
 `agent_user.py` after the first SOP load.
 
-**Not wired in yet:** `pipeline.py` doesn't run this step, and `relationships.py` doesn't
-check `sop_machines`.
+**Linked to the CMMS:** `relationships.py` checks every `sop_machines.machine_id` against
+`cmms_machines` (`sop_machine`; all 7 match on the client's data) and can make it a foreign
+key with `--foreign-keys` ([`relationships.md`](relationships.md#relationships)).
+
+**Not wired in yet:** `pipeline.py` doesn't run this step.
