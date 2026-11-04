@@ -37,7 +37,12 @@ Every SOP starts with one header line: `JME SOP-LOTO-01 — LOCKOUT/TAGOUT PROCE
 | `parse_document` | The header gives `doc_no`, `title`, `revision`, `rev_month` (`YYYY-MM`; the SOPs give no day). An `Applies to:` line right after it becomes `applies_to`. Every other non-blank line is a step: `1.` keeps its number as the marker, `-` is a bullet, a line with neither (LOTO's closing `VIOLATION = ...`) is a step with no marker. Line numbers count the header as line 1 |
 | `split_rejects` | `not_an_sop` (first line isn't `JME SOP-...`: the GM's email, D1), `bad_header`, `not_utf8`, `duplicate_file` (same bytes as an earlier file), `duplicate_revision` / `duplicate_revision_conflict` (same doc no and revision as an earlier file; conflict = the steps differ). **Different revisions of one SOP are all kept**; `is_current` marks the highest (D9) |
 | `machine_links` | `id`: a machine id in the text (`CRN-01/CRN-02` gives both; `CNC-01/02/03` gives three). `name`: a CMMS machine name in the text (`blasting chamber`), when the CMMS is loaded. `alias`: a phrase in `ALIASES` (`test pump sump` -> PMP-T01, `CNC machines` -> CNC-01/02/03). Each link records how it was made and the words it came from, because an alias is a judgement |
+| `create_tables` | Creates the tables, then `rebuild_fulltext`: fills `sop_ft_stopwords`, sets `innodb_ft_user_stopword_table` for the session, and drops and re-adds both `FULLTEXT` indexes, so MySQL ignores the same words as `search_sops`. On **every** load, not only `--recreate`: MySQL reads the stopword list only when an index is built |
 | `load` | Replaces every SOP row, in one transaction. The folder is the complete set of SOPs |
+
+On the client's data a machine is linked by name only where no id or alias already links
+it: "blasting chamber" sits next to `(BLAST-01)`, so that link is `id`. A real load with
+the CMMS (12 machines) gives the same 7 links as the dry run: `alias=4, id=3`.
 
 ## Tables
 
@@ -47,6 +52,7 @@ Every SOP starts with one header line: `JME SOP-LOTO-01 — LOCKOUT/TAGOUT PROCE
 | `sops` | One row per SOP revision, key `(doc_no, revision)`: `title`, `rev_month`, `rev_label`, `applies_to`, `is_current`, `step_count`, `full_text` (`FULLTEXT` index with the title) |
 | `sop_steps` | One row per step, key `(doc_no, revision, step_no)`: `line_no`, `marker`, `step_text` (as written), `refers_to` (documents it points to that aren't in the data). `FULLTEXT` on `step_text` |
 | `sop_machines` | `(doc_no, revision, machine_id)` with `how` (`id` / `name` / `alias`) and `evidence` |
+| `sop_ft_stopwords` | One column, `value` (primary key: hosted MySQL with `sql_require_primary_key` refuses a table without one, error 3750): the words both `FULLTEXT` indexes ignore. MySQL's 35 default stop words plus `search_sops`' `_STOP` (`work`, `machine`, `before`, ...), 60 in all. Rewritten on every load |
 | `sops_audit`, `sop_steps_audit` (views) | Clean + file + its SHA-256 + run. **Cite these**: "SOP-CONFINED-03 rev 2, lines 3-6 (`SOP-CONFINED-03.txt`)" |
 
 `raw_id` = `run_id * 1000 + file number` (files by name, from 1). `ingest_runs` records the
@@ -54,14 +60,18 @@ folder and one SHA-256 over all its files (`lineage.folder_sha256`), as for the 
 
 ## Answering from the SOPs
 
-1. **Find the SOP.** `search_sops(question, sops, links)` scores the current SOPs: a
-   question word in the title counts 2, in the text 1, a machine the SOP is linked to 3.
-   Words every SOP uses ("work", "machine", "before") don't count, and a score below 2 is
-   no match. In the database, `MATCH (title, full_text) AGAINST (...)` on `sops` does the
-   same job.
+1. **Find the SOP.** `search_sops(question, sops, links)` first widens the question with
+   `expand_question` (`SYNONYMS`: "sandblasting" adds "blasting chamber", "isolating" adds
+   "lockout"), then scores the current SOPs: a question word in the title counts 2, in the
+   text 1, a machine the SOP is linked to 3. Words every SOP uses ("work", "machine",
+   "before") don't count, and a score below 2 is no match. In the database,
+   `MATCH (title, full_text) AGAINST (:q)` on `sops`, with `q = expand_question(question)`,
+   finds the same candidates, because it ignores the same words (`sop_ft_stopwords`).
 2. **Nothing found means no SOP.** 58 of the 85 incidents are of a kind no SOP covers
    (welding, grinding, chucks, portable electrics, housekeeping, D3). For those the app
-   must say "no SOP in the data covers this", never stretch another SOP.
+   must say "no SOP in the data covers this", never stretch another SOP. **`search_sops`
+   is the gate for that answer**: it needs a score of 2, while `MATCH` returns any row
+   sharing one word.
 3. **Quote it whole.** `quote_sop` gives every step of the SOP with its citation:
    `[Source: SOP-CONFINED-03, lines 3-6]`. A single step out of its procedure (step 5 of
    lockout without steps 1-4) is how someone gets hurt.
@@ -71,8 +81,58 @@ folder and one SHA-256 over all its files (`lineage.folder_sha256`), as for the 
    (D9).
 
 Checked in the tests: "before entering the blasting chamber" finds SOP-CONFINED-03, "max
-load of CRN-01" SOP-CRANE-02, "lock out CNC-02" SOP-LOTO-01, and "welding hot work PPE for
-grinding" finds nothing.
+load of CRN-01" SOP-CRANE-02, "lock out CNC-02" SOP-LOTO-01, "going inside the
+sandblasting booth" SOP-CONFINED-03, "isolating power on the lathe" SOP-LOTO-01, and
+"welding hot work PPE for grinding" finds nothing.
+
+## Search: keyword, not a vector database (decision, 4 Nov 2026)
+
+**Decision.** SOPs are found by keyword: `search_sops` in Python, with MySQL `FULLTEXT`
+kept in step through the same stop words and synonyms. No embeddings and no vector
+database for now. Asked during the first real load: "would it be better to store the SOPs
+in a semantic database?"
+
+**Why.**
+
+| | Keyword (chosen) | Semantic / vector search |
+|---|---|---|
+| A question no SOP covers (D3) | Scores below 2: "no SOP in the data covers this" | Always returns a nearest SOP. Saying "none" needs a similarity cut-off, and nothing explains it |
+| A paraphrase ("sandblasting booth") | Missed unless `SYNONYMS` has it | Found |
+| Why an SOP matched | The words it shares with the question | A number |
+| Storage and lineage | Same MySQL, same one-transaction load, same `_audit` views | A second store, or an embedding column to keep in step with every load |
+
+- **The failure that matters most is a confident wrong SOP.** 58 of 85 incidents are of a
+  kind no SOP covers. A vector search would put "welding hot work PPE" near confined
+  space (hot-work and confined-space permits share wording) or near lockout, and hand a
+  welder the wrong procedure. A missed SOP is bad; a wrong one is worse.
+- **Size.** 3 SOPs, 18 steps, each under 1 KB. That is choosing among three documents,
+  not retrieval over a corpus.
+- **Keyword's weakness is real but small and testable.** Paraphrases that share no word
+  with the SOP are missed. The two found so far are in `SYNONYMS` and in the tests, along
+  with a test that they're missed without it.
+
+**What was done instead.**
+
+1. **MySQL ignores the same words as `search_sops`.** On the first real load,
+   `MATCH ... AGAINST ('welding hot work PPE grinding')` returned SOP-LOTO-01 (score
+   0.46) on "After work:" in step 7, because MySQL's default stopword list has no "work".
+   `search_sops` returned nothing, which is right. `sop_ft_stopwords` now holds MySQL's
+   defaults plus `_STOP`. A user stopword table *replaces* MySQL's list, so the defaults
+   are included, written out in the script because reading them from
+   `INFORMATION_SCHEMA.INNODB_FT_DEFAULT_STOPWORD` needs the `PROCESS` privilege. It is a
+   session setting: no admin rights or Cloud SQL flag needed.
+2. **`SYNONYMS` for paraphrases**, applied to the question only, before both
+   `search_sops` and `MATCH`. Like `ALIASES` it is a judgement: keep it short, and add an
+   entry, with its question as a test, when a real question misses.
+3. **`search_sops` stays the gate** for "no SOP covers this" (score of at least 2). A
+   `MATCH` score isn't used as a cut-off: it depends on how common each word is across all
+   rows, so it shifts whenever the client adds an SOP.
+
+**Revisit when** the client sends dozens of SOPs, or eval questions keep missing and
+`SYNONYMS` keeps growing. Then add embeddings as a column in the same database (on
+`sops` or `sop_steps`; brute-force cosine is fine at that size). Use them to rank or to
+suggest candidates, never as the gate for "no SOP covers this", and keep quoting the
+chosen SOP whole from `sop_steps`.
 
 ## Warnings
 
@@ -100,9 +160,11 @@ Steps referring to documents not in the data: certified operator list (HR)=1, en
 Machine names: not matched (CMMS not loaded); ids and aliases only
 ```
 
-That is the dry run on the client's folder. A real load after `ingest_cmms.py` also matches
-CMMS machine names. The dry run prints the steps, and for rejected files only the file
-name and reason, so the email's addresses never reach the screen or a pipeline report.
+That is the dry run on the client's folder. A real load after `ingest_cmms.py` says
+`Machine names: matched against cmms_machines`, gives the same 7 links, and ends with
+`FULLTEXT indexes rebuilt with <n> stop words (sop_ft_stopwords)`. The dry run prints the
+steps, and for rejected files only the file name and reason, so the email's addresses
+never reach the screen or a pipeline report.
 
 ## Personal data (PDPA)
 
@@ -123,6 +185,14 @@ SELECT doc_no, revision, title, MATCH (title, full_text) AGAINST ('blasting cham
 FROM sops WHERE is_current = 1 AND MATCH (title, full_text) AGAINST ('blasting chamber entry')
 ORDER BY score DESC;
 
+-- A topic no SOP covers (D3): must return no rows. Returned SOP-LOTO-01 (0.46, on 'work')
+-- before sop_ft_stopwords; re-run after any load that changes the stop words
+SELECT doc_no, MATCH (title, full_text) AGAINST ('welding hot work PPE grinding') AS score
+FROM sops WHERE is_current = 1 AND MATCH (title, full_text) AGAINST ('welding hot work PPE grinding');
+
+-- The stop words the indexes were built with
+SELECT COUNT(*) FROM sop_ft_stopwords;
+
 -- One SOP, whole, with line numbers for the citation
 SELECT step_no, line_no, marker, step_text, refers_to FROM sop_steps_audit
 WHERE doc_no = 'SOP-CONFINED-03' AND is_current = 1 ORDER BY step_no;
@@ -140,7 +210,7 @@ WHERE status = 'rejected';
 
 ## Tests
 
-`tests/test_sops.py` (30 tests, no database): the client's three SOPs exactly as delivered
+`tests/test_sops.py` (38 tests, no database): the client's three SOPs exactly as delivered
 (em dash, no final newline) and the GM's email, built as bytes. Covers the header (number,
 title, revision, month; a hyphen instead of the em dash; no revision), UTF-8 where cp1252
 would garble the title, a BOM and CRLF read like plain UTF-8, a non-UTF-8 file rejected,
@@ -150,13 +220,22 @@ numbered steps, bullets and an unmarked closing line with their line numbers, `A
 kept apart, gas-test limits kept exactly as written, references to missing documents (and
 an incident report not counted as one), personal data flagged, machine links by id, CMMS
 name and alias (`CRN-01/CRN-02`, `CNC-01/02/03`, `test pump sump`), an unknown machine
-flagged, search for four real questions and nothing for welding, superseded revisions never
-searched, the whole SOP quoted with its citation, the client folder end to end, and a dry
-run the pipeline can parse. `test_the_real_sop_folder` reads `data/sops/` if it's there.
+flagged, search for four real questions and two paraphrases (and the paraphrases missed
+without `SYNONYMS`), synonyms matching whole words only, nothing for welding, superseded
+revisions never searched, the whole SOP quoted with its citation, the `FULLTEXT` stop words
+covering `_STOP` and MySQL's defaults, the stopword setting made before both indexes are
+re-added (on a recording connection), a primary key on the stopword table, the client folder end to end, and a dry run the
+pipeline can parse. `test_the_real_sop_folder` reads `data/sops/` if it's there.
 
-**Not covered:** the MySQL DDL, `FULLTEXT` search and the load against a real server.
-Check with `--recreate` and the audit queries above.
+**Checked on a real server (4 Nov 2026):** the DDL, the load (3 SOPs, 7 machine links,
+CMMS loaded with 12 machines), `MATCH` for "blasting chamber entry" (SOP-CONFINED-03
+only, 1.59), and the stopword rebuild: after it, the welding audit query returns no rows
+(60 stop words in `sop_ft_stopwords`).
 
-**Not wired in yet:** `pipeline.py` doesn't run this step, `relationships.py` doesn't check
-`sop_machines`, and `agent_user.py` doesn't grant `sops_audit`, `sop_steps_audit` and
-`sop_machines`. Until it does, the app user can't read the SOPs.
+**The app user** (`agent_user.py`) can read `sops` (for `MATCH`: the `FULLTEXT` index is on
+the table), `sops_audit`, `sop_steps_audit` and `sop_machines`. It can't read
+`sop_documents_raw`, which keeps the GM's email; `--check` proves that. Re-run
+`agent_user.py` after the first SOP load.
+
+**Not wired in yet:** `pipeline.py` doesn't run this step, and `relationships.py` doesn't
+check `sop_machines`.

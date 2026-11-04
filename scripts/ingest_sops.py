@@ -16,6 +16,7 @@ Tables, so every quoted step can be traced to the file and line it came from:
                          'applies to', is_current, the whole text (FULLTEXT index)
     sop_steps            one row per step or bullet, with its line number (FULLTEXT)
     sop_machines         SOP -> machine: ids named in the text, CMMS machine names, aliases
+    sop_ft_stopwords     the words both FULLTEXT indexes ignore (the same as search_sops)
 
     sops_audit, sop_steps_audit (views)   clean + file + its SHA-256 + run, for citations
 
@@ -28,9 +29,11 @@ Pipeline (each step is a small function you can test on its own):
 
 The folder is the complete set of SOPs, so each load replaces every SOP row.
 
-Answering from the SOPs: pick the SOP by keyword (search_sops, or MySQL MATCH ... AGAINST
-on sops), then quote it WHOLE from sop_steps, citing doc no, revision and line numbers.
-Never quote one step on its own: a safety step out of its procedure is how someone gets hurt.
+Answering from the SOPs: pick the SOP by keyword (search_sops; MySQL MATCH ... AGAINST on
+sops with the question from expand_question gives the same candidates), then quote it WHOLE
+from sop_steps, citing doc no, revision and line numbers. Never quote one step on its own:
+a safety step out of its procedure is how someone gets hurt. Keyword, not semantic search:
+see 'Search: keyword, not a vector database' in docs/ingest_sops.md.
 
 Usage
     python scripts/ingest_sops.py data/sops --dry-run
@@ -424,6 +427,36 @@ _STOP = {"the", "a", "an", "and", "or", "of", "to", "for", "in", "on", "at", "is
          "after", "every", "per", "person", "personnel"}
 MIN_SCORE = 2.0   # one stray common word (1 point) is not a match
 
+# Words people use in questions for what the SOPs call something else. expand_question()
+# adds the SOP's word to the question, before search_sops and before MySQL MATCH ... AGAINST,
+# so the two search the same words. A judgement, like ALIASES: keep it short, add an entry
+# when a real question misses, and add that question to the tests.
+SYNONYMS = {
+    "sandblasting": "blasting chamber",      # SOP-CONFINED-03 'blasting chamber (BLAST-01)'
+    "sandblast": "blasting chamber",
+    "blast room": "blasting chamber",
+    "blast booth": "blasting chamber",
+    "lock out": "lockout",                   # SOP-LOTO-01 'LOCKOUT/TAGOUT'
+    "lock-out": "lockout",
+    "tag out": "tagout",
+    "isolate": "lockout",
+    "isolating": "lockout",
+    "isolation": "lockout",
+    "de-energise": "lockout",
+    "de-energize": "lockout",
+    "de-energising": "lockout",
+    "de-energizing": "lockout",
+}
+
+
+def expand_question(question: str) -> str:
+    """The question plus the SOP words for any SYNONYMS phrase in it (whole words only:
+    'isolated' is not 'isolate'). Pass the result to MATCH ... AGAINST too."""
+    low = question.lower()
+    extra = [w for phrase, w in SYNONYMS.items()
+             if re.search(rf"(?<![\w-]){re.escape(phrase)}(?![\w-])", low)]
+    return " ".join([question] + list(dict.fromkeys(extra)))
+
 
 def _words(s: str) -> list[str]:
     """Lower-case words, stop words dropped, a plural 's' removed ('tanks' -> 'tank')."""
@@ -438,11 +471,12 @@ def _words(s: str) -> list[str]:
 def search_sops(question: str, sops: pd.DataFrame, links: pd.DataFrame | None = None,
                 limit: int = 3) -> list[tuple[str, int, float]]:
     """(doc_no, revision, score) of current SOPs, best first; [] if nothing scores at least
-    MIN_SCORE, so the
-    app can say 'no SOP in the data covers this' (trap list D3). Title words count double;
-    a machine the SOP is linked to (id or evidence phrase in the question) counts 3.
-    For three short documents this is enough; MySQL MATCH ... AGAINST on sops does the
-    same in the database."""
+    MIN_SCORE, so the app can say 'no SOP in the data covers this' (trap list D3). This is
+    the gate for that answer. The question is first widened by expand_question. Title
+    words count double; a machine the SOP is linked to (id or evidence phrase in the
+    question) counts 3. MySQL MATCH ... AGAINST on sops, with the same stop words
+    (sop_ft_stopwords), gives the same candidates in the database."""
+    question = expand_question(question)
     q = set(_words(question))
     qtext = question.lower()
     out = []
@@ -475,6 +509,52 @@ def quote_sop(doc_no: str, revision: int, sops: pd.DataFrame, steps: pd.DataFram
 
 TABLES = ["sop_machines", "sop_steps", "sops", "sop_documents_raw"]   # children first
 
+# The FULLTEXT indexes ignore the same words search_sops does. MySQL's own list has no
+# 'work', so 'welding hot work PPE grinding' matched SOP-LOTO-01 on 'After work:' (score
+# 0.46, 4 Nov 2026) where search_sops finds nothing, as it should (trap list D3).
+# A user stopword table REPLACES MySQL's default list, so that list is included too. It is
+# written out here rather than read from INFORMATION_SCHEMA.INNODB_FT_DEFAULT_STOPWORD,
+# which needs the PROCESS privilege.
+STOPWORD_TABLE = "sop_ft_stopwords"
+MYSQL_DEFAULT_STOPWORDS = {"a", "about", "an", "are", "as", "at", "be", "by", "com", "de", "en",
+                           "for", "from", "how", "i", "in", "is", "it", "la", "of", "on", "or",
+                           "that", "the", "this", "to", "was", "what", "when", "where", "who",
+                           "will", "with", "und", "www"}
+FULLTEXT_INDEXES = [("sops", "ft_sops", "title, full_text"),
+                    ("sop_steps", "ft_sop_steps", "step_text")]
+
+
+def fulltext_stopwords() -> list[str]:
+    """Every word the FULLTEXT indexes ignore: MySQL's defaults plus search_sops' _STOP."""
+    return sorted(MYSQL_DEFAULT_STOPWORDS | _STOP)
+
+
+def rebuild_fulltext(conn) -> None:
+    """Fill sop_ft_stopwords, point this session's FULLTEXT stopword setting at it, then
+    drop and re-add both FULLTEXT indexes on the same connection.
+
+    MySQL reads the stopword list only when an index is built, so this runs on every load,
+    not only with --recreate (the tables are tiny). It is a session setting: no admin
+    rights or server flag needed."""
+    from sqlalchemy import text
+
+    db = conn.execute(text("SELECT DATABASE()")).scalar()
+    # InnoDB wants exactly one VARCHAR column named `value`. It is also the primary key:
+    # servers with sql_require_primary_key = ON (hosted MySQL, e.g. Aiven) refuse a table
+    # without one (MySQL error 3750).
+    conn.execute(text(f"CREATE TABLE IF NOT EXISTS {STOPWORD_TABLE} "
+                      "(value VARCHAR(30) NOT NULL PRIMARY KEY) "
+                      "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 "
+                      "COMMENT 'words the SOP FULLTEXT indexes ignore (ingest_sops.py)'"))
+    conn.execute(text(f"DELETE FROM {STOPWORD_TABLE}"))
+    conn.execute(text(f"INSERT INTO {STOPWORD_TABLE} (value) VALUES (:value)"),
+                 [{"value": w} for w in fulltext_stopwords()])
+    conn.execute(text("SET SESSION innodb_ft_user_stopword_table = :t"),
+                 {"t": f"{db}/{STOPWORD_TABLE}"})
+    for table, index, cols in FULLTEXT_INDEXES:
+        conn.execute(text(f"ALTER TABLE {table} DROP INDEX {index}"))
+        conn.execute(text(f"ALTER TABLE {table} ADD FULLTEXT INDEX {index} ({cols})"))
+
 
 def create_tables(engine, recreate: bool) -> None:
     from sqlalchemy import text
@@ -488,6 +568,7 @@ def create_tables(engine, recreate: bool) -> None:
                 conn.execute(text(f"DROP TABLE IF EXISTS {t}"))
         for stmt in DDL:
             conn.execute(text(stmt))
+        rebuild_fulltext(conn)
 
 
 def cmms_machines(engine, table: str = "cmms_machines") -> dict[str, str] | None:
@@ -610,6 +691,7 @@ def main() -> None:
                rows_loaded=stats["loaded"], rows_rejected=stats["rejected"])
     print(f"Recorded as run {run_id} in ingest_runs.")
     print_report(out, stats, machines_known=machines is not None)
+    print(f"FULLTEXT indexes rebuilt with {len(fulltext_stopwords())} stop words ({STOPWORD_TABLE}).")
     print("Done.")
 
 

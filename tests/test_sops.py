@@ -229,6 +229,34 @@ def test_search_finds_the_right_sop(question, first):
     assert sp.search_sops(question, out["sops"], out["links"])[0][0] == first
 
 
+PARAPHRASES = [
+    ("Going inside the sandblasting booth, what do I need?", "SOP-CONFINED-03"),
+    ("Isolating power on the lathe before changing the tool", "SOP-LOTO-01"),
+]
+
+
+@pytest.mark.parametrize("question,first", PARAPHRASES)
+def test_search_finds_the_sop_for_a_paraphrase(question, first):
+    """Questions that share no word with their SOP ('sandblasting booth' vs 'blasting
+    chamber', 'isolating power' vs 'LOCKOUT'). Found through SYNONYMS."""
+    out = sp.process(client_folder(), machines=MACHINES)
+    assert sp.search_sops(question, out["sops"], out["links"])[0][0] == first
+
+
+@pytest.mark.parametrize("question,_", PARAPHRASES)
+def test_the_paraphrases_are_found_only_through_synonyms(question, _, monkeypatch):
+    """Proves the paraphrase tests test SYNONYMS: without it, keyword search misses them."""
+    out = sp.process(client_folder(), machines=MACHINES)
+    monkeypatch.setattr(sp, "SYNONYMS", {})
+    assert sp.search_sops(question, out["sops"], out["links"]) == []
+
+
+def test_synonyms_match_whole_words_only():
+    assert sp.expand_question("Isolate the pump") == "Isolate the pump lockout"
+    assert sp.expand_question("an isolated reading") == "an isolated reading"
+    assert sp.expand_question("lock out, tag out") == "lock out, tag out lockout tagout"
+
+
 def test_search_returns_nothing_for_a_topic_no_sop_covers():
     """Trap list D3: the app must say 'no SOP in the data', not stretch another one."""
     out = sp.process(client_folder(), machines=MACHINES)
@@ -247,6 +275,57 @@ def test_an_sop_is_quoted_whole_with_its_citation():
     assert q.splitlines()[0] == f"SOP-CONFINED-03 {DASH} CONFINED SPACE ENTRY (rev 2, Sep 2025)"
     assert q.count("\n- ") == 4                                         # every step, not one
     assert q.endswith("[Source: SOP-CONFINED-03, lines 3-6]")
+
+
+# ---------------------------------------------------------- MySQL FULLTEXT ---
+
+def test_fulltext_ignores_the_same_words_as_search_sops():
+    """MySQL's own stopword list has no 'work', so MATCH found SOP-LOTO-01 ('After work:')
+    for a welding question that search_sops rightly answers with nothing (D3)."""
+    words = set(sp.fulltext_stopwords())
+    assert sp._STOP <= words
+    assert sp.MYSQL_DEFAULT_STOPWORDS <= words      # a user list replaces MySQL's defaults
+    assert {"work", "working", "machine"} <= words
+    assert max(len(w) for w in words) <= 30          # fits sop_ft_stopwords.value
+
+
+class RecordingConn:
+    """Stands in for a SQLAlchemy connection: records each statement and its parameters."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, object]] = []
+
+    def execute(self, stmt, params=None):
+        self.calls.append((str(stmt), params))
+        return self
+
+    def scalar(self):
+        return "jme"
+
+
+def test_fulltext_indexes_are_rebuilt_after_the_stopword_list_is_set():
+    """MySQL reads the stopword list only when an index is built, so the SET must come
+    first, on the same connection, and both indexes must be rebuilt."""
+    conn = RecordingConn()
+    sp.rebuild_fulltext(conn)
+    sql = [s for s, _ in conn.calls]
+    set_at = next(i for i, s in enumerate(sql) if "innodb_ft_user_stopword_table" in s)
+    assert conn.calls[set_at][1] == {"t": "jme/sop_ft_stopwords"}
+    adds = [s for s in sql[set_at:] if "ADD FULLTEXT" in s]
+    assert adds == ["ALTER TABLE sops ADD FULLTEXT INDEX ft_sops (title, full_text)",
+                    "ALTER TABLE sop_steps ADD FULLTEXT INDEX ft_sop_steps (step_text)"]
+    assert not any("ADD FULLTEXT" in s for s in sql[:set_at])
+    inserted = next(p for s, p in conn.calls if s.startswith("INSERT INTO sop_ft_stopwords"))
+    assert [r["value"] for r in inserted] == sp.fulltext_stopwords()
+
+
+def test_stopword_table_has_a_primary_key():
+    """Hosted MySQL sets sql_require_primary_key: a table without one fails (error 3750)."""
+    conn = RecordingConn()
+    sp.rebuild_fulltext(conn)
+    create = next(s for s, _ in conn.calls if s.startswith("CREATE TABLE"))
+    assert "value VARCHAR(30) NOT NULL PRIMARY KEY" in create
+    assert len(set(sp.fulltext_stopwords())) == len(sp.fulltext_stopwords())   # no duplicates
 
 
 # ------------------------------------------------------------ whole folder ---

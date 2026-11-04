@@ -7,11 +7,13 @@ database has to refuse. This script makes a separate user that can only SELECT f
 an allow-list of views, then proves it:
 
     allowed   the linking views (machine_overview, work_order_detail, ...), the
-              table_relationships catalog, and the *_audit views needed for citations
-              (including the scanned nameplates and incident forms)
+              table_relationships catalog, the *_audit views needed for citations
+              (including the scanned nameplates and incident forms), and the SOPs:
+              sops (for MATCH ... AGAINST, whose FULLTEXT index is on the table),
+              sops_audit, sop_steps_audit, sop_machines
     never     cmms_employees, cmms_employees_raw, cmms_employees_audit, any *_raw table
-              (img_documents_raw keeps a form's "person involved" exactly as read),
-              any write, any schema change
+              (img_documents_raw keeps a form's "person involved" exactly as read;
+              sop_documents_raw keeps the GM's email), any write, any schema change
 
 Views run with their creator's rights (SQL SECURITY DEFINER, MySQL's default), so the
 app user can read work_order_detail without any access to the tables underneath.
@@ -47,6 +49,12 @@ DENIED_CODES = {1044, 1142, 1143, 1227, 3879}  # MySQL "access denied" errors
 PARTIAL_REVOKE_CODE = 3879  # access denied to a database (hosted MySQL: system databases)
 MISSING_CODES = {1146}  # table doesn't exist
 
+# The SOPs (ingest_sops.py). `sops` is a table, not a view: MATCH ... AGAINST needs the
+# FULLTEXT index, which is on the table, and sops_audit has no full_text. The SOPs name
+# roles, not people, and ingest_sops flags personal data in a step (personal_data_in_text).
+# sop_documents_raw is never granted: it keeps rejected files whole, e.g. the GM's email.
+SOP_OBJECTS = ["sops", "sops_audit", "sop_steps_audit", "sop_machines"]
+
 
 def allowed_objects(names: Names) -> list[str]:
     """Everything the app may SELECT from, in order. Never employees, never *_raw."""
@@ -60,6 +68,7 @@ def allowed_objects(names: Names) -> list[str]:
         "critical_spares_audit",
         f"{names['nameplates']}_audit",               # scanned images: file + SHA-256 cited
         f"{names['incident_reports']}_audit",
+        *SOP_OBJECTS,                                 # find an SOP, quote it whole, cite it
     ]
 
 
@@ -71,6 +80,7 @@ def forbidden_probes(names: Names) -> list[tuple[str, str]]:
         ("employees table", f"SELECT * FROM `{emp}` LIMIT 1"),
         ("employees audit view", f"SELECT * FROM `{emp}_audit` LIMIT 1"),
         ("raw employee rows", f"SELECT * FROM `{emp}_raw` LIMIT 1"),
+        ("raw SOP files (the GM's email)", "SELECT * FROM `sop_documents_raw` LIMIT 1"),
         ("writing data", f"UPDATE `{names['machines']}` SET machine_name = machine_name "
                          f"WHERE 1 = 0"),
         ("changing the schema", "CREATE TABLE agent_user_probe (x INT)"),
@@ -242,8 +252,31 @@ def access_probe(obj: str) -> str:
     return f"SELECT * FROM `{obj}` LIMIT 0"
 
 
-def check(agent_cfg: DbConfig, names: Names) -> bool:
-    """Connect as the app user: allowed objects must work, forbidden probes must fail."""
+def missing_objects(admin_engine, names: Names) -> set[str]:
+    """Allowed objects that don't exist in the database, as the admin sees it."""
+    with admin_engine.connect() as conn:
+        return set(plan_grants(names, existing_objects(conn)).missing)
+
+
+def denied_verdict(obj: str, missing: set[str] | None) -> tuple[bool, str]:
+    """(ok, line) for an allowed object the app user was refused.
+
+    MySQL answers 'denied' (1142) for ANY object the user has no grant on, even one that
+    doesn't exist, so it never tells the app user an object is missing. Only an account
+    that can see every object (the admin) can. missing: from missing_objects(), or None
+    when no admin connection was available."""
+    if missing is None:
+        return False, (f"  FAIL    {obj}: denied (not granted, or not created yet; set "
+                       f"DB_ADMIN_PASSWORD so --check can tell which)")
+    if obj in missing:
+        return True, f"  skip    {obj}: not created yet"
+    return False, (f"  FAIL    {obj}: exists but not granted; run agent_user.py without "
+                   f"--check to grant it")
+
+
+def check(agent_cfg: DbConfig, names: Names, missing: set[str] | None = None) -> bool:
+    """Connect as the app user: allowed objects must work, forbidden probes must fail.
+    missing: allowed objects that don't exist (see denied_verdict), if known."""
     from sqlalchemy import exc, text
 
     ok = True
@@ -259,6 +292,10 @@ def check(agent_cfg: DbConfig, names: Names) -> bool:
             kind = classify(_code(e))
             if kind == "missing":
                 print(f"  skip    {obj}: not created yet")
+            elif kind == "denied":
+                passed, line = denied_verdict(obj, missing)
+                ok = ok and passed
+                print(line)
             else:
                 ok = False
                 print(f"  FAIL    {obj}: {kind} ({e.orig})")
@@ -332,11 +369,11 @@ def main() -> None:
         cfg = load_db_config(a.env_file)
         user, pw = agent_settings()
         agent_cfg = DbConfig(user=user, password=pw, host=cfg.host, port=cfg.port, name=cfg.name)
+        from sqlalchemy import exc
+
         if not a.check:
             admin = admin_config(cfg)
             print(f"Setting up the app user as {admin.describe()}")
-            from sqlalchemy import exc
-
             try:
                 plan = apply(make_engine(admin), cfg, names, user, a.host, pw)
             except SetupError as e:
@@ -344,10 +381,20 @@ def main() -> None:
             except exc.DBAPIError as e:  # e.g. login refused: no statement to name
                 sys.exit(admin_error(_code(e), admin.user, message=_message(e)))
             print_plan(plan, cfg.name, user, a.host)
+            missing = set(plan.missing)
+        else:
+            missing = None   # --check alone: ask the admin which objects exist, if it can
+            try:
+                missing = missing_objects(make_engine(admin_config(cfg)), names)
+            except ValueError:
+                print("No admin password set: a denied object may also be one not created yet.")
+            except exc.DBAPIError as e:
+                print(f"Couldn't connect as admin to see which objects exist "
+                      f"(MySQL error {_code(e)}): a denied object may also be one not created yet.")
     except (ValueError, FileNotFoundError) as e:
         sys.exit(str(e))
 
-    if check(agent_cfg, names):
+    if check(agent_cfg, names, missing):
         print("\nPassed: the app user reads only the allowed views; names, raw data, "
               "writes and schema changes are refused.")
         print("Point the app's database connection at AGENT_DB_USERNAME, never DB_USERNAME.")
