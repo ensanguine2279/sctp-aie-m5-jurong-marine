@@ -1,4 +1,4 @@
-=# ingest_images.py: scanned nameplates and incident forms
+# ingest_images.py: scanned nameplates and incident forms
 
 `scripts/ingest_images.py` reads every image in a folder (by default `data/images/`), works
 out whether it is a **machine nameplate** or a **WSH-F02 incident report form**, reads its
@@ -52,7 +52,7 @@ employee codes included, through the proxy: say so if asked about PDPA.
 | `folder_files` | Every `.jpg .jpeg .png .tif .tiff .bmp .webp` directly in the folder, by name |
 | `extract` | Tesseract reads **three versions** of the page (below). On incident forms it also reads the severity digit from the **blue value ink** alone (below). Results are cached by the image's SHA-256 in `.cache/ingest_images/` (git-ignored), so unchanged images aren't read again; `--no-cache` turns it off |
 | `classify` | `incident_report` (title, `WSH-F02`, `Report No`), `nameplate` (`SERIAL`, `ASSET TAG`, `MFG DATE`), or `unknown` |
-| `parse_*_text` | Label -> value, tolerant of OCR splitting a word (`Loc ation/machine`) |
+| `parse_*_text` | Label -> value, tolerant of OCR splitting a word (`Loc ation/machine`). On nameplates the maker is the bold capitals line above `MODEL`, never a label line (`plate_maker`), and oil names are cleaned **before** the vote (`clean_lubricant`: `IS0`/`1S0`/`[S0`/`SO` -> `ISO`, `vVG` -> `VG`, `Tonna S3 N68` -> `M68`, trailing `;` dropped) so the three readings of a plate can agree |
 | `vote` | Per field, up to **four readings** are voted: the three page versions plus, for severity on a form, the blue-ink reading (below) |
 | `clean_*` | Ids (`IR-2024-9OO` -> `IR-2024-900`, `EMPOO1` -> `EMP001`; letters->digits only where digits belong, so `BLAST` stays `BLAST`), numbers and units (weight in lb or t -> kg, flagged), dates (same day-first parser as `ingest_cmms.py`), severity (below) |
 | `split_rejects` | Image rejected: `unreadable_image`, `unknown_document_type`, `duplicate_image` (same bytes as another image), `missing_key` (no readable tag or report no), `duplicate_key` / `duplicate_key_conflict` (a second image for the same machine or incident; conflict = its values differ, so review it) |
@@ -83,6 +83,17 @@ Each page pass is OCR'd in full (`--psm 6`) and parsed on its own. Then, per fie
    decides the severity when the page passes lost it.
 4. **Nothing is thrown away.** Every disagreement is kept in `ocr_notes` with each pass's
    reading and the one chosen, flagged `ocr_disagreed_<field>`.
+5. **No majority is flagged separately.** When no two readings agree, the value is only a
+   tie-break, so it is also flagged `ocr_no_majority_<field>`. On the client's plates this
+   caught CRN-02's grease interval (`509 h` / `566 h` / `500 h`: stored 509, plate says 500)
+   and CNC-03's (`590 h` / `5@8 4` / `509 4`: stored 590, plate says 500); see
+   [trap list I15](trap_list.md). Treat these values as unread and cite the photo.
+
+A unanimous vote isn't proof either: on WELD-02 all three passes read `Tonna S3 M58`
+where the plate says M68. The format checks are the second line of defence: 58 isn't an
+ISO VG grade, so it is flagged `failed_format_lubricant`. The manufacture date must be a
+real month and a year from 1950 to now (`plausible_mfg_date`), so `06/2820` and `62/2016`
+lose the vote to `06/2020` and `02/2016`.
 
 Example from the BLAST-01 plate: Otsu reads `1000 h` as `1660 h` and the tag as `BLAST!`,
 gray reads `M68` as `M66`. The vote gets all three right: `1000 h` (2 of 3), `BLAST-01`
@@ -174,6 +185,7 @@ as loaded" column.
 |---|---|---|
 | `ocr_disagreed_<field>` | both | The passes' readings differed; see `ocr_notes` for each one and which was kept |
 | `failed_format_<field>` | both | No reading passed the field's format check; the value is kept as read |
+| `ocr_no_majority_<field>` | both | No two readings agreed; the value is a tie-break. Treat it as unread and check the photo |
 | `read_from_value_ink_<field>` | form | The value came only from the blue-ink pass (so far only `severity`) |
 | `unknown_machine` | both | Tag / machine not in `cmms_machines` (only checked when the CMMS is loaded; `relationships.py` checks again) |
 | `placeholder_manufacturer` | plate | `CUSTOM`, `GENERIC`, ... : the real maker is unknown |
@@ -258,7 +270,7 @@ WHERE status = 'rejected';
 
 ## Tests
 
-`tests/test_images.py` (56 tests, no database, Tesseract or LLM needed): the OCR text the
+`tests/test_images.py` (87 tests, no database, Tesseract or LLM needed): the OCR text the
 sample scans actually produced, with Tesseract's mistakes, is passed in directly.
 Covers classifying, label parsing (`Loc ation`), the printed-scale label in every form
 (`1 = MOST SEVERE`, `5=WORST`, `1 = least severe`, unreadable), voting (majority, format
@@ -268,6 +280,11 @@ rule, a July 2025 form settling the ambiguity, an unreadable scale never guessed
 instead of an `EMP` code never stored, welding ratings, lb -> kg, every reject reason,
 duplicates against earlier folders, the LLM engine's fields, the cache, the folder hash, the
 audit views leaving OCR text out, and a dry run the pipeline can parse.
+
+Nameplates (from the 12-plate audit, with the readings Tesseract actually made): oil-name
+misreadings undone and grouped in the vote, a grade that doesn't exist still flagged,
+`ocr_no_majority_*` only when no two readings agree, impossible manufacture dates rejected
+so the real date wins, and a label line never taken as the maker.
 
 Blue-ink pass: it recovers a severity the page text lost (and flags it), it never outvotes
 page readings that agree, without it the severity stays unread, `ink_majority` abstains on

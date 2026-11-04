@@ -69,6 +69,12 @@ DB_ADMIN_PASSWORD=...              # falls back to MYSQL_ROOT_PASSWORD
   the port mapping makes local connections look remote to MySQL.
 - `--cmms-prefix`, `--sensor-table` and `--image-prefix` follow the ingest scripts' table
   names, if you changed them.
+- **Values already set in your shell win over `.env`.** If you once ran `source .env`, the
+  shell keeps those values until you close it or `unset` them.
+- **Windows line endings are handled.** Every setting is read through `db_config.getenv`,
+  which removes a trailing `\r`. A `.env` saved on Windows (CRLF) is read correctly by the
+  scripts, but `source .env` in a shell leaves `\r` on every value (`agent_ro\r`).
+  Only CR/LF are removed, so a password that really starts or ends with a space is kept.
 
 Docker's root password, if you don't remember it:
 
@@ -113,6 +119,7 @@ SHOW GRANTS FOR 'agent_ro'@'%';   -- USAGE (connect only) + one SELECT line per 
 | `... is not allowed to create users or grant` (MySQL 1227) | the admin account isn't an admin, e.g. `DB_ADMIN_USERNAME` is the ingest user | `DB_ADMIN_USERNAME=root` (Docker) or `avnadmin` (Aiven) with its password |
 | `Login refused for ...` (MySQL 1045) | wrong admin user or password | check `DB_ADMIN_USERNAME` / `DB_ADMIN_PASSWORD` |
 | `Set AGENT_DB_PASSWORD in .env` | no password for the app user | add it to `.env` |
+| `Invalid user name: 'agent_ro\r'` (or another value ending in `\r`) | an older script, and a CRLF `.env` loaded with `source .env`, so the shell's values end in `\r` and win over `.env` | use the current scripts (they strip it); fix the file with `sed -i 's/\r$//' .env`, then open a new shell or `unset` the variables |
 | `skip <object>: not created yet` | a source isn't loaded, or `relationships.py` hasn't run | load it, run `relationships.py`, then this script again |
 | `REFUSED <object>: has personal-data column(s) emp_name` | a view now selects names | take the column out of the view |
 
@@ -149,12 +156,17 @@ again recreates the user from `.env`.
 
 ## Tests
 
-`tests/test_agent_user.py` (no database): the allow-list never includes employees or raw
-tables (nor the scans' raw OCR) and follows the ingest prefixes, the scans' audit and
+`tests/test_agent_user.py` (23 tests, no database): the allow-list never includes employees
+or raw tables (nor the scans' raw OCR) and follows the ingest prefixes, the scans' audit and
 comparison views granted, objects with `emp_name` refused, missing objects skipped,
 `SELECT`-only grants after a full reset, the password never written into SQL or output,
 bad user/host/database names rejected, MySQL error codes read correctly, readable setup
-errors, connections that hide query values.
+errors, connections that hide query values, and settings with Windows line endings (set in
+the shell with a trailing `\r`, or in a CRLF `.env`) read without the `\r`.
+
+The dry-run tests use a `clean_env` fixture: they remove the `AGENT_*`, `DB_ADMIN_*`,
+`MYSQL_ROOT_PASSWORD` and `DB_NAME` variables and point `--env-file` at an empty file, so
+whatever is exported in your shell or in the repo's `.env` can't change the result.
 
 **Not covered:** anything that needs MySQL, i.e. creating the user and the grants. The
 real test is `agent_user.py --check` against your database.

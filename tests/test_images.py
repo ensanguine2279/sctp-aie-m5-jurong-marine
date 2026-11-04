@@ -502,6 +502,96 @@ def test_dry_run_prints_a_summary_the_pipeline_can_read(tmp_path, monkeypatch, c
 
 # ------------------------------------------------------------ real scans ---
 
+# ------------------------------------------- the 12 nameplates (trap list I14-I17) ---
+# Readings below are what Tesseract made of the client's plates (img_documents_raw.ocr_notes,
+# 4 Nov 2026); the right values are from the photos.
+
+def plate(gray: dict, otsu: dict | None = None, adaptive: dict | None = None) -> Extraction:
+    """The BLAST-01 plate text with some lines replaced, one dict per pass: {label: value}."""
+    def text(changes):
+        t = PLATE_GRAY
+        for label, value in changes.items():
+            old = next(ln for ln in t.splitlines() if ln.startswith(label))
+            t = t.replace(old, f"{label} {value}" if value is not None else "")
+        return t
+    passes = {"gray": gray, "otsu": otsu, "adaptive": adaptive}
+    return Extraction(ii.TESSERACT_TAG, texts={k: text(v) for k, v in passes.items() if v is not None})
+
+
+@pytest.mark.parametrize("read,clean", [
+    ("IS0 VG32", "ISO VG32"),                          # CNC-01, all three passes
+    ("1S0 VG32", "ISO VG32"), ("[S0 VG32", "ISO VG32"), ("SO VG32", "ISO VG32"),   # MILL-01
+    ("ISO vVG68", "ISO VG68"),                         # WELD-01
+    ("Shell Tonna S3 N68 ;", "Shell Tonna S3 M68"),    # CMP-01: the plate says M68
+    ("Shell Tonna $3 M68", "Shell Tonna S3 M68"),
+    ("Shell Tonna S3 M58", "Shell Tonna S3 M58"),      # WELD-02: a misread digit isn't guessed
+    ("ISO VG68", "ISO VG68"), ("ESSO VG32", "ESSO VG32"),
+])
+def test_oil_name_misreadings_are_undone(read, clean):
+    assert ii.clean_lubricant(read) == clean
+
+
+def test_oil_spellings_group_in_the_vote_so_the_majority_wins():
+    """WELD-01: 'ISO vVG68' / 'IS0 VG68' / 'ISO VG68' were three different readings, and the
+    gray one (wrong) won the tie. Cleaned first, all three agree."""
+    ex = plate({"LUBRICANT": "ISO vVG68"}, {"LUBRICANT": "IS0 VG68"}, {"LUBRICANT": "ISO VG68"})
+    out, _ = run(ex)
+    assert out["nameplate"].iloc[0]["lubricant"] == "ISO VG68"
+    assert "lubricant" not in (out["documents"].iloc[0]["warnings"] or "")
+
+
+def test_a_grade_that_does_not_exist_is_still_flagged():
+    out, _ = run(plate({"LUBRICANT": "Shell Tonna S3 M58"}))       # WELD-02 (plate: M68)
+    assert "failed_format_lubricant" in out["documents"].iloc[0]["warnings"]
+
+
+def test_no_two_readings_agreeing_is_flagged_as_no_majority():
+    """CRN-02: '509 h' / '566 h' / '500 h' -> 509 was stored; the plate says 500 h."""
+    ex = plate({"GREASE INTERVAL": "509 h"}, {"GREASE INTERVAL": "566 h"},
+               {"GREASE INTERVAL": "500 h"})
+    out, _ = run(ex)
+    warnings = out["documents"].iloc[0]["warnings"].split(",")
+    assert "ocr_no_majority_grease_interval" in warnings
+    assert "ocr_disagreed_grease_interval" in warnings
+
+
+def test_two_readings_agreeing_is_not_no_majority():
+    out, _ = run(PLATE)                                    # 1000 h / 1660 h / 1000 h
+    warnings = out["documents"].iloc[0]["warnings"].split(",")
+    assert "ocr_disagreed_grease_interval" in warnings
+    assert "ocr_no_majority_grease_interval" not in warnings
+
+
+@pytest.mark.parametrize("value,ok", [
+    ("06/2020", True), ("10/2018 a", True), ("11/2021 .", True), ("3/2014", True),
+    ("06/2820", False), ("62/2016", False), ("13/2020", False), ("00/2020", False),
+    ("06/1890", False), ("2016", False),
+])
+def test_manufacture_date_must_be_a_real_month_and_year(value, ok):
+    assert ii.plausible_mfg_date(value) is ok
+
+
+def test_impossible_dates_lose_the_vote():
+    """PMP-T01: '06/2820' (gray) beat '06/2020' (otsu) on a tie. CRN-01: '62/2016' twice beat
+    '02/2016', then failed cleaning, so the month was lost."""
+    out, _ = run(plate({"MFG DATE": "06/2820"}, {"MFG DATE": "06/2020"}))
+    assert out["nameplate"].iloc[0]["mfg_month"] == "2020-06"
+    out, _ = run(plate({"MFG DATE": "62/2016"}, {"MFG DATE": "62/2016"}, {"MFG DATE": "02/2016"}))
+    assert out["nameplate"].iloc[0]["mfg_month"] == "2016-02"
+
+
+@pytest.mark.parametrize("lines,maker", [
+    (["@ @", "MODEL CXT", "SERIAL NO KO4778956"], None),          # CRN-01: not 'MODEL CXT'
+    (["KONECRANES", "MODEL CXT"], "KONECRANES"),
+    (["| BRIDGEPORT .", "MODEL GX-1000"], "BRIDGEPORT"),          # junk around the bold name
+    (["@ @", "Colchester", "MODEL Triumph"], None),               # not mostly capitals
+    (["DMG", "MODEL Mori DMU-50"], "DMG"),                        # the plate splits DMG / Mori
+    (["CUSTOM", "MODEL SG-Fab"], "CUSTOM"),
+])
+def test_manufacturer_is_never_a_label_line(lines, maker):
+    assert ii.plate_maker(lines) == maker
+
+
 SCANS = ROOT / "data" / "images"
 
 

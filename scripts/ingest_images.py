@@ -427,8 +427,20 @@ def parse_incident_text(text: str) -> dict:
 
 
 def clean_lubricant(v) -> str | None:
+    """Undo OCR's usual misreadings of oil names (trap list I14, I18), before the vote, so
+    the three readings of one plate group together:
+    'Tonna $3' -> 'Tonna S3', 'IS0'/'1S0'/'[S0'/'SO VG32' -> 'ISO VG32', 'vVG68' -> 'VG68',
+    'Tonna S3 N68' -> 'Tonna S3 M68' (Shell Tonna S3 only comes as M), trailing ' ;' dropped.
+    A misread digit ('M58') is not guessed: it fails the grade check and is flagged."""
     s = _text(v)
-    return re.sub(r"\$(?=\d)", "S", s) if s else None     # OCR: 'Tonna $3' -> 'Tonna S3'
+    if not s:
+        return None
+    s = re.sub(r"\$(?=\d)", "S", s)
+    s = re.sub(r"[\s;:,.|'`]+$", "", s)
+    s = re.sub(r"(?<![A-Za-z])[vV]+(?=VG\s*\d)", "", s)
+    s = re.sub(r"(?<![A-Za-z])[\[(|1Il]?S[0O](?=\s*VG\s*\d)", "ISO", s)
+    s = re.sub(r"(Tonna\s+S3\s+)[NH](?=\d)", r"\1M", s, flags=re.I)
+    return _text(s)
 
 
 # The red italic '(JME)' after ASSET TAG, as OCR reads it: '(JME):', 'UME):', '{ME}:',
@@ -444,9 +456,32 @@ def asset_tag_value(v) -> str | None:
     return _text(_ASSET_LABEL.sub("", s)) if s else None
 
 
+# Lines that start with a field label: never the maker's name (trap list I17).
+_PLATE_LABEL = re.compile(r"^(MODEL|SERIAL|MFG|POWER|FLA|MAX|CAPACITY|WEIGHT|LUBRICANT|"
+                          r"GREASE|ASSET|RATED|DUTY)\b", re.I)
+
+
+def plate_maker(lines: list[str]) -> str | None:
+    """The manufacturer: printed in bold capitals above the MODEL line. An all-capitals
+    line that isn't a label; otherwise the first line above MODEL that is mostly capitals,
+    with OCR junk around it removed. Was: the first all-capitals line, which took
+    'MODEL CXT' on CRN-01 and found nothing on MILL-01 and LTH-01."""
+    body = [ln for ln in lines if not _PLATE_LABEL.match(ln)]
+    exact = next((ln for ln in body if re.fullmatch(r"[A-Z][A-Z &.\-]{2,}", ln)), None)
+    if exact:
+        return exact
+    model_at = next((i for i, ln in enumerate(lines) if re.match(r"MODEL\b", ln, re.I)), None)
+    for ln in lines[:model_at] if model_at is not None else []:
+        letters = re.sub(r"[^A-Za-z]", "", ln)
+        if len(letters) >= 3 and sum(c.isupper() for c in letters) >= 0.6 * len(letters):
+            name = re.sub(r"^[^A-Za-z]+|[^A-Za-z]+$", "", ln)
+            return _text(re.sub(r"[^A-Za-z &.\-]", "", name)).upper()
+    return None
+
+
 def parse_nameplate_text(text: str) -> dict:
     L = clean_lines(text)
-    maker = next((ln for ln in L if re.fullmatch(r"[A-Z][A-Z &.\-]{2,}", ln)), None)
+    maker = plate_maker(L)
     return {
         "manufacturer": maker,
         "model": field_after(L, r"MODEL"),
@@ -487,6 +522,13 @@ def has_viscosity_grade(v) -> bool:
     m = re.search(r"(\d+)\s*$", _text(v) or "")
     return bool(m) and int(m.group(1)) in ISO_VG
 
+def plausible_mfg_date(v) -> bool:
+    """'MM/YYYY' with a real month and a year from 1950 to now; trailing OCR junk
+    ('10/2018 a') is ignored. Rejects '62/2016' and '06/2820' (trap list I16)."""
+    m = re.match(r"\s*(\d{1,2})\s*/\s*(\d{4})(?!\d)", v or "")
+    return bool(m) and 1 <= int(m.group(1)) <= 12 and 1950 <= int(m.group(2)) <= date.today().year
+
+
 # Machine ids: letters, dash, digits, with an optional letter before the digits (PMP-T01).
 TAG = r"[A-Z]{2,6}-[A-HJKMNPR-Z]?\d{2,3}"   # PMP-T01 yes; CRN-O02, CRN-G2, BLAST-O1 no
 VALIDATORS = {
@@ -502,7 +544,7 @@ VALIDATORS = {
     "nameplate": {
         "asset_tag": lambda v: bool(re.fullmatch(TAG, v.strip().upper())),
         "serial_no": lambda v: bool(re.fullmatch(r"[A-Z]{2}\d{6,}", norm_id(v, 2) or "")),
-        "mfg_date": lambda v: bool(re.fullmatch(r"\d{1,2}\s*/\s*\d{4}", v.strip())),
+        "mfg_date": plausible_mfg_date,
         "lubricant": has_viscosity_grade,
         "grease_interval": lambda v: bool(re.fullmatch(r"\d[\d,]*\s*(h|hrs?|hours?)", v.strip(),
                                                        re.I)),
@@ -538,6 +580,9 @@ def vote(candidates: dict[str, dict], doc_type: str) -> tuple[dict, list[dict]]:
         if len({_same(v) for _, v in vals}) > 1:
             notes.append({"field": fld, "issue": "disagreed", "chose": best,
                           "readings": {n: v for n, v in vals}})
+            if len(vals) > 1 and len({_same(v) for _, v in vals}) == len(vals):
+                # No two readings agree: the value is a tie-break, not a vote (I15)
+                notes.append({"field": fld, "issue": "no_majority", "chose": best})
         if ok and not ok(best):
             notes.append({"field": fld, "issue": "failed_format", "chose": best})
     return merged, notes
@@ -758,7 +803,7 @@ def add_nameplate_warnings(df: pd.DataFrame, machine_ids: set | None = None) -> 
 # ----------------------------------------------------------------- common ---
 
 NOTE_WARNINGS = {"disagreed": "ocr_disagreed", "failed_format": "failed_format",
-                 "read_from_value_ink": "read_from_value_ink"}
+                 "read_from_value_ink": "read_from_value_ink", "no_majority": "ocr_no_majority"}
 
 
 def _with_warnings(df: pd.DataFrame, flags: dict) -> pd.DataFrame:
