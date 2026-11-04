@@ -1,0 +1,6 @@
+JME SOP-CONFINED-03 — CONFINED SPACE ENTRY (rev 2, Sep 2025)
+Applies to: blasting chamber (BLAST-01), ballast tanks on client vessels, test pump sump.
+- Entry permit required from WSH officer. Valid 8 hours max.
+- Gas test before entry AND every 2 hours: O2 19.5-23.5%, LEL <10%, H2S <10ppm, CO <30ppm.
+- Attendant stationed outside at all times with communication.
+- MOM notification required for vessel tank entry (Shipyard regs).

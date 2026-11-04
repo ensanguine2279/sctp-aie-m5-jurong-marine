@@ -11,6 +11,7 @@ you can paste into the data quality report.
 | `scripts/ingest_spares.py` | Critical spares sheet (`critical_spares.xlsx`) | [`ingest_spares.md`](docs/ingest_spares.md) |
 | `scripts/ingest_cmms.py` | CMMS SQL dump (`jurongmarine_cmms.sql`) | [`ingest_cmms.md`](docs/ingest_cmms.md) |
 | `scripts/ingest_images.py` | Scanned nameplates and incident report forms (`data/images/`) | [`ingest_images.md`](docs/ingest_images.md) |
+| `scripts/ingest_sops.py` | SOP documents (`data/sops/`): steps with line numbers, machine links, keyword search | [`ingest_sops.md`](docs/ingest_sops.md) |
 | `scripts/relationships.py` | The loaded tables: links the four sources | [`relationships.md`](docs/relationships.md), [ER diagram](docs/er_diagram.md) |
 | `scripts/agent_user.py` | Creates the app's read-only database user (PDPA) | [`agent_user.md`](docs/agent_user.md) |
 | `scripts/pipeline.py` | Runs all of the above in order, writes a Markdown report | [`pipeline.md`](docs/pipeline.md) |
@@ -37,6 +38,8 @@ python scripts/ingest_cmms.py   data/sql/jurongmarine_cmms.sql --dry-run
 python scripts/ingest_cmms.py   data/sql/jurongmarine_cmms.sql --recreate        # first load
 python scripts/ingest_images.py data/images --dry-run                            # needs Tesseract, see below
 python scripts/ingest_images.py data/images --recreate                           # first load
+python scripts/ingest_sops.py   data/sops --dry-run
+python scripts/ingest_sops.py   data/sops --recreate                             # first load (after the CMMS)
 
 python scripts/relationships.py --mermaid docs/er_diagram.md   # link the sources (after the loads)
 python scripts/agent_user.py                                   # the app's read-only user, then a check
@@ -133,6 +136,9 @@ The [ER diagram](docs/er_diagram.md) shows the cleaned tables and how they link;
 | `img_nameplates` | One per machine (`asset_tag` = `machine_id`): serial, power, weight, **lubricant**, **grease interval**, ... | [`ingest_images`](docs/ingest_images.md) |
 | `img_incident_reports` | One per incident (`IR-2024-900` -> `incident_id` 900): immediate action, root cause, signature, severity on the **scale printed on the form** | [`ingest_images`](docs/ingest_images.md) |
 | `img_nameplates_audit`, `img_incident_reports_audit` (views) | Clean + image file + its SHA-256 + run: use these for citations | [`ingest_images`](docs/ingest_images.md) |
+| `sop_documents_raw` | One row per file in the SOP folder: file name, SHA-256, text as read, `status`, `reject_reason`, `warnings` | [`ingest_sops`](docs/ingest_sops.md) |
+| `sops`, `sop_steps`, `sop_machines` | One row per SOP revision (`is_current`), per step with its line number, per machine it names | [`ingest_sops`](docs/ingest_sops.md) |
+| `sops_audit`, `sop_steps_audit` (views) | Clean + file + its SHA-256 + run: use these for citations | [`ingest_sops`](docs/ingest_sops.md) |
 | `table_relationships` | One row per link between sources (see below): child and parent column, `fk`/`soft`, rows checked, matched, orphans and which keys, `run_id` of the run that checked it | [`relationships`](docs/relationships.md) |
 | `machine_overview` (view) | One row per machine: work orders, breakdowns, open WOs, incidents, lost days, spares, spares below min, sensor readings and their date range | [`relationships`](docs/relationships.md#views) |
 | `machine_spares` (view) | Spares per machine, with `ALL` expanded to every machine | [`relationships`](docs/relationships.md#views) |
@@ -386,7 +392,7 @@ old cached reads are ignored.
 What we know is uncertain in the client's data, what the scripts do about it now, and
 what we need from someone else to settle it. Keep this list current: it feeds the data
 quality report, and the client will be asked these questions. The evidence for every
-problem, by source, is in [`trap_list.md`](docs/trap_list.md); the `C`, `S`, `L` and `I`
+problem, by source, is in [`trap_list.md`](docs/trap_list.md); the `C`, `S`, `L`, `I` and `D`
 numbers below refer to it.
 
 ### Needs the client's input
@@ -409,6 +415,10 @@ numbers below refer to it.
 | 14 | **Where are the 5-Why root-cause sheets?** (safety officer) | Incident forms say `Root cause (5-Why attached?): see attached`; no attachment is in the scans or the data package. "Why did incident 900 happen" can't be answered. (I7) | `root_cause_attached = 1`, flagged `root_cause_in_attachment`; the app says the root cause isn't in the data | Scan and load them, or confirm they don't exist |
 | 15 | **Is BLAST-01's nameplate on the right machine, and which oil does it take? Are other plates' lines copied from other machines?** (maintenance) | The plate rates the blasting chamber `450 A @ 60%` (how welding power sources are rated) and names `Shell Tonna S3 M68` (a slideway oil); the spares sheet lists only the `ALL` hydraulic oil for it. The same `450 A @ 60%` is on the crane CRN-01 and the pump PMP-T01, and welder WELD-02's plate carries a compressor's rating (`30 kW FAD 88 cfm`) and a 3.5 t weight. (I2, I3, I19) | Loaded as read, flagged `duty_cycle_rating_on_non_welder`; the app cites both sources for "what oil" | Correct the plate record or the asset tag |
 | 16 | **Which lubricant and interval do the welders and the compressor really take?** (maintenance) | The plates list `ISO VG68` every 2000 h for WELD-01 and `Shell Tonna S3 M68` (a slideway oil) every 2000 h for WELD-02; inverter welding sets usually have no lubrication points. The screw compressor CMP-01 also lists Tonna S3 M68, where the maker's compressor fluid would be expected. (I20) | Loaded as printed; the app cites the plate photo | Correct the plates, or confirm and we note it |
+| 17 | **Are there SOPs for welding, grinding, machine guarding, portable electrical equipment and housekeeping?** (safety officer) | Only three SOPs were provided (LOTO, crane lifting, confined space). 58 of the 85 incidents are of a kind none of them covers: finger caught in chuck 15, weld flash burn 14, electric shock from a faulty extension 10, eye injury from grinding 7, slip on hydraulic oil 6, deburring laceration 6. (D3) | The app says "no SOP in the data" for those topics | Send them and we load them; or confirm they don't exist (an audit finding in itself) |
+| 18 | **Which incident is the "Aug 2025 near-miss (sling snapped)" in the crane SOP?** (safety officer) | The CMMS has five sling near-misses (917, 957, 941, 973, 944) and none in August 2025. Incident 944 (CRN-01, 28 Apr 2026, 5 lost days) happened after rev 6 (Mar 2026) said all old slings were scrapped. (D4) | Both sources cited as they are | Add the missing incident or correct the SOP's date; say whether 944's sling was a new one |
+| 19 | **Who is certified to operate the cranes, and does `emp_code` on an incident mean the operator?** (HR / safety officer) | The crane SOP allows only certified operators ("list with HR"). The CMMS has two Crane Ops (EMP005, EMP024); none of the five sling near-misses names either. (D5, C7) | The app doesn't say who operated a crane | The certification list, and what `emp_code` means on incidents |
+| 20 | **Can we have the earlier SOP revisions and their effective dates?** (safety officer) | Only the current revision of each SOP is in the package, dated to the month (LOTO rev 4 Jan 2026, crane rev 6 Mar 2026, confined space rev 2 Sep 2025). Which procedure applied at an older incident can't be shown. (D9) | Answers say "current revision as of <month>" | Load the earlier revisions with their dates |
 
 ```sql
 -- Evidence for question 2: lost days by scale and logged severity
@@ -445,7 +455,7 @@ FROM cmms_work_orders GROUP BY 1, 2, 3 HAVING n > 1 ORDER BY wo_date;
 
 | Item | How |
 |---|---|
-| All 30 incident forms and all 12 nameplates are loaded and compared with the CMMS; 9 scans also checked by eye. The SOPs aren't reviewed yet. Three new forms (911, 922, 955) still have no severity read. Nameplate OCR fixes (I14–I17) are in and confirmed on a reload. Still read wrong and flagged: CRN-02 and CNC-03 grease intervals (509, 590; plates say 500), WELD-02's oil (`M58`; plate says M68). 7 plates not yet checked by eye | `SELECT * FROM machine_nameplate`, then the audit queries in [`ingest_images.md`](docs/ingest_images.md#audit-queries); add findings to [`trap_list.md`](docs/trap_list.md#images-images-incident-forms-and-nameplates). Try `--engine llm` on scans that are rejected or full of `ocr_disagreed_*` |
+| All 30 incident forms and all 12 nameplates are loaded and compared with the CMMS; 9 scans also checked by eye. The SOPs are reviewed (D1–D10) and `ingest_sops.py` loads them; it isn't wired into `pipeline.py`, `relationships.py` or `agent_user.py` yet, so the app user can't read the SOP tables. Three new forms (911, 922, 955) still have no severity read. Nameplate OCR fixes (I14–I17) are in and confirmed on a reload. Still read wrong and flagged: CRN-02 and CNC-03 grease intervals (509, 590; plates say 500), WELD-02's oil (`M58`; plate says M68). 7 plates not yet checked by eye | `SELECT * FROM machine_nameplate`, then the audit queries in [`ingest_images.md`](docs/ingest_images.md#audit-queries); add findings to [`trap_list.md`](docs/trap_list.md#images-images-incident-forms-and-nameplates). Try `--engine llm` on scans that are rejected or full of `ocr_disagreed_*` |
 | Whether `emp_code` with trade and shift identifies a person in a 32-person shop (PDPA) | team decision: if so, drop `emp_code` from `incident_detail` / `work_order_detail` |
 | Names also appear in the spares sheet title (`storeman: Halim`) | stored only in `critical_spares_raw.source_title`, which the app user can't read; keep it that way |
 | Views, grants and run logging have only been tested without a database | run `relationships.py` and `agent_user.py --check` on the real database |
@@ -569,6 +579,7 @@ pytest -k crlf                                      # the Windows line-ending te
 pytest -k ink                                       # the blue-ink severity reader
 pytest tests/test_images.py                         # the scans (OCR text given; no Tesseract needed)
 pytest tests/test_relationships.py                  # the linking script
+pytest tests/test_sops.py                           # the SOPs (no database)
 pytest tests/test_logs.py::test_temperature_units   # one specific test
 pytest -x                                           # stop at the first failure
 pytest --lf                                         # re-run only the tests that failed last time
@@ -585,11 +596,12 @@ With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
 | `tests/test_spares.py` | [`ingest_spares.py`](docs/ingest_spares.md): costs (`$38/spool`), lead times (`2-3 weeks (Germany)`, `local`), metric/imperial sizes, machine lists; on a messy sheet: raw rows and row numbers, `raw_id`, duplicate/missing part numbers, warnings for unreadable values | 18 |
 | `tests/test_cmms.py` | [`ingest_cmms.py`](docs/ingest_cmms.md): dump parsing (`;` and quotes inside strings, comments, multi-row INSERTs with line and tuple numbers, column lists, malformed tuples); ids, numbers (`S$1,050`), day-first dates; the severity flip (old scale inverted, July 2025 left unconverted, a confirmed cutover, out-of-range values never guessed); on a messy dump: duplicates and conflicting duplicates, orphan machines/employees flagged not dropped, raw text kept, `work_orders.status` not clashing with the load status; employee names masked to their last 4 characters in everything printed | 27 |
 | `tests/test_images.py` | [`ingest_images.py`](docs/ingest_images.md): the sample scans' real OCR text (mistakes included); label parsing, the printed severity scale, [four-pass voting](docs/ingest_images.md#four-pass-voting) (majority, format checks, ties, the only reading shaped like a machine id, a misread digit not accepted as a letter), asset-tag and location parsing, id fixes (`BLAST` stays `BLAST`); the 12-plate audit (oil-name misreadings undone before the vote, `ocr_no_majority_*` when no two readings agree, impossible manufacture dates rejected, a label line never taken as the maker), forms that contradict the date rule or settle July 2025, an unreadable scale never guessed, a name never stored as `emp_code`, welding ratings, lb -> kg, every reject reason, the LLM engine, the cache, the folder hash, audit views without OCR text; the [blue-ink severity reader](docs/ingest_images.md#colour-separation-severity-from-the-blue-value-ink) (recovers a lost severity and flags it, never outvotes page readings that agree, abstains on weak or split votes, never returns a wrong digit on a mock of the overlapping line); reads the real scans, incl. forms 904 and 906, if Tesseract is installed | 87 |
+| `tests/test_sops.py` | [`ingest_sops.py`](docs/ingest_sops.md): the client's SOPs as delivered; header, UTF-8 where cp1252 garbles the title, BOM/CRLF, the GM's email rejected and never printed, duplicate files and revisions, only the highest revision current, steps with line numbers, references to missing documents, personal data flagged, machine links by id, CMMS name and alias, search for real questions and nothing for welding, the whole SOP quoted with its citation | 30 |
 | `tests/test_relationships.py` | [`relationships.py`](docs/relationships.md): orphan/NULL/`ALL` counting, keys compared like MySQL (case, spaces), when a foreign key is added or skipped, table prefixes, no view exposes `emp_name`, incidents (and the form comparison) only offer `severity_5_worst`, the form comparison on one collation with July left open, machines without a nameplate kept, the ER diagram, the run fingerprint, successful and failed runs recorded in `ingest_runs` | 44 |
 | `tests/test_pipeline.py` | [`pipeline.py`](docs/pipeline.md): step order and flags (images after the CMMS), foreign keys dropped first and re-added last (never in a dry run), sample rows with names kept out of the report, counts from every script's summary, the images folder hashed like the load, a failure stopping the rest, `--keep-going`, Ctrl+C, the report's tables, `--save-log`, `--audit` | 34 |
 | `tests/test_agent_user.py` | `agent_user.py`: the allow-list never includes employees or raw tables (nor the raw OCR), the scans' audit views granted, objects with `emp_name` refused, missing objects skipped, `SELECT`-only grants after a full reset, password never written into SQL or output, bad user/host/database names rejected, MySQL error codes read correctly, errors never include the password, failed steps named with MySQL's message, no statement needing rights over every database, the access check reads no rows; settings with Windows line endings (from the shell or a CRLF `.env`) read without the trailing `\r`, and no settings leak in from your shell or `.env` | 23 |
 | `tests/test_shared.py` | `db_config.py`, `lineage.py`: password never printed, passwords with special characters, values of a failed query kept out of error messages, table-name check, file SHA-256, a run recorded without a file, values passed to MySQL are plain Python types, `getenv` and `load_db_config` strip a trailing `\r` (CRLF `.env`) | 9 |
-| **Total** | | **252** |
+| **Total** | | **282** |
 
 **Not covered:** anything that needs MySQL, i.e. creating tables, views and users,
 the inserts, the one-transaction rollback and the `ingest_runs` record. After
@@ -600,16 +612,17 @@ for the app user's grants, `agent_user.py --check` is the real test.
 ### Reading the output
 
 ```
-tests/test_agent_user.py .......................                    [  9%]
-tests/test_cmms.py ...........................                      [ 20%]
-tests/test_images.py ............................................... [ 38%]
-........................................                            [ 54%]
-tests/test_logs.py ..........                                       [ 58%]
-tests/test_pipeline.py ..................................           [ 72%]
-tests/test_relationships.py ............................................[ 89%]
-tests/test_shared.py .........                                      [ 93%]
+tests/test_agent_user.py .......................                    [  8%]
+tests/test_cmms.py ...........................                      [ 18%]
+tests/test_images.py ............................................... [ 34%]
+........................................                            [ 49%]
+tests/test_logs.py ..........                                       [ 52%]
+tests/test_pipeline.py ..................................           [ 64%]
+tests/test_relationships.py ............................................[ 80%]
+tests/test_shared.py .........                                      [ 83%]
+tests/test_sops.py ..............................                   [ 94%]
 tests/test_spares.py ..................                             [100%]
-========== 252 passed in 9.80s ==========
+========== 282 passed in 9.80s ==========
 ```
 
 | Mark | Meaning |
@@ -631,7 +644,7 @@ tests/test_spares.py ..................                             [100%]
 
 ### Adding a test
 
-- Put it in the file for the script it tests (`test_logs.py`, `test_spares.py`, `test_cmms.py`, `test_images.py`, `test_relationships.py`), or `test_shared.py` for `db_config.py` / `lineage.py`.
+- Put it in the file for the script it tests (`test_logs.py`, `test_spares.py`, `test_cmms.py`, `test_images.py`, `test_sops.py`, `test_relationships.py`), or `test_shared.py` for `db_config.py` / `lineage.py`.
 - Name the function `test_...`, otherwise pytest won't find it.
 - Test the cleaning functions directly with a small `DataFrame` (see `test_temperature_units`), or a whole file through `process()` / `prepare()` using the `tmp_path` fixture (see the `lineage_run` and `messy_sheet` fixtures). For the CMMS script, pass a dump as a string to `parse_dump()` and then `process()` (see `test_pipeline_end_to_end`). For the scans, pass OCR text as an `Extraction` to `process()` (see `test_incident_form_end_to_end`); copy the text from `img_documents_raw.ocr_text` when a real scan misreads. For `relationships.py`, pass key counts to `check_relationship()` (see `test_check_counts_matched_null_and_orphans`).
 - When you find a new problem in the client's data, add a test with that exact value **before** fixing the code. It fails first, then passes with the fix, and it keeps the problem from coming back. The harness checklist asks for this pattern in your git history.

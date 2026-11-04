@@ -1,0 +1,7 @@
+JME SOP-CRANE-02 — OVERHEAD CRANE LIFTING (rev 6, Mar 2026)
+- Only certified crane operators (list with HR) may operate CRN-01/CRN-02.
+- Inspect slings/shackles before EVERY lift. Discard slings with >10% wear, kinks, or broken strands.
+- Max load: CRN-01 = 10,000 kg, CRN-02 = 2,000 kg. NEVER bypass limit switch.
+- Tandem lifts require lifting plan signed by PE (Professional Engineer).
+- No person under suspended load. Use tag lines for long items.
+- After the Aug 2025 near-miss (sling snapped), ALL slings >2 years old were scrapped. Check purchase date on sling tag.
