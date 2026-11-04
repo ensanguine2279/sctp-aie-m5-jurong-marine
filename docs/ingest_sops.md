@@ -349,7 +349,9 @@ the table), `sops_audit`, `sop_steps_audit` and `sop_machines`. It can't read
 `agent_user.py` after the first SOP load.
 
 **Linked to the CMMS:** `relationships.py` checks every `sop_machines.machine_id` against
-`cmms_machines` (`sop_machine`; all 7 match on the client's data) and can make it a foreign
-key with `--foreign-keys` ([`relationships.md`](relationships.md#relationships)).
+`cmms_machines` (`sop_machine`; all 7 match on the client's data), can make it a foreign
+key with `--foreign-keys`, and creates the `machine_sops` view: every machine with the
+current SOPs that name it, `has_sop = 0` when none does
+([`relationships.md`](relationships.md#views)). Run it again after every SOP load.
 
 **Not wired in yet:** `pipeline.py` doesn't run this step.

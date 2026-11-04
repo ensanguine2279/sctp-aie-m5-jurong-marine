@@ -58,6 +58,7 @@ not a fault. The SOP tables have no prefix option.
 | `incident_detail` | Incidents + machine + employee trade/shift; severity as `severity_5_worst` only |
 | `work_order_sensor_window` | Each work order with readings in the `--window-days` (default 7) up to its date: count, vibration avg/max, temperature avg/max |
 | `machine_nameplate` | Every CMMS machine with its nameplate photo's values (lubricant, grease interval, power, weight, serial, ...); `has_nameplate = 0` when there's no photo, so the app says so instead of guessing; `model_agrees` (plate vs CMMS model), `made_by_install_year` |
+| `machine_sops` | One row per CMMS machine and current SOP that names it: `doc_no`, `revision`, `title`, `rev_label`, `step_count`, `linked_by` (`id` / `name` / `alias`) and `sop_words` (the SOP's words for the machine); `has_sop = 0` for a machine no current SOP names, so the app says so instead of stretching another SOP (trap list D3). Superseded revisions don't count |
 | `incident_report_vs_cmms` | One row per scanned form and field (`incident_date`, `machine_id`, `emp_code`, `description`, `severity_scale`, `severity_5_worst`, `lost_days`, `reporting`): `form_value`, `logged_value`, `agrees` (1 / 0, NULL when a side is missing, the form's incident isn't in the CMMS, or the CMMS scale is `ambiguous`) |
 
 Orphans are kept, not dropped: the views LEFT JOIN and flag them with `machine_known` /
@@ -66,8 +67,13 @@ selected (PDPA). An `emp_code` that appears twice in `cmms_employees` gets no tr
 instead of duplicating the work order. Each detail view keeps `raw_id`, so an answer can be
 cited through the matching `*_audit` view.
 
-There is no SOP view: the app reads `sop_machines` and `sop_steps_audit` directly (both
-granted by `agent_user.py`).
+`machine_sops` answers "which SOPs apply to this machine?"; the app then quotes the SOP
+whole from `sop_steps_audit` and cites it through `sops_audit` (`raw_id`). On the client's
+data 7 of the 12 machines are named by an SOP (BLAST-01, PMP-T01, CRN-01, CRN-02, CNC-01,
+CNC-02, CNC-03) and 5 have none (CMP-01, LTH-01, MILL-01, WELD-01, WELD-02). The `is_current` filter sits
+inside a nested join, so a machine named only in a superseded revision gets `has_sop = 0`
+rather than a row with no title. After an `ingest_sops.py --recreate`, run this script
+again: MySQL keeps a view over a dropped table but fails when it's read.
 
 `incident_report_vs_cmms` compares severity on the 5 = worst scale only (each side
 converted with its own rule: the scale printed on the form, the date rule in the CMMS), so a
@@ -132,10 +138,12 @@ FROM incident_report_vs_cmms WHERE agrees = 0 ORDER BY incident_id, field;
 SELECT name, enforced, child_rows, matched_rows, orphan_rows, orphan_values, ambiguous_keys
 FROM table_relationships WHERE name IN ('sop_machine', 'sop_doc');
 
--- Which SOPs cover a machine, with the CMMS name
-SELECT s.doc_no, s.how, s.evidence, m.machine_name
-FROM sop_machines s JOIN cmms_machines m ON m.machine_id = s.machine_id
-WHERE s.machine_id = 'BLAST-01';
+-- Which SOPs cover a machine (has_sop = 0: none in the data)
+SELECT machine_id, has_sop, doc_no, rev_label, linked_by, sop_words
+FROM machine_sops WHERE machine_id = 'BLAST-01';
+
+-- Machines no SOP covers (for the data quality report, D3)
+SELECT machine_id, machine_name FROM machine_sops WHERE has_sop = 0;
 ```
 
 ## Tests
@@ -152,7 +160,8 @@ the CMMS's 12 machines (so a FK can be added), a machine the CMMS lacks reported
 orphan and keeping the FK off, `sop_doc` never given a second FK, `ingest_sops.py`'s
 composite key counted as enforcing it, earlier revisions making `doc_no` ambiguous but
 never an orphan, and the SOP tables in the ER diagram (the `sop_doc` line solid, in the dry
-run too). 53 tests in all. The test for `start_run` without a file is in
+run too), and `machine_sops` keeping machines without an SOP and counting current
+revisions only (its SELECT run in SQLite on a small example). 58 tests in all. The test for `start_run` without a file is in
 `tests/test_shared.py` with the other `lineage.py` tests.
 
 Not covered: the SQL against a real MySQL. After changing a view, run the script on a

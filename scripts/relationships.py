@@ -44,6 +44,8 @@ Views:
     work_order_sensor_window  each work order with the sensor readings in the N days up to it
     machine_nameplate         one row per machine: what its nameplate photo says (oil, grease
                               interval, power, ...), has_nameplate = 0 if there is no photo
+    machine_sops              one row per machine and current SOP that names it (title,
+                              revision, how it was linked); has_sop = 0 if none does
     incident_report_vs_cmms   one row per scanned form and field: the value on the form, the
                               value logged in the CMMS, and whether they agree
 
@@ -462,6 +464,23 @@ VIEWS: dict[str, tuple[tuple[str, ...], str]] = {
            n.raw_id
     FROM {machines} m
     LEFT JOIN {nameplates} n ON n.asset_tag = m.machine_id
+    """),
+    # One row per machine and current SOP; a machine no SOP names keeps one row with
+    # has_sop = 0, so the app says "no SOP in the data covers it" (trap list D3). The
+    # nested join applies is_current before the LEFT JOIN: a machine named only in a
+    # superseded revision counts as having no SOP, not as a row with a NULL title.
+    "machine_sops": (("machines", "sops", "sop_machines"), """
+    CREATE OR REPLACE VIEW machine_sops AS
+    SELECT m.machine_id, m.machine_name,
+           (s.doc_no IS NOT NULL) AS has_sop,
+           s.doc_no, s.revision, s.title, s.rev_label, s.rev_month, s.step_count,
+           sm.how AS linked_by, sm.evidence AS sop_words,
+           s.raw_id
+    FROM {machines} m
+    LEFT JOIN ({sop_machines} sm
+               JOIN {sops} s ON s.doc_no = sm.doc_no AND s.revision = sm.revision
+                            AND s.is_current = 1)
+           ON sm.machine_id = m.machine_id
     """),
     "incident_report_vs_cmms": (("incident_reports", "safety_incidents"), """
     CREATE OR REPLACE VIEW incident_report_vs_cmms AS

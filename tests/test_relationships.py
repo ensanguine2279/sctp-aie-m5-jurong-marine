@@ -276,6 +276,52 @@ def test_er_diagram_shows_the_sop_tables():
     assert 'sops ||--o{ sop_machines : "names machines"' in m        # solid: a real FK
 
 
+def test_machine_sops_keeps_machines_no_sop_covers():
+    """5 of the 12 machines have no SOP (trap list D3): each still gets a row,
+    has_sop = 0, so the app can say so instead of guessing."""
+    sql = render_view("machine_sops", Names(), 7)
+    assert "FROM cmms_machines m" in sql and "LEFT JOIN (sop_machines sm" in sql
+    assert "(s.doc_no IS NOT NULL) AS has_sop" in sql
+    assert "s.raw_id" in sql                                    # cite through sops_audit
+
+
+def test_machine_sops_counts_current_revisions_only():
+    """is_current sits inside the nested join, before its ON: a machine named only in a
+    superseded revision gets has_sop = 0, not a half-empty row."""
+    sql = render_view("machine_sops", Names(), 7)
+    inner, outer = sql.index("s.is_current = 1"), sql.index("ON sm.machine_id = m.machine_id")
+    assert inner < outer
+    assert "s.revision = sm.revision" in sql                    # the link's own revision
+
+
+def test_machine_sops_rows_on_a_small_database():
+    """The view's SELECT run in SQLite (same nested-join syntax): LOTO rev 4 names CNC-02,
+    a superseded rev 3 alone names MILL-01, nothing names WELD-01."""
+    import sqlite3
+
+    db = sqlite3.connect(":memory:")
+    db.executescript("""
+        CREATE TABLE cmms_machines (machine_id TEXT, machine_name TEXT);
+        CREATE TABLE sops (doc_no TEXT, revision INT, title TEXT, rev_label TEXT,
+                           rev_month TEXT, step_count INT, is_current INT, raw_id INT);
+        CREATE TABLE sop_machines (doc_no TEXT, revision INT, machine_id TEXT, how TEXT,
+                                   evidence TEXT);
+        INSERT INTO cmms_machines VALUES ('CNC-02', 'CNC Lathe'), ('MILL-01', 'Mill'),
+                                         ('WELD-01', 'Welder');
+        INSERT INTO sops VALUES ('SOP-LOTO-01', 4, 'LOCKOUT', 'rev 4, Jan 2026', '2026-01', 8, 1, 1),
+                                ('SOP-LOTO-01', 3, 'LOCKOUT', 'rev 3, Mar 2024', '2024-03', 8, 0, 2);
+        INSERT INTO sop_machines VALUES ('SOP-LOTO-01', 4, 'CNC-02', 'alias', 'cnc machines'),
+                                        ('SOP-LOTO-01', 3, 'MILL-01', 'id', 'MILL-01');
+    """)
+    sql = render_view("machine_sops", Names(), 7)
+    select = sql[sql.index("SELECT"):]
+    rows = {r[0]: r[1:] for r in db.execute(
+        f"SELECT machine_id, has_sop, doc_no, revision, linked_by FROM ({select})")}
+    assert rows == {"CNC-02": (1, "SOP-LOTO-01", 4, "alias"),
+                    "MILL-01": (0, None, None, None),       # only a superseded revision
+                    "WELD-01": (0, None, None, None)}       # no SOP at all
+
+
 def test_dry_run_diagram_draws_the_sop_foreign_key_solid(tmp_path, monkeypatch):
     out = tmp_path / "er.md"
     monkeypatch.setattr("sys.argv", ["relationships.py", "--dry-run", "--mermaid", str(out)])

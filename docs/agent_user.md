@@ -20,14 +20,14 @@ not granted.
 
 | Can read (`SELECT` only) | Can't |
 |---|---|
-| The linking views: `machine_overview`, `machine_spares`, `work_order_detail`, `incident_detail`, `work_order_sensor_window`, `machine_nameplate`, `incident_report_vs_cmms` | `cmms_employees`, `cmms_employees_raw`, `cmms_employees_audit` |
+| The linking views: `machine_overview`, `machine_spares`, `work_order_detail`, `incident_detail`, `work_order_sensor_window`, `machine_nameplate`, `machine_sops`, `incident_report_vs_cmms` | `cmms_employees`, `cmms_employees_raw`, `cmms_employees_audit` |
 | `table_relationships` (join paths, orphan counts) | every `*_raw` table, including `img_documents_raw` (the OCR text of each scan, and a form's "person involved" exactly as read) and `sop_documents_raw` (every file in the SOP folder as read, including the GM's email with names and addresses) |
 | The audit views for citations: `cmms_machines_audit`, `cmms_work_orders_audit`, `cmms_safety_incidents_audit`, `vibration_temp_audit`, `critical_spares_audit`, `img_nameplates_audit`, `img_incident_reports_audit` | the clean tables themselves (`vibration_temp`, `cmms_work_orders`, `img_nameplates`, ...) and `ingest_runs`, with two SOP exceptions (left) |
 | The SOPs: `sops` (to find an SOP with `MATCH ... AGAINST`), `sops_audit`, `sop_steps_audit` (to quote it whole with its citation), `sop_machines` (which SOPs cover a machine) | `sop_ft_stopwords` (the index's word list, not for the app) |
 | | any write, any schema change, granting itself more |
 
 MySQL denies everything not granted, and every run drops the user and creates it again,
-so nothing granted earlier survives: the 19 objects above are all the user can read.
+so nothing granted earlier survives: the 20 objects above are all the user can read.
 (Dropping and recreating, rather than `REVOKE ALL`, also works on hosted MySQL, where
 even the admin account is kept out of some databases.)
 
