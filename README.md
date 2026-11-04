@@ -12,9 +12,9 @@ you can paste into the data quality report.
 | `scripts/ingest_cmms.py` | CMMS SQL dump (`jurongmarine_cmms.sql`) | [`ingest_cmms.md`](docs/ingest_cmms.md) |
 | `scripts/ingest_images.py` | Scanned nameplates and incident report forms (`data/images/`) | [`ingest_images.md`](docs/ingest_images.md) |
 | `scripts/ingest_sops.py` | SOP documents (`data/sops/`): steps with line numbers, machine links, keyword search | [`ingest_sops.md`](docs/ingest_sops.md) |
-| `scripts/relationships.py` | The loaded tables: links the four sources | [`relationships.md`](docs/relationships.md), [ER diagram](docs/er_diagram.md) |
+| `scripts/relationships.py` | The loaded tables: links the sources (CMMS, sensors, spares, scans, SOPs) | [`relationships.md`](docs/relationships.md), [ER diagram](docs/er_diagram.md) |
 | `scripts/agent_user.py` | Creates the app's read-only database user (PDPA) | [`agent_user.md`](docs/agent_user.md) |
-| `scripts/pipeline.py` | Runs all of the above in order, writes a Markdown report | [`pipeline.md`](docs/pipeline.md) |
+| `scripts/pipeline.py` | Runs all of the above in order (the SOPs after the CMMS), writes a Markdown report | [`pipeline.md`](docs/pipeline.md) |
 | `scripts/audit_sensor_csv.py` | Profiles a sensor CSV without loading it: formats, units, ids, gaps, duplicates, outliers, with line numbers. Run it alone, or first in the pipeline with `pipeline.py --audit` | [`trap_list.md`](docs/trap_list.md#sensor-log-vibration_temp_2026h1csv) |
 
 Every data-quality problem found so far, with evidence, is in
@@ -181,6 +181,7 @@ The [ER diagram](docs/er_diagram.md) shows the cleaned tables and how they link;
 | `incident_detail` (view) | Incidents + machine + employee trade/shift; severity as `severity_5_worst` only | [`relationships`](docs/relationships.md#views) |
 | `work_order_sensor_window` (view) | Each work order with the sensor readings in the 7 days up to it (`--window-days`) | [`relationships`](docs/relationships.md#views) |
 | `machine_nameplate` (view) | Every machine with its nameplate's values; `has_nameplate = 0` if there is no photo | [`relationships`](docs/relationships.md#views) |
+| `machine_sops` (view) | Every machine with the current SOPs that name it; `has_sop = 0` if none does | [`relationships`](docs/relationships.md#views) |
 | `incident_report_vs_cmms` (view) | Scanned form vs CMMS, one row per field: `form_value`, `logged_value`, `agrees` | [`relationships`](docs/relationships.md#views) |
 
 Re-loading a sensor file or a CMMS dump replaces that file's rows (other files are
@@ -206,6 +207,8 @@ through their shared keys and is safe to run after every load:
 | `img_nameplates.asset_tag` -> `cmms_machines.machine_id` | FK with `--foreign-keys`, if no orphans |
 | `img_incident_reports.incident_id` -> `cmms_safety_incidents.incident_id` | FK with `--foreign-keys`, if no orphans |
 | `img_incident_reports.machine_id` -> `cmms_machines.machine_id` | FK with `--foreign-keys`, if no orphans |
+| `sop_machines.machine_id` -> `cmms_machines.machine_id` | FK with `--foreign-keys`, if no orphans |
+| `sop_machines.doc_no` -> `sops.doc_no` | FK on `(doc_no, revision)`, made by `ingest_sops.py` |
 
 Each run checks every link (rows, matched, NULL, **orphans**: child keys with no
 parent), prints the result, writes it to `table_relationships`, creates the views
@@ -220,7 +223,8 @@ orphan. If a later sensor file gives orphans, lookalike ids (`CNC2` for `CNC-02`
 need a `machine_aliases` table. On the image links, an orphan asset tag or incident id
 means OCR misread it or the scan isn't in the CMMS; check `img_documents_raw.ocr_notes`.
 All 30 incident forms link with 0 orphans (one misread machine id, `CRN-002`, was fixed
-by a stricter machine-id check: trap list I10).
+by a stricter machine-id check: trap list I10). The 7 machines the SOPs name (by id, CMMS
+name or alias) all match the CMMS.
 
 ```bash
 python scripts/relationships.py --dry-run --mermaid docs/er_diagram.md   # no database needed
@@ -246,7 +250,7 @@ user that can only `SELECT` from an allow-list:
 
 | The app user can read | It can't |
 |---|---|
-| the linking views (`machine_overview`, `machine_spares`, `work_order_detail`, `incident_detail`, `work_order_sensor_window`, `machine_nameplate`, `incident_report_vs_cmms`), `table_relationships`, the `*_audit` views for citations (machines, work orders, incidents, sensor readings, spares, nameplates, incident forms, SOPs and their steps), and for the SOPs also `sops` (its `FULLTEXT` index is on the table) and `sop_machines` | `cmms_employees`, `cmms_employees_raw`, `cmms_employees_audit`, any `*_raw` table (including `img_documents_raw`, which keeps OCR text as read, and `sop_documents_raw`, which keeps the GM's email), any write, any schema change |
+| the linking views (`machine_overview`, `machine_spares`, `work_order_detail`, `incident_detail`, `work_order_sensor_window`, `machine_nameplate`, `machine_sops`, `incident_report_vs_cmms`), `table_relationships`, the `*_audit` views for citations (machines, work orders, incidents, sensor readings, spares, nameplates, incident forms, SOPs and their steps), and for the SOPs also `sops` (its `FULLTEXT` index is on the table) and `sop_machines` | `cmms_employees`, `cmms_employees_raw`, `cmms_employees_audit`, any `*_raw` table (including `img_documents_raw`, which keeps OCR text as read, and `sop_documents_raw`, which keeps the GM's email), any write, any schema change |
 
 Views run with their creator's rights (MySQL's default), so the app user reads
 `work_order_detail` without any access to the tables underneath. Before granting, the
@@ -492,7 +496,7 @@ FROM cmms_work_orders GROUP BY 1, 2, 3 HAVING n > 1 ORDER BY wo_date;
 
 | Item | How |
 |---|---|
-| All 30 incident forms and all 12 nameplates are loaded and compared with the CMMS; 9 scans also checked by eye. The SOPs are reviewed (D1–D10), loaded by `ingest_sops.py` and readable by the app user; they aren't wired into `pipeline.py` or `relationships.py` yet. Three new forms (911, 922, 955) still have no severity read. Nameplate OCR fixes (I14–I17) are in and confirmed on a reload. Still read wrong and flagged: CRN-02 and CNC-03 grease intervals (509, 590; plates say 500), WELD-02's oil (`M58`; plate says M68). 7 plates not yet checked by eye | `SELECT * FROM machine_nameplate`, then the audit queries in [`ingest_images.md`](docs/ingest_images.md#audit-queries); add findings to [`trap_list.md`](docs/trap_list.md#images-images-incident-forms-and-nameplates). Try `--engine llm` on scans that are rejected or full of `ocr_disagreed_*` |
+| All 30 incident forms and all 12 nameplates are loaded and compared with the CMMS; 9 scans also checked by eye. The SOPs are reviewed (D1–D10), loaded by `ingest_sops.py`, readable by the app user, checked by `relationships.py` and run by `pipeline.py`. Three new forms (911, 922, 955) still have no severity read. Nameplate OCR fixes (I14–I17) are in and confirmed on a reload. Still read wrong and flagged: CRN-02 and CNC-03 grease intervals (509, 590; plates say 500), WELD-02's oil (`M58`; plate says M68). 7 plates not yet checked by eye | `SELECT * FROM machine_nameplate`, then the audit queries in [`ingest_images.md`](docs/ingest_images.md#audit-queries); add findings to [`trap_list.md`](docs/trap_list.md#images-images-incident-forms-and-nameplates). Try `--engine llm` on scans that are rejected or full of `ocr_disagreed_*` |
 | Whether `emp_code` with trade and shift identifies a person in a 32-person shop (PDPA) | team decision: if so, drop `emp_code` from `incident_detail` / `work_order_detail` |
 | Names also appear in the spares sheet title (`storeman: Halim`) | stored only in `critical_spares_raw.source_title`, which the app user can't read; keep it that way |
 | Views, grants and run logging have only been tested without a database | run `relationships.py` and `agent_user.py --check` on the real database |
@@ -559,6 +563,9 @@ SELECT machine_id, has_nameplate, lubricant, grease_interval_h FROM machine_name
 -- Where scanned forms and the CMMS disagree
 SELECT incident_id, field, form_value, logged_value FROM incident_report_vs_cmms WHERE agrees = 0;
 
+-- Which SOPs apply to a machine (has_sop = 0: no SOP in the data covers it)
+SELECT machine_id, has_sop, doc_no, rev_label, linked_by FROM machine_sops WHERE machine_id = 'CNC-02';
+
 -- The SOP for a question (terms from ingest_sops.search_terms), then quote it whole
 SELECT doc_no, revision, MATCH (search_text) AGAINST ('blasting chamber entry') AS score
 FROM sops WHERE is_current = 1 AND MATCH (search_text) AGAINST ('blasting chamber entry');
@@ -621,7 +628,7 @@ pytest -k severity                                  # the CMMS severity-scale te
 pytest -k crlf                                      # the Windows line-ending tests
 pytest -k ink                                       # the blue-ink severity reader
 pytest tests/test_images.py                         # the scans (OCR text given; no Tesseract needed)
-pytest tests/test_relationships.py                  # the linking script
+pytest tests/test_relationships.py                  # the linking script (SOP links included)
 pytest tests/test_sops.py                           # the SOPs (no database)
 pytest -k "mysql or plural or synonym"              # the SOP search: MySQL vs search_sops
 pytest tests/test_logs.py::test_temperature_units   # one specific test
@@ -641,11 +648,11 @@ With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
 | `tests/test_cmms.py` | [`ingest_cmms.py`](docs/ingest_cmms.md): dump parsing (`;` and quotes inside strings, comments, multi-row INSERTs with line and tuple numbers, column lists, malformed tuples); ids, numbers (`S$1,050`), day-first dates; the severity flip (old scale inverted, July 2025 left unconverted, a confirmed cutover, out-of-range values never guessed); on a messy dump: duplicates and conflicting duplicates, orphan machines/employees flagged not dropped, raw text kept, `work_orders.status` not clashing with the load status; employee names masked to their last 4 characters in everything printed | 27 |
 | `tests/test_images.py` | [`ingest_images.py`](docs/ingest_images.md): the sample scans' real OCR text (mistakes included); label parsing, the printed severity scale, [four-pass voting](docs/ingest_images.md#four-pass-voting) (majority, format checks, ties, the only reading shaped like a machine id, a misread digit not accepted as a letter), asset-tag and location parsing, id fixes (`BLAST` stays `BLAST`); the 12-plate audit (oil-name misreadings undone before the vote, `ocr_no_majority_*` when no two readings agree, impossible manufacture dates rejected, a label line never taken as the maker), forms that contradict the date rule or settle July 2025, an unreadable scale never guessed, a name never stored as `emp_code`, welding ratings, lb -> kg, every reject reason, the LLM engine, the cache, the folder hash, audit views without OCR text; the [blue-ink severity reader](docs/ingest_images.md#colour-separation-severity-from-the-blue-value-ink) (recovers a lost severity and flags it, never outvotes page readings that agree, abstains on weak or split votes, never returns a wrong digit on a mock of the overlapping line); reads the real scans, incl. forms 904 and 906, if Tesseract is installed | 87 |
 | `tests/test_sops.py` | [`ingest_sops.py`](docs/ingest_sops.md): the client's SOPs as delivered; header, UTF-8 where cp1252 garbles the title, BOM/CRLF, the GM's email rejected and never printed, duplicate files and revisions, only the highest revision current, steps with line numbers, references to missing documents, personal data flagged, machine links by id, CMMS name and alias; search for real questions and paraphrases (`SYNONYMS`), nothing for welding; MySQL's side kept in step: the `FULLTEXT` stop words, the index rebuild order, a primary key on the stopword table, `search_text` and plurals, MySQL-style matching never missing an SOP `search_sops` finds, an old `sops` table stopping the load; the whole SOP quoted with its citation | 49 |
-| `tests/test_relationships.py` | [`relationships.py`](docs/relationships.md): orphan/NULL/`ALL` counting, keys compared like MySQL (case, spaces), when a foreign key is added or skipped, table prefixes, no view exposes `emp_name`, incidents (and the form comparison) only offer `severity_5_worst`, the form comparison on one collation with July left open, machines without a nameplate kept, the ER diagram, the run fingerprint, successful and failed runs recorded in `ingest_runs` | 44 |
-| `tests/test_pipeline.py` | [`pipeline.py`](docs/pipeline.md): step order and flags (images after the CMMS), foreign keys dropped first and re-added last (never in a dry run), sample rows with names kept out of the report, counts from every script's summary, the images folder hashed like the load, a failure stopping the rest, `--keep-going`, Ctrl+C, the report's tables, `--save-log`, `--audit` | 34 |
+| `tests/test_relationships.py` | [`relationships.py`](docs/relationships.md): orphan/NULL/`ALL` counting, keys compared like MySQL (case, spaces), when a foreign key is added or skipped, table prefixes, no view exposes `emp_name`, incidents (and the form comparison) only offer `severity_5_worst`, the form comparison on one collation with July left open, machines without a nameplate kept, the ER diagram, the run fingerprint, successful and failed runs recorded in `ingest_runs`; the SOP links (the client's 7 all matching the CMMS, an unknown machine kept as an orphan with the FK off, `sop_doc` enforced by `ingest_sops.py`'s composite key and never given a second FK, earlier revisions ambiguous but never orphans) and `machine_sops` (machines without an SOP kept, current revisions only) | 58 |
+| `tests/test_pipeline.py` | [`pipeline.py`](docs/pipeline.md): step order and flags (images after the CMMS), foreign keys dropped first and re-added last (never in a dry run), sample rows with names kept out of the report, counts from every script's summary, the images folder hashed like the load, a failure stopping the rest, `--keep-going`, Ctrl+C, the report's tables, `--save-log`, `--audit`; the SOP step (after the CMMS and before the linking, its folder hashed like the load, one summary line per SOP with the step table and the rejected email's name kept out) | 40 |
 | `tests/test_agent_user.py` | [`agent_user.py`](docs/agent_user.md): the allow-list never includes employees or raw tables (nor the raw OCR, nor the raw SOP files), the scans' and SOPs' objects granted, objects with `emp_name` refused, missing objects skipped, a refused object told apart as "not created yet" or "exists but not granted", `SELECT`-only grants after a full reset, password never written into SQL or output, bad user/host/database names rejected, MySQL error codes read correctly, errors never include the password, failed steps named with MySQL's message, no statement needing rights over every database, the access check reads no rows; settings with Windows line endings (from the shell or a CRLF `.env`) read without the trailing `\r`, and no settings leak in from your shell or `.env` | 28 |
 | `tests/test_shared.py` | `db_config.py`, `lineage.py`: password never printed, passwords with special characters, values of a failed query kept out of error messages, table-name check, file SHA-256, a run recorded without a file, values passed to MySQL are plain Python types, `getenv` and `load_db_config` strip a trailing `\r` (CRLF `.env`) | 9 |
-| **Total** | | **306** |
+| **Total** | | **326** |
 
 **Not covered:** anything that needs MySQL, i.e. creating tables, views and users,
 the inserts, the one-transaction rollback and the `ingest_runs` record. After
@@ -661,12 +668,12 @@ tests/test_cmms.py ...........................                      [ 18%]
 tests/test_images.py ............................................... [ 33%]
 ........................................                            [ 46%]
 tests/test_logs.py ..........                                       [ 49%]
-tests/test_pipeline.py ..................................           [ 60%]
-tests/test_relationships.py ............................................[ 75%]
+tests/test_pipeline.py ........................................     [ 60%]
+tests/test_relationships.py ..........................................................[ 75%]
 tests/test_shared.py .........                                      [ 78%]
 tests/test_sops.py .................................................[ 94%]
 tests/test_spares.py ..................                             [100%]
-========== 306 passed in 9.80s ==========
+========== 326 passed in 9.80s ==========
 ```
 
 | Mark | Meaning |

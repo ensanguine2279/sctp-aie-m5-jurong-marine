@@ -210,6 +210,125 @@ def test_mermaid_doc_is_markdown_with_a_mermaid_block():
     assert "raw_id" in doc                                      # lineage explained
 
 
+# ---------------------------------------------------------------- SOP links ---
+# sop_machine: sop_machines.machine_id -> cmms_machines.machine_id  (checked, FK if clean)
+# sop_doc:     sop_machines.doc_no     -> sops.doc_no               (FK made by ingest_sops.py)
+
+CMMS_MACHINES = ["BLAST-01", "CMP-01", "CNC-01", "CNC-02", "CNC-03", "CRN-01", "CRN-02",
+                 "LTH-01", "MILL-01", "PMP-T01", "WELD-01", "WELD-02"]   # the client's 12
+# sop_machines.machine_id on the client's three SOPs (ids and aliases; see test_sops.py)
+CLIENT_SOP_LINKS = {"BLAST-01": 1, "PMP-T01": 1, "CRN-01": 1, "CRN-02": 1,
+                    "CNC-01": 1, "CNC-02": 1, "CNC-03": 1}
+
+
+def test_sop_links_are_declared_on_known_columns():
+    m, d = BY_NAME["sop_machine"], BY_NAME["sop_doc"]
+    assert (m.child, m.child_col, m.parent, m.parent_col) == \
+        ("sop_machines", "machine_id", "machines", "machine_id")
+    assert (d.child, d.child_col, d.parent, d.parent_col) == \
+        ("sop_machines", "doc_no", "sops", "doc_no")
+
+
+def test_sop_tables_have_no_prefix():
+    """ingest_sops.py has no --prefix option: its tables keep their names whatever the
+    CMMS or image prefix is."""
+    n = Names("acme_", "sensors", "scan_")
+    assert (n["sops"], n["sop_machines"], n["machines"]) == ("sops", "sop_machines", "acme_machines")
+
+
+def test_the_client_sop_links_all_match_a_cmms_machine():
+    c = check_relationship(CLIENT_SOP_LINKS, {mid: 1 for mid in CMMS_MACHINES})
+    assert (c.rows, c.matched, c.orphan_rows) == (7, 7, 0)
+    assert plan_foreign_key(BY_NAME["sop_machine"], c, enforced=False) == ("add", "")
+
+
+def test_a_machine_an_sop_names_but_the_cmms_lacks_is_an_orphan():
+    """e.g. an SOP that says 'isolate CRN-03': ingest_sops flags unknown_machine, and this
+    check keeps the FOREIGN KEY off until it is fixed."""
+    c = check_relationship({"CRN-01": 1, "CRN-03": 1}, {mid: 1 for mid in CMMS_MACHINES})
+    assert c.orphans == {"CRN-03": 1}
+    action, reason = plan_foreign_key(BY_NAME["sop_machine"], c, enforced=False)
+    assert action == "skip" and "orphan" in reason
+
+
+def test_sop_doc_is_never_given_a_second_foreign_key():
+    """Its FK is ingest_sops.py's composite (doc_no, revision); doc_no alone repeats once
+    earlier revisions are loaded, so this script must not add one."""
+    action, reason = plan_foreign_key(BY_NAME["sop_doc"], Check(rows=7, matched=7), False)
+    assert action == "skip" and "ingest_sops.py" in reason
+
+
+def test_ingest_sops_composite_key_counts_as_enforcing_sop_doc():
+    """KEY_COLUMN_USAGE has one row per column of a composite key."""
+    fks = [("fk_sop_machines", "sop_machines", "doc_no", "sops", "doc_no"),
+           ("fk_sop_machines", "sop_machines", "revision", "sops", "revision")]
+    assert enforced_names(fks, Names()) == {"sop_doc"}
+
+
+def test_earlier_revisions_make_doc_no_ambiguous_but_never_an_orphan():
+    c = check_relationship({"SOP-LOTO-01": 6}, {"SOP-LOTO-01": 2})   # rev 3 and rev 4
+    assert c.matched == 6 and not c.orphans and c.ambiguous == ["SOP-LOTO-01"]
+
+
+def test_er_diagram_shows_the_sop_tables():
+    m = to_mermaid(Names(), enforced={"sop_doc"})
+    assert 'cmms_machines ||..o{ sop_machines : "covered by SOPs"' in m
+    assert 'sops ||--o{ sop_machines : "names machines"' in m        # solid: a real FK
+
+
+def test_machine_sops_keeps_machines_no_sop_covers():
+    """5 of the 12 machines have no SOP (trap list D3): each still gets a row,
+    has_sop = 0, so the app can say so instead of guessing."""
+    sql = render_view("machine_sops", Names(), 7)
+    assert "FROM cmms_machines m" in sql and "LEFT JOIN (sop_machines sm" in sql
+    assert "(s.doc_no IS NOT NULL) AS has_sop" in sql
+    assert "s.raw_id" in sql                                    # cite through sops_audit
+
+
+def test_machine_sops_counts_current_revisions_only():
+    """is_current sits inside the nested join, before its ON: a machine named only in a
+    superseded revision gets has_sop = 0, not a half-empty row."""
+    sql = render_view("machine_sops", Names(), 7)
+    inner, outer = sql.index("s.is_current = 1"), sql.index("ON sm.machine_id = m.machine_id")
+    assert inner < outer
+    assert "s.revision = sm.revision" in sql                    # the link's own revision
+
+
+def test_machine_sops_rows_on_a_small_database():
+    """The view's SELECT run in SQLite (same nested-join syntax): LOTO rev 4 names CNC-02,
+    a superseded rev 3 alone names MILL-01, nothing names WELD-01."""
+    import sqlite3
+
+    db = sqlite3.connect(":memory:")
+    db.executescript("""
+        CREATE TABLE cmms_machines (machine_id TEXT, machine_name TEXT);
+        CREATE TABLE sops (doc_no TEXT, revision INT, title TEXT, rev_label TEXT,
+                           rev_month TEXT, step_count INT, is_current INT, raw_id INT);
+        CREATE TABLE sop_machines (doc_no TEXT, revision INT, machine_id TEXT, how TEXT,
+                                   evidence TEXT);
+        INSERT INTO cmms_machines VALUES ('CNC-02', 'CNC Lathe'), ('MILL-01', 'Mill'),
+                                         ('WELD-01', 'Welder');
+        INSERT INTO sops VALUES ('SOP-LOTO-01', 4, 'LOCKOUT', 'rev 4, Jan 2026', '2026-01', 8, 1, 1),
+                                ('SOP-LOTO-01', 3, 'LOCKOUT', 'rev 3, Mar 2024', '2024-03', 8, 0, 2);
+        INSERT INTO sop_machines VALUES ('SOP-LOTO-01', 4, 'CNC-02', 'alias', 'cnc machines'),
+                                        ('SOP-LOTO-01', 3, 'MILL-01', 'id', 'MILL-01');
+    """)
+    sql = render_view("machine_sops", Names(), 7)
+    select = sql[sql.index("SELECT"):]
+    rows = {r[0]: r[1:] for r in db.execute(
+        f"SELECT machine_id, has_sop, doc_no, revision, linked_by FROM ({select})")}
+    assert rows == {"CNC-02": (1, "SOP-LOTO-01", 4, "alias"),
+                    "MILL-01": (0, None, None, None),       # only a superseded revision
+                    "WELD-01": (0, None, None, None)}       # no SOP at all
+
+
+def test_dry_run_diagram_draws_the_sop_foreign_key_solid(tmp_path, monkeypatch):
+    out = tmp_path / "er.md"
+    monkeypatch.setattr("sys.argv", ["relationships.py", "--dry-run", "--mermaid", str(out)])
+    rel.main()
+    assert "sops ||--o{ sop_machines" in out.read_text(encoding="utf-8")
+
+
 # ------------------------------------------------------------------ run log ---
 
 def _checks(orphans=None):

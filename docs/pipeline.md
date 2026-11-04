@@ -2,13 +2,14 @@
 
 `scripts/pipeline.py` runs every ingest script, then `relationships.py` (and optionally
 `agent_user.py`), and writes the results to a Markdown report: one table row per step,
-with the numbers you'd otherwise collect from five terminal outputs.
+with the numbers you'd otherwise collect from six terminal outputs.
 
 ```bash
 python scripts/pipeline.py --dry-run                      # check everything; nothing written to the database
 python scripts/pipeline.py --recreate                     # first load (drops and recreates the tables)
 python scripts/pipeline.py                                # later loads
 python scripts/pipeline.py --foreign-keys --agent check   # with foreign keys, then check the app user
+python scripts/pipeline.py --only sops,relationships      # reload the SOPs and re-link
 python scripts/pipeline.py --save-log                     # also keep the full on-screen log
 python scripts/pipeline.py --dry-run --audit              # a new sensor file: profile it first
 ```
@@ -17,7 +18,7 @@ With uv (personal repo): `uv run python scripts/pipeline.py ...`.
 
 The images step needs Tesseract installed ([Setup](ingest_images.md#setup-tesseract)). Without
 it the step fails with install instructions and, as for any failed step, the steps after it
-don't run; `--only logs,spares,cmms,relationships` skips it.
+don't run; `--only logs,spares,cmms,sops,relationships` skips it.
 
 ## What it runs
 
@@ -29,12 +30,18 @@ don't run; `--only logs,spares,cmms,relationships` skips it.
 | 4 | Critical spares | `ingest_spares.py data/tabular/critical_spares.xlsx` | always | [`ingest_spares.md`](ingest_spares.md) |
 | 5 | CMMS dump | `ingest_cmms.py data/sql/jurongmarine_cmms.sql` | always | [`ingest_cmms.md`](ingest_cmms.md) |
 | 6 | Scanned images | `ingest_images.py data/images` | always; after the CMMS so machine ids can be checked | [`ingest_images.md`](ingest_images.md) |
-| 7 | Links between sources | `relationships.py --mermaid docs/er_diagram.md` (`--foreign-keys` with the option) | always | [`relationships.md`](relationships.md), [ER diagram](er_diagram.md) |
-| 8 | App user (PDPA) | `agent_user.py --check`, or the full setup | only with `--agent check` / `--agent setup` | [`agent_user.md`](agent_user.md) |
+| 7 | SOP documents | `ingest_sops.py data/sops` | always; after the CMMS so CMMS machine names can be matched | [`ingest_sops.md`](ingest_sops.md) |
+| 8 | Links between sources | `relationships.py --mermaid docs/er_diagram.md` (`--foreign-keys` with the option) | always; after the SOPs, so `machine_sops` is rebuilt over the new tables | [`relationships.md`](relationships.md), [ER diagram](er_diagram.md) |
+| 9 | App user (PDPA) | `agent_user.py --check`, or the full setup | only with `--agent check` / `--agent setup` | [`agent_user.md`](agent_user.md) |
 
 Each step runs as its own process, exactly as if you typed it, with the same Python (so
 `uv run` and an activated `.venv` both work). Its output streams to the terminal as usual.
 `--dry-run`, `--recreate` and `--env-file` are passed on to the scripts that take them.
+
+**Grants survive `--recreate`.** MySQL doesn't remove a table's grants when the table is
+dropped, and they apply again to the new table of the same name, so the app user can still
+read `sops` and the rest after a recreate. Run `--agent setup` when the allow-list itself
+has changed (a new view such as `machine_sops`), and `--agent check` to prove it.
 
 **The first failed step stops the run.** The steps after it are listed as "not run", so
 `relationships.py` never links half-loaded data. Each ingest script rolls back its own
@@ -42,6 +49,8 @@ failed load, so the database still holds the previous load of that source, excep
 `--recreate`, where the tables were dropped before the load started (see Load behaviour
 in [`ingest_logs.md`](ingest_logs.md), [`ingest_spares.md`](ingest_spares.md),
 [`ingest_cmms.md`](ingest_cmms.md) and [`ingest_images.md`](ingest_images.md)).
+`ingest_sops.py` also stops, changing nothing, if its `sops` table predates the
+`search_text` column; run once with `--recreate` ([`ingest_sops.md`](ingest_sops.md)).
 `--keep-going` runs the remaining steps anyway. **Ctrl+C** stops the current step and
 still writes the report, marked "interrupted".
 
@@ -84,8 +93,8 @@ files, under the sensor load, so its hash can still be checked against the load.
 | `--foreign-keys` | off | Drop `relationships.py`'s foreign keys before loading, add them back after ([why](relationships.md#foreign-keys)) |
 | `--audit` | off | First profile the sensor CSV with `audit_sensor_csv.py` ([see above](#profiling-a-new-sensor-file---audit)) |
 | `--agent check` / `--agent setup` | off | Also run `agent_user.py --check`, or create/update the app user and check it ([`agent_user.md`](agent_user.md#the-check)) |
-| `--only STEPS` | all | Comma-separated: `audit`, `logs`, `spares`, `cmms`, `images`, `relationships`, `agent_user`. Run in pipeline order whatever order you type |
-| `--logs` / `--spares` / `--cmms` / `--images PATH` | the paths above | Inputs, e.g. `--logs data/logs/vibration_temp_sample.csv`; `--images` is a folder. The audit uses `--logs` |
+| `--only STEPS` | all | Comma-separated: `audit`, `logs`, `spares`, `cmms`, `images`, `sops`, `relationships`, `agent_user`. Run in pipeline order whatever order you type |
+| `--logs` / `--spares` / `--cmms` / `--images` / `--sops PATH` | the paths above | Inputs, e.g. `--logs data/logs/vibration_temp_sample.csv`; `--images` and `--sops` are folders. The audit uses `--logs` |
 | `--mermaid PATH` / `--no-mermaid` | `docs/er_diagram.md` | Where `relationships.py` writes the ER diagram, or don't |
 | `--keep-going` | off | Run the remaining steps after a failure |
 | `--report PATH` | `reports/pipeline_<date>-<time>.md` | Report file (`_dry-run` added for dry runs) |
@@ -99,10 +108,10 @@ Exit code: 0 if every step succeeded, 1 otherwise, so it can run in CI.
 | Section | What's in it |
 |---|---|
 | Header | result, start and finish time, mode and options, database (`user@host:port/db`, password hidden), git commit, a warning if the code has uncommitted changes, and with `--save-log` a link to the full log |
-| Steps | one row per step: status, time, `run_id`, rows read / loaded / rejected (for the images, one row = one image; for the audit, Read only: rows profiled) |
-| Input files | each input's size and SHA-256, and for a load whether it is **the same file** `ingest_runs` recorded. The images folder gets `lineage.folder_sha256`, one hash over every image's name and bytes, the same one `ingest_images.py` records. A file two steps read (the audit and the sensor load) is listed once |
-| Links between sources | after a load: `table_relationships`, i.e. each link's rows, matched, orphans and orphan keys ([`relationships.md`](relationships.md#relationships)) |
-| Details | each step's command, its summary lines (breakdowns by category, rejects, warnings, the severity rule used), and the last 20 lines of error output if it failed. The audit's findings appear in full. What each line means: Run summary in [`ingest_logs.md`](ingest_logs.md#run-summary), [`ingest_spares.md`](ingest_spares.md#run-summary), [`ingest_cmms.md`](ingest_cmms.md#run-summary), [`ingest_images.md`](ingest_images.md#run-summary) |
+| Steps | one row per step: status, time, `run_id`, rows read / loaded / rejected (for the images, one row = one image; for the SOPs, one file, with the GM's email the expected reject; for the audit, Read only: rows profiled) |
+| Input files | each input's size and SHA-256, and for a load whether it is **the same file** `ingest_runs` recorded. A folder gets `lineage.folder_sha256` over the files its script reads (images for `ingest_images.py`, `.txt` and `.md` for `ingest_sops.py`), the same hash that script records, so a stray file of another type doesn't make the check say NO. A file two steps read (the audit and the sensor load) is listed once |
+| Links between sources | after a load: `table_relationships`, i.e. each link's rows, matched, orphans and orphan keys, including `sop_machine` and `sop_doc` ([`relationships.md`](relationships.md#relationships)) |
+| Details | each step's command, its summary lines (breakdowns by category, rejects, warnings, the severity rule used; for the SOPs one line per SOP with its revision, step count and machines), and the last 20 lines of error output if it failed. The audit's findings appear in full. What each line means: Run summary in [`ingest_logs.md`](ingest_logs.md#run-summary), [`ingest_spares.md`](ingest_spares.md#run-summary), [`ingest_cmms.md`](ingest_cmms.md#run-summary), [`ingest_images.md`](ingest_images.md#run-summary), [`ingest_sops.md`](ingest_sops.md#run-summary) |
 
 **Where the numbers come from:** for a load, from each run's own row in `ingest_runs`,
 so the report matches the database's record of that load. For a dry run, from the
@@ -121,7 +130,7 @@ output is also written to `reports/logs/pipeline_<date>-<time>.log`, with the sa
 the report, and the report's header links to it. Use it to debug a failed step when the
 report's last 20 lines of error output aren't enough, or to compare two runs line by line.
 
-- **Everything, in order:** a header line per step (`=== [2/5] Critical spares: python
+- **Everything, in order:** a header line per step (`=== [2/6] Critical spares: python
   scripts/ingest_spares.py ...`), every line the step printed, then its outcome
   (`--- failed, exit code 1, 0.4s`). Lines from the error stream start with `[stderr]`.
 - **Written as it goes**, not at the end: if a step hangs or you press Ctrl+C, the log
@@ -146,10 +155,11 @@ The full output of every step is only kept with `--save-log`, in a git-ignored l
 ([The full log](#the-full-log)). Employee names never appear in full in either, or on
 screen: `ingest_cmms.py` masks them before printing, to their last 4 characters
 ([Personal data on screen](ingest_cmms.md#personal-data-on-screen)), and `ingest_images.py`
-prints only employee codes. Only the last lines of a failed step's error output go into
-the report verbatim; database errors don't include row values (`hide_parameters` in
-`db_config.py`). How the app is kept away from names in the database is in
-[`agent_user.md`](agent_user.md).
+prints only employee codes. `ingest_sops.py` prints a rejected file only by name and
+reason, and the report keeps neither: the GM's email appears in it only as
+`not_an_sop=1`. Only the last lines of a failed step's error output go into the report
+verbatim; database errors don't include row values (`hide_parameters` in `db_config.py`).
+How the app is kept away from names in the database is in [`agent_user.md`](agent_user.md).
 
 Reports hold row counts, file hashes, orphan keys (machine ids, employee codes) and the
 database host. That's fine to commit as audit evidence; leave out reports from a hosted
@@ -157,18 +167,22 @@ database if you'd rather not publish its host name.
 
 ## Tests
 
-`tests/test_pipeline.py` (no database, a fake runner stands in for the scripts): the plan's
-order and flags (foreign keys dropped first and added last, never in a dry run; `--only`;
-images after the CMMS), summary lines kept and sample rows with names dropped (for the
-images too), counts read from each script's summary format, the images folder hashed the
-same way the load records it, `run_id` found in normal and error output, a failure stopping
-the rest, `--keep-going`, Ctrl+C, the report's tables (hash match, uncommitted code, escaped
-pipes), `main` writing the report and returning 1 on failure, `--save-log` (both streams
-logged as they arrive, a header and outcome per step, the log git-ignored and readable
-only by you, linked from the report, with names in the log but not in the report), and
-`--audit` (off by default, first and before any write, given only the file, its findings
-kept in full with the rows it profiled, the shared CSV listed once under the sensor load).
-Two tests run a real process to check that both output streams are captured and logged.
+`tests/test_pipeline.py` (40 tests, no database, a fake runner stands in for the scripts):
+the plan's order and flags (foreign keys dropped first and added last, never in a dry run;
+`--only`; images after the CMMS; the SOPs after the CMMS and before the linking), summary
+lines kept and sample rows with names dropped (for the images, and for the SOPs: one line
+per SOP and the counts kept, the step table and the rejected email's name dropped),
+counts read from each script's summary format, the images and SOP folders hashed the same
+way their loads record them (a stray photo among the SOPs doesn't count), `run_id` found
+in normal and error output, a failure stopping the rest (a failed SOP load stops before
+the linking), `--keep-going`, Ctrl+C, the report's tables (hash match, uncommitted code,
+escaped pipes), `main` writing the report, passing a SOP folder and returning 1 on
+failure, `--save-log` (both streams logged as they arrive, a header and outcome per step,
+the log git-ignored and readable only by you, linked from the report, with names in the
+log but not in the report), and `--audit` (off by default, first and before any write,
+given only the file, its findings kept in full with the rows it profiled, the shared CSV
+listed once under the sensor load). Two tests run a real process to check that both
+output streams are captured and logged.
 
 **Not covered:** the real scripts and database. The first `pipeline.py --dry-run` on your
 data, then a real load, are the real test.
