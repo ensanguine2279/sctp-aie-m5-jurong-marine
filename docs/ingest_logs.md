@@ -9,6 +9,7 @@ from, and every load is recorded.
 - **Shared modules:** `scripts/db_config.py` (settings, DB connection), `scripts/lineage.py` (run log)
 - **Tests:** `tests/test_logs.py` (`pytest`, no database needed)
 - **Data audit:** `scripts/audit_sensor_csv.py` profiles a sensor file without loading it; findings in [`trap_list.md`](trap_list.md#sensor-log-vibration_temp_2026h1csv)
+- **Charts:** `scripts/plot_sensor_csv.py` charts each machine's daily or weekly means; what they show is in [What the 2026H1 log shows](#what-the-2026h1-log-shows)
 
 ---
 
@@ -25,8 +26,9 @@ from, and every load is recorded.
 9. [Load behaviour](#load-behaviour)
 10. [Audit queries](#audit-queries)
 11. [Run summary](#run-summary)
-12. [Assumptions and limitations](#assumptions-and-limitations)
-13. [Troubleshooting](#troubleshooting)
+12. [What the 2026H1 log shows](#what-the-2026h1-log-shows)
+13. [Assumptions and limitations](#assumptions-and-limitations)
+14. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -335,6 +337,11 @@ SELECT temp_unit, COUNT(*) FROM vibration_temp_raw GROUP BY temp_unit;
 SELECT machine_id, COUNT(*) AS readings, 21720 - COUNT(*) AS missing
 FROM vibration_temp GROUP BY machine_id;
 
+-- Monthly means per machine (the table in "What the 2026H1 log shows")
+SELECT machine_id, DATE_FORMAT(sampled_at, '%Y-%m') AS month,
+       ROUND(AVG(vib_rms_mms), 2) AS vib_mean, ROUND(AVG(temp_c), 1) AS temp_mean
+FROM vibration_temp GROUP BY 1, 2 ORDER BY 1, 2;
+
 -- Load history
 SELECT run_id, source_file, status, rows_read, rows_loaded, rows_rejected, started_at, error
 FROM ingest_runs WHERE script = 'ingest_logs.py' ORDER BY run_id DESC;
@@ -368,6 +375,86 @@ Loaded with gaps: missing_temp=1, missing_vibration=1, unknown_temp_unit=1 (tota
 Each breakdown line ends with its total. `Timestamp formats` and `Temperature units`
 add up to `Rows read`, and `Rejected rows` to `rejected`, which is a quick check that no
 row was missed. `Loaded with gaps` counts **warnings**, not rows: one row can carry several.
+
+---
+
+## What the 2026H1 log shows
+
+Findings from `vibration_temp_2026H1.csv` (SHA-256 `05c18527…6bd023`), not a property of
+the script. A later file needs its own look.
+
+**CNC-02 is the only machine whose readings change.** Its weekly mean vibration doubles
+between the start of April and the end of June, and its temperature rises by about 5 °C.
+The other four machines (CMP-01, CNC-01, CNC-03, PMP-T01) stay flat all half-year.
+
+Each machine is compared with **its own** January–March average, so machines that run at
+different levels share one scale and "flat" means "no change". The grey line is the
+average of the other four machines; none of them moves more than 1.4% in vibration or
+0.7 °C in any week.
+
+```mermaid
+%%{init: {"xyChart": {"width": 900, "height": 420}, "themeVariables": {"xyChart": {"plotColorPalette": "#1baf7a, #8a8984"}}}}%%
+xychart-beta
+    title "Vibration: change from each machine's own Jan–Mar mean"
+    x-axis "Week of 2026 (W1 starts 1 Jan, W14 = 2 Apr, W20 = 14 May)" ["W1", "W2", "W3", "W4", "W5", "W6", "W7", "W8", "W9", "W10", "W11", "W12", "W13", "W14", "W15", "W16", "W17", "W18", "W19", "W20", "W21", "W22", "W23", "W24", "W25", "W26"]
+    y-axis "Weekly mean, % change" -10 --> 110
+    line [1, 0, 0, 0, -1, -1, 0, 0, 0, 1, 0, 0, 0, 6, 14, 21, 30, 39, 47, 55, 64, 74, 81, 89, 98, 106]
+    line [-0.1, 0.0, 0.4, -0.1, 0.4, 0.0, -0.1, 0.1, -0.4, 0.1, -0.2, -0.1, 0.0, 0.5, 0.0, -0.1, 0.1, 0.1, -0.1, -0.3, 0.0, -0.2, -0.4, -0.7, -0.1, 0.0]
+```
+
+```mermaid
+%%{init: {"xyChart": {"width": 900, "height": 420}, "themeVariables": {"xyChart": {"plotColorPalette": "#1baf7a, #8a8984"}}}}%%
+xychart-beta
+    title "Temperature: change from each machine's own Jan–Mar mean"
+    x-axis "Week of 2026 (W1 starts 1 Jan, W14 = 2 Apr, W20 = 14 May)" ["W1", "W2", "W3", "W4", "W5", "W6", "W7", "W8", "W9", "W10", "W11", "W12", "W13", "W14", "W15", "W16", "W17", "W18", "W19", "W20", "W21", "W22", "W23", "W24", "W25", "W26"]
+    y-axis "Weekly mean, °C change" -1 --> 5
+    line [0.0, 0.0, 0.0, 0.0, 0.1, -0.3, 0.1, 0.1, -0.1, -0.1, 0.0, 0.1, 0.1, 0.4, 0.6, 0.9, 1.0, 1.7, 2.3, 2.5, 3.0, 3.3, 3.7, 4.0, 4.1, 4.7]
+    line [0.0, 0.1, 0.1, -0.1, 0.1, 0.2, -0.2, -0.1, 0.0, -0.1, 0.1, 0.0, 0.0, 0.0, -0.1, -0.1, 0.0, 0.1, 0.0, 0.0, -0.2, 0.0, 0.1, -0.2, -0.1, 0.0]
+```
+
+Green = CNC-02, grey = average of the other four machines. W26 covers 25–30 Jun (6 days).
+
+| Monthly mean | Jan | Feb | Mar | Apr | May | Jun |
+|---|---|---|---|---|---|---|
+| CNC-02 vibration (mm/s) | 2.31 | 2.30 | 2.31 | 2.71 | 3.56 | 4.41 |
+| CNC-02 temperature (°C) | 51.9 | 51.9 | 52.0 | 52.6 | 54.4 | 56.0 |
+| Other four, vibration (mm/s) | CMP-01 3.40, PMP-T01 2.90, CNC-01 2.10, CNC-03 1.80 in every month (±0.02) | | | | | |
+| Other four, temperature (°C) | 51.8–52.3 in every month | | | | | |
+
+What it means, and how it connects to the other sources:
+
+- **Vibration warned first.** CNC-02's daily mean vibration left its normal range on
+  **5 April** (the first of three days in a row more than 3 standard deviations above its
+  Jan–mid-Mar average of 2.30 mm/s), six weeks before the `spindle vibration high`
+  breakdown on **15 May** (CMMS WO 11529, in W20). Temperature followed about
+  **30 April**, by the same test.
+- **The breakdown repair didn't stop it.** Vibration kept rising at the same rate after
+  15 May. The CMMS has an open `bearing noise - gearbox` work order on **19 June**
+  (WO 11591), and the spares sheet has CNC-02's bearing **BRG-6310** below minimum stock
+  (2 < 4, lead time 2–3 weeks).
+- **It isn't a shift effect.** Day and night shift readings are the same (trap list), so
+  it's the machine, not who's running it.
+- **It isn't a data artefact.** Every machine logs about 98% of its expected readings
+  every day (lowest day 92.5%), with no outage; the gaps are single missed readings (L4).
+
+**Caveats.**
+- The work orders line up with the trend in time; they don't prove the cause. What was
+  done on 15 May isn't recorded in enough detail to say.
+- CNC-02's daily mean temperature reaches **58.1 °C on 30 June**, the last day in the
+  file, up from about 56 °C on the two days before. It's one day at the end of the data:
+  worth asking the client about, not a finding on its own.
+- Single readings are too noisy to quote (sd about 6 °C, L6). Quote weekly or monthly
+  means, as here.
+
+**Reproduce:**
+
+```bash
+python scripts/plot_sensor_csv.py data/logs/vibration_temp_2026H1.csv --freq W --table reports/sensor_monthly.csv
+```
+
+This writes `reports/sensor_weekly.png` (all five machines, mean vibration, temperature
+and coverage) and the monthly means above. The charts in this section use the same
+weekly means, indexed to each machine's January–March average.
 
 ---
 
