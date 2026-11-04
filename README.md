@@ -47,7 +47,10 @@ python scripts/agent_user.py                                   # the app's read-
 `sudo apt install tesseract-ocr`, macOS `brew install tesseract`. The Python side is
 `pytesseract` and `opencv-python-headless` (add them to `requirements.txt`). `--engine llm`
 uses the class LLM endpoint's vision model instead
-([`ingest_images.md`](docs/ingest_images.md#setup-tesseract)).
+([`ingest_images.md`](docs/ingest_images.md#setup-tesseract)). Each scan is read four ways
+and the fields voted; on the new incident forms the severity number is also read from its
+blue ink alone ([four-pass voting](docs/ingest_images.md#four-pass-voting),
+[colour separation](docs/ingest_images.md#colour-separation-severity-from-the-blue-value-ink)).
 
 Or run the loads and `relationships.py` in one go, with a report of the results in
 `reports/` ([`pipeline.md`](docs/pipeline.md)):
@@ -175,6 +178,8 @@ as in the CMMS. The other seven CMMS machines have no sensor readings, so
 orphan. If a later sensor file gives orphans, lookalike ids (`CNC2` for `CNC-02`) would
 need a `machine_aliases` table. On the image links, an orphan asset tag or incident id
 means OCR misread it or the scan isn't in the CMMS; check `img_documents_raw.ocr_notes`.
+All 30 incident forms link with 0 orphans (one misread machine id, `CRN-002`, was fixed
+by a stricter machine-id check: trap list I10).
 
 ```bash
 python scripts/relationships.py --dry-run --mermaid docs/er_diagram.md   # no database needed
@@ -370,9 +375,11 @@ loaded from *other* files, which a dry run can't see. The counts match exactly f
 first file of a source; for later files, the difference is the `duplicate_*` rejects.
 
 **OCR is the exception:** another Tesseract version can read a bad photo differently.
-Each image's OCR result is cached by its SHA-256 (`.cache/ingest_images/`) and
-`img_documents_raw` keeps what was read, so a re-run on the same machine gives the same
-result; across machines, compare `fields_raw` and `ocr_notes`.
+Each image's OCR result is cached by its SHA-256 and the engine tag
+(`.cache/ingest_images/<hash>_tesseract-v2.json`) and `img_documents_raw` keeps what was
+read, so a re-run on the same machine gives the same result; across machines, compare
+`fields_raw` and `ocr_notes`. Changing the image preparation means a new engine tag, so
+old cached reads are ignored.
 
 ## Data concerns and open questions
 
@@ -386,8 +393,8 @@ numbers below refer to it.
 
 | # | Question | Evidence and why it matters | What we do now | Once answered |
 |---|---|---|---|---|
-| 1 | **On which day did incident severity switch to 5 = worst?** (safety officer) | The dump's header note says 1 Jul 2025, but forms in use may have lagged. In this dump only two incidents fall in July 2025: **906** (11 Jul, logged 3) and **907** (4 Jul, logged 2). A 3 means the same on both scales, so **907 is the only incident whose meaning changes**: severity 2 on the new scale, or 4 converted from the old. The auditor will test this. (C1, C2) | Before 1 Jul 2025 converted (`6 − s`); all of July left `ambiguous`, `severity_5_worst = NULL`. If 907's scanned form is among the 30, its printed scale settles 907 (`form_scale_in_cutover_month`, I5) | `ingest_cmms.py --severity-cutover <date> --severity-ambiguous-until none`, then `relationships.py` |
-| 2 | **Do old-scale severities agree with lost days?** (safety officer) | Several pre-July-2025 incidents logged `5` (least severe on the old scale) have 5 lost days, e.g. 901, 919, 920, 937; incident 982 logged `4` (minor) has 14. Either lost days aren't tied to severity, or some old records already used the new scale. Check with the query below. (C3) | Rule applied as stated. Each scanned form prints its scale; `form_scale_contradicts_date_rule` flags a form on the "wrong" scale for its date (I5) | If records were mixed, use each form's printed scale as the per-record source |
+| 1 | **On which day did incident severity switch to 5 = worst?** (safety officer) | The dump's header note says 1 Jul 2025, but forms in use may have lagged. In this dump only two incidents fall in July 2025: **906** (11 Jul, logged 3) and **907** (4 Jul, logged 2). A 3 means the same on both scales, so **907 is the only incident whose meaning changes**: severity 2 on the new scale, or 4 converted from the old. The auditor will test this. Form 906 (11 Jul) already prints the new scale, so the switch was between 1 and 11 Jul 2025; there is no scanned form for 907. (C1, C2, I5) | Before 1 Jul 2025 converted (`6 − s`); all of July left `ambiguous`, `severity_5_worst = NULL` | `ingest_cmms.py --severity-cutover <date> --severity-ambiguous-until none`, then `relationships.py` |
+| 2 | **Do old-scale severities agree with lost days?** (safety officer) | Several pre-July-2025 incidents logged `5` (least severe on the old scale) have 5 lost days, e.g. 901, 919, 920, 937; incident 982 logged `4` (minor) has 14. **Not a scale mix-up:** the forms for 919, 937 and 982 print the old scale and agree with the CMMS, so the mismatch is on the original paper. Either lost days aren't tied to severity, or the severity was misjudged when the form was filled in. (C3, I5) | Rule applied as stated. All 30 forms checked: none contradicts the date rule | Explain how severity and lost days relate |
 | 3 | **Are work order and incident descriptions reliable for the machine they're on?** (maintenance) | Many don't fit the machine type: 10018 `crane limit switch fault` on the test pump rig, 10045 `weld porosity complaints` on the overhead crane, 10005 `spindle vibration high` on a welding bay; incident 923 `finger caught in chuck` on a crane. Either the machine id or the description is wrong. The paper form for incident 900 has the same mismatch (`weld flash burn` on the manual lathe), so it isn't just a CMMS typing error. (C6, I6) | Loaded as written | Decide which field to trust; until then the app should cite descriptions, not reason from them |
 | 4 | **What vibration and temperature levels count as "off" for CNC-02?** (maintenance / OEM) | The night shift's question needs a threshold or a baseline, and the data has none. It's now urgent: CNC-02's monthly mean vibration rises from 2.31 mm/s (Jan–Mar 2026) to 2.71 (Apr), 3.56 (May) and 4.41 (Jun), and its temperature from 52.0 to 56.0 °C, while the other four sensored machines stay flat. Day and night shifts read the same. | Readings stored; no alarm levels. The trend can be shown, but not judged against a limit | Add the limits to the analysis and the chart |
 | 5 | **Is "Nurul Aisyah binte Hassan" one person or two?** (HR) | Same name on EMP015 (QA, night) and EMP026 (QA, night). Affects any per-person count. (C8) | Treated as two employees (two codes) | Merge or keep; the app never shows names either way |
@@ -422,8 +429,9 @@ FROM cmms_work_orders GROUP BY 1, 2, 3 HAVING n > 1 ORDER BY wo_date;
 |---|---|---|
 | Sensor timestamps without an offset are Singapore time | [`ingest_logs.md`](docs/ingest_logs.md) | The 2026H1 file has none (`iso_naive` = 0), so this doesn't affect the client's data; every ISO time carries `+08:00` |
 | Slash dates are day first (`05/02/2026` = 5 Feb) | [`ingest_cmms.md`](docs/ingest_cmms.md), [`ingest_images.md`](docs/ingest_images.md) | The client's dump has none; every date is `YYYY-MM-DD`. The scanned forms do use them, and form IR-2024-900's `01/07/2024` matches the CMMS's `2024-07-01` (I8) |
-| A form's printed severity scale is right for that form, even where it contradicts the date rule (flagged, not overruled; the CMMS value is not changed) | [`ingest_images.md`](docs/ingest_images.md#severity-the-scale-printed-on-the-form) | `form_scale_contradicts_date_rule` warnings |
-| When OCR readings of a field disagree, the majority reading that passes the field's format check is right | [`ingest_images.md`](docs/ingest_images.md#how-an-image-is-read) | `ocr_disagreed_*` warnings; each reading in `ocr_notes` |
+| A form's printed severity scale is right for that form, even where it contradicts the date rule (flagged, not overruled; the CMMS value is not changed) | [`ingest_images.md`](docs/ingest_images.md#severity-the-scale-printed-on-the-form) | `form_scale_contradicts_date_rule` warnings (none on the 30 forms) |
+| When OCR readings of a field disagree, the majority reading that passes the field's format check is right; ties go to the plain grey reading | [`ingest_images.md`](docs/ingest_images.md#four-pass-voting) | `ocr_disagreed_*` warnings; each reading in `ocr_notes` |
+| A severity read only from the blue value ink is right when at least 3 of 10 colour masks agree and no other digit comes close; otherwise it's left unread | [`ingest_images.md`](docs/ingest_images.md#colour-separation-severity-from-the-blue-value-ink) | `read_from_value_ink_severity` warnings; 6 of 9 new forms read, all matching the CMMS where it has a value (I12) |
 | Lead-time months are 30 days; `local` has no lead time in days | [`ingest_spares.md`](docs/ingest_spares.md) | `lead_time_unparsed` warnings (none in rev 11; no lead time uses months) |
 | Only sizes written with a unit are converted; bearing numbers (`6205`) aren't decoded | [`ingest_spares.md`](docs/ingest_spares.md) | `no_explicit_size` count (5 in rev 11) |
 | Part numbers aren't read for size (`BELT-5V-850` is 85.0 in, not 850 mm) | [`ingest_spares.md`](docs/ingest_spares.md) | agent instructions |
@@ -436,7 +444,7 @@ FROM cmms_work_orders GROUP BY 1, 2, 3 HAVING n > 1 ORDER BY wo_date;
 
 | Item | How |
 |---|---|
-| Only 2 of the 42 scans are audited (`IR-2024-900.jpg`, `nameplate_BLAST-01.jpg`); the other 11 nameplates, 29 forms and the SOPs aren't | `pipeline.py --only images,relationships`, then the audit queries in [`ingest_images.md`](docs/ingest_images.md#audit-queries); add findings to [`trap_list.md`](docs/trap_list.md#images-images-first-two-scans). Try `--engine llm` on scans that are rejected or full of `ocr_disagreed_*` |
+| All 30 incident forms are loaded and compared with the CMMS (5 scans also checked by eye). The 12 nameplates and the SOPs aren't reviewed yet. Three new forms (911, 922, 955) still have no severity read | `SELECT * FROM machine_nameplate`, then the audit queries in [`ingest_images.md`](docs/ingest_images.md#audit-queries); add findings to [`trap_list.md`](docs/trap_list.md#images-images-first-two-scans). Try `--engine llm` on scans that are rejected or full of `ocr_disagreed_*` |
 | Whether `emp_code` with trade and shift identifies a person in a 32-person shop (PDPA) | team decision: if so, drop `emp_code` from `incident_detail` / `work_order_detail` |
 | Names also appear in the spares sheet title (`storeman: Halim`) | stored only in `critical_spares_raw.source_title`, which the app user can't read; keep it that way |
 | Views, grants and run logging have only been tested without a database | run `relationships.py` and `agent_user.py --check` on the real database |
@@ -525,6 +533,7 @@ The tests check the reading and cleaning logic of every script, plus the shared
 modules. They run in a few seconds and **need no database, Docker or `.env`**:
 each test builds a small messy CSV, spreadsheet, SQL dump or OCR text (in a temporary
 folder or as a string), runs the script's cleaning steps on it, and checks the result.
+Settings exported in your shell or in the repo's `.env` don't leak into the tests.
 
 ### Setup
 
@@ -556,6 +565,7 @@ pytest -k lead_time                                 # only tests whose name cont
 pytest -k "spares and not size"                     # combine name filters
 pytest -k severity                                  # the CMMS severity-scale tests
 pytest -k crlf                                      # the Windows line-ending tests
+pytest -k ink                                       # the blue-ink severity reader
 pytest tests/test_images.py                         # the scans (OCR text given; no Tesseract needed)
 pytest tests/test_relationships.py                  # the linking script
 pytest tests/test_logs.py::test_temperature_units   # one specific test
@@ -573,11 +583,12 @@ With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
 | `tests/test_logs.py` | [`ingest_logs.py`](docs/ingest_logs.md): ISO/epoch timestamps (incl. the 8-hour bug), timezones, °C/°F, unknown units, every CSV line kept in raw with its line number, clean rows linked to raw, reject reasons, duplicates within the file and against rows already loaded, Windows (CRLF) line endings read exactly like LF | 10 |
 | `tests/test_spares.py` | [`ingest_spares.py`](docs/ingest_spares.md): costs (`$38/spool`), lead times (`2-3 weeks (Germany)`, `local`), metric/imperial sizes, machine lists; on a messy sheet: raw rows and row numbers, `raw_id`, duplicate/missing part numbers, warnings for unreadable values | 18 |
 | `tests/test_cmms.py` | [`ingest_cmms.py`](docs/ingest_cmms.md): dump parsing (`;` and quotes inside strings, comments, multi-row INSERTs with line and tuple numbers, column lists, malformed tuples); ids, numbers (`S$1,050`), day-first dates; the severity flip (old scale inverted, July 2025 left unconverted, a confirmed cutover, out-of-range values never guessed); on a messy dump: duplicates and conflicting duplicates, orphan machines/employees flagged not dropped, raw text kept, `work_orders.status` not clashing with the load status; employee names masked to their last 4 characters in everything printed | 27 |
-| `tests/test_images.py` | [`ingest_images.py`](docs/ingest_images.md): the sample scans' real OCR text (mistakes included); label parsing, the printed severity scale, voting across three readings, id fixes (`BLAST` stays `BLAST`), forms that contradict the date rule or settle July 2025, an unreadable scale never guessed, a name never stored as `emp_code`, welding ratings, lb -> kg, every reject reason, the LLM engine, the cache, the folder hash, audit views without OCR text; reads the real scans if Tesseract is installed | 35 |
+| `tests/test_images.py` | [`ingest_images.py`](docs/ingest_images.md): the sample scans' real OCR text (mistakes included); label parsing, the printed severity scale, [four-pass voting](docs/ingest_images.md#four-pass-voting) (majority, format checks, ties, the only reading shaped like a machine id, a misread digit not accepted as a letter), asset-tag and location parsing, id fixes (`BLAST` stays `BLAST`), forms that contradict the date rule or settle July 2025, an unreadable scale never guessed, a name never stored as `emp_code`, welding ratings, lb -> kg, every reject reason, the LLM engine, the cache, the folder hash, audit views without OCR text; the [blue-ink severity reader](docs/ingest_images.md#colour-separation-severity-from-the-blue-value-ink) (recovers a lost severity and flags it, never outvotes page readings that agree, abstains on weak or split votes, never returns a wrong digit on a mock of the overlapping line); reads the real scans, incl. forms 904 and 906, if Tesseract is installed | 56 |
 | `tests/test_relationships.py` | [`relationships.py`](docs/relationships.md): orphan/NULL/`ALL` counting, keys compared like MySQL (case, spaces), when a foreign key is added or skipped, table prefixes, no view exposes `emp_name`, incidents (and the form comparison) only offer `severity_5_worst`, the form comparison on one collation with July left open, machines without a nameplate kept, the ER diagram, the run fingerprint, successful and failed runs recorded in `ingest_runs` | 44 |
 | `tests/test_pipeline.py` | [`pipeline.py`](docs/pipeline.md): step order and flags (images after the CMMS), foreign keys dropped first and re-added last (never in a dry run), sample rows with names kept out of the report, counts from every script's summary, the images folder hashed like the load, a failure stopping the rest, `--keep-going`, Ctrl+C, the report's tables, `--save-log`, `--audit` | 34 |
-| `tests/test_agent_user.py` | `agent_user.py`: the allow-list never includes employees or raw tables (nor the raw OCR), the scans' audit views granted, objects with `emp_name` refused, missing objects skipped, `SELECT`-only grants after a full reset, password never written into SQL or output, bad user/host/database names rejected, MySQL error codes read correctly, errors never include the password, failed steps named with MySQL's message, no statement needing rights over every database, the access check reads no rows | 21 |
-| `tests/test_shared.py` | `db_config.py`, `lineage.py`: password never printed, passwords with special characters, values of a failed query kept out of error messages, table-name check, file SHA-256, a run recorded without a file, values passed to MySQL are plain Python types | 7 |
+| `tests/test_agent_user.py` | `agent_user.py`: the allow-list never includes employees or raw tables (nor the raw OCR), the scans' audit views granted, objects with `emp_name` refused, missing objects skipped, `SELECT`-only grants after a full reset, password never written into SQL or output, bad user/host/database names rejected, MySQL error codes read correctly, errors never include the password, failed steps named with MySQL's message, no statement needing rights over every database, the access check reads no rows; settings with Windows line endings (from the shell or a CRLF `.env`) read without the trailing `\r`, and no settings leak in from your shell or `.env` | 23 |
+| `tests/test_shared.py` | `db_config.py`, `lineage.py`: password never printed, passwords with special characters, values of a failed query kept out of error messages, table-name check, file SHA-256, a run recorded without a file, values passed to MySQL are plain Python types, `getenv` and `load_db_config` strip a trailing `\r` (CRLF `.env`) | 9 |
+| **Total** | | **221** |
 
 **Not covered:** anything that needs MySQL, i.e. creating tables, views and users,
 the inserts, the one-transaction rollback and the `ingest_runs` record. After
@@ -588,15 +599,15 @@ for the app user's grants, `agent_user.py --check` is the real test.
 ### Reading the output
 
 ```
-tests/test_agent_user.py .....................                      [ 11%]
-tests/test_cmms.py ...........................                      [ 24%]
-tests/test_images.py ...................................            [ 42%]
-tests/test_logs.py ..........                                       [ 47%]
-tests/test_pipeline.py ..................................           [ 65%]
-tests/test_relationships.py ............................................[ 87%]
-tests/test_shared.py .......                                        [ 91%]
+tests/test_agent_user.py .......................                    [ 10%]
+tests/test_cmms.py ...........................                      [ 23%]
+tests/test_images.py ........................................................ [ 48%]
+tests/test_logs.py ..........                                       [ 52%]
+tests/test_pipeline.py ..................................           [ 68%]
+tests/test_relationships.py ............................................[ 88%]
+tests/test_shared.py .........                                      [ 92%]
 tests/test_spares.py ..................                             [100%]
-========== 196 passed in 9.80s ==========
+========== 221 passed in 9.80s ==========
 ```
 
 | Mark | Meaning |
@@ -604,7 +615,7 @@ tests/test_spares.py ..................                             [100%]
 | `.` | passed |
 | `F` | failed: an `assert` was false. pytest prints the values on both sides |
 | `E` | error: the test couldn't run (e.g. an import failed) |
-| `s` | skipped: the tests that build a SQLAlchemy engine or URL skip if SQLAlchemy isn't installed; installing `requirements-dev.txt` fixes it. `test_the_real_scans_read_correctly` skips without Tesseract or the scans |
+| `s` | skipped: the tests that build a SQLAlchemy engine or URL skip if SQLAlchemy isn't installed; installing `requirements-dev.txt` fixes it. `test_the_real_scans_read_correctly` and `test_the_real_new_forms_give_their_severity_from_the_value_ink` skip without Tesseract or the scans |
 
 ### When it doesn't work
 
@@ -614,6 +625,7 @@ tests/test_spares.py ..................                             [100%]
 | `ModuleNotFoundError: No module named 'ingest_logs'` (or `db_config`, `relationships`) | `pytest.ini` not found, or the scripts aren't in `scripts/` | Run from the repo root; check `pythonpath = scripts` matches the folder name |
 | `ModuleNotFoundError: No module named 'pandas'` (or `openpyxl`, `cv2`, ...) | Virtual environment not active, or requirements not installed | Activate `.venv`, then `pip install -r requirements-dev.txt` |
 | `pytest: command not found` | pytest not installed in the active environment | `pip install -r requirements-dev.txt`, or use `python -m pytest` |
+| `Invalid user name: 'agent_ro\r'` (or another value ending in `\r`) | `.env` has Windows line endings and was loaded with `source .env`, so every value in your shell ends in `\r` | Update to the current scripts (they strip it), and fix the file: `sed -i 's/\r$//' .env`, then open a new shell |
 
 ### Adding a test
 
@@ -646,8 +658,10 @@ confirms the switch-over day; then re-run `ingest_cmms.py` with
 where form and CMMS disagree ([`ingest_images.md`](docs/ingest_images.md)).
 
 **Scans:** cite the image file (`img_*_audit.source_file`), and treat a value flagged
-`ocr_disagreed_*` as read from a poor photo. A machine with `has_nameplate = 0` has no
-nameplate photo: say so rather than answer from model memory.
+`ocr_disagreed_*` as read from a poor photo. A severity flagged
+`read_from_value_ink_severity` was read from the blue ink alone, because the printed label
+covered it. A machine with `has_nameplate = 0` has no nameplate photo: say so rather than
+answer from model memory.
 
 **Employee names (PDPA):** `emp_name` stays in `cmms_employees`. None of the linking
 views select it; they give `emp_code`, trade and shift only. The app connects as the
