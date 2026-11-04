@@ -3,6 +3,7 @@ including the client's three SOPs exactly as delivered (em dash, no final newlin
 One test reads the real folder data/sops/ if it is there, and is skipped otherwise."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -313,6 +314,7 @@ def test_fulltext_indexes_are_rebuilt_after_the_stopword_list_is_set():
     assert conn.calls[set_at][1] == {"t": "jme/sop_ft_stopwords"}
     adds = [s for s in sql[set_at:] if "ADD FULLTEXT" in s]
     assert adds == ["ALTER TABLE sops ADD FULLTEXT INDEX ft_sops (title, full_text)",
+                    "ALTER TABLE sops ADD FULLTEXT INDEX ft_sops_search (search_text)",
                     "ALTER TABLE sop_steps ADD FULLTEXT INDEX ft_sop_steps (step_text)"]
     assert not any("ADD FULLTEXT" in s for s in sql[:set_at])
     inserted = next(p for s, p in conn.calls if s.startswith("INSERT INTO sop_ft_stopwords"))
@@ -326,6 +328,67 @@ def test_stopword_table_has_a_primary_key():
     create = next(s for s, _ in conn.calls if s.startswith("CREATE TABLE"))
     assert "value VARCHAR(30) NOT NULL PRIMARY KEY" in create
     assert len(set(sp.fulltext_stopwords())) == len(sp.fulltext_stopwords())   # no duplicates
+
+
+def test_search_text_holds_the_words_search_sops_scores():
+    out = sp.process(client_folder())
+    confined = doc(out, "SOP-CONFINED-03")["search_text"].split()
+    loto = doc(out, "SOP-LOTO-01")["search_text"].split()
+    assert "tank" in confined and "tanks" not in confined       # 'ballast tanks' in the SOP
+    assert "vessel" in confined and "chamber" in confined
+    assert "work" not in loto and "before" not in loto           # stop words already gone
+    assert doc(out, "SOP-CONFINED-03")["full_text"].count("tanks") == 1   # as written
+
+
+def test_singular_and_plural_questions_search_the_same_words():
+    """MySQL FULLTEXT doesn't stem: 'tank' would not find 'tanks'. Both sides are
+    normalised by search_text's rules, so they meet."""
+    assert sp.search_terms("shackle kink") == sp.search_terms("shackles kinks") == "shackle kink"
+    assert sp.search_terms("Isolating the lathe") == "isolating lathe lockout"
+
+
+def _mysql_words(s: str) -> set[str]:
+    """Roughly how InnoDB FULLTEXT tokenises: split on anything not a letter or digit,
+    drop words under 3 characters (innodb_ft_min_token_size) and stop words."""
+    return {w for w in re.findall(r"[a-z0-9]+", s.lower())
+            if len(w) >= 3 and w not in sp.fulltext_stopwords()}
+
+
+def _mysql_candidates(question: str, sops) -> set[str]:
+    """Current SOPs that MATCH (search_text) AGAINST (search_terms(q)) returns: at least
+    one shared word (natural language mode gives any shared word a score above 0)."""
+    q = _mysql_words(sp.search_terms(question))
+    return {r.doc_no for r in sops[sops["is_current"] == 1].itertuples()
+            if q & _mysql_words(r.search_text)}
+
+
+@pytest.mark.parametrize("question", [
+    "What's the SOP before entering the blasting chamber?",
+    "What is the max load of CRN-01?",
+    "How do I lock out CNC-02 before maintenance?",
+    "gas test limits for the ballast tank",
+    "shackle with a kink",               # the SOP says 'shackles' and 'kinks'
+    *[q for q, _ in PARAPHRASES],
+])
+def test_mysql_finds_every_sop_search_sops_finds(question):
+    """search_sops is the gate; MATCH must never miss what it finds (or the database
+    query and the app disagree). MATCH may return more (one shared word is enough), never
+    fewer. 'shackle with a kink' found nothing in MATCH (title, full_text): MySQL doesn't
+    stem, and SOP-CRANE-02 says 'shackles' and 'kinks'."""
+    out = sp.process(client_folder(), machines=MACHINES)
+    found = {d for d, _, _ in sp.search_sops(question, out["sops"], out["links"])}
+    assert found and found <= _mysql_candidates(question, out["sops"])
+
+
+def test_mysql_finds_nothing_for_welding_either():
+    out = sp.process(client_folder())
+    assert _mysql_candidates("welding hot work PPE grinding", out["sops"]) == set()
+
+
+def test_an_old_sops_table_without_search_text_needs_recreate():
+    assert sp.schema_out_of_date({"doc_no", "revision", "full_text"})
+    assert not sp.schema_out_of_date({"doc_no", "full_text", "SEARCH_TEXT"})
+    assert not sp.schema_out_of_date(set())                    # no table yet: created fresh
 
 
 # ------------------------------------------------------------ whole folder ---

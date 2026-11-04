@@ -29,8 +29,9 @@ Pipeline (each step is a small function you can test on its own):
 
 The folder is the complete set of SOPs, so each load replaces every SOP row.
 
-Answering from the SOPs: pick the SOP by keyword (search_sops; MySQL MATCH ... AGAINST on
-sops with the question from expand_question gives the same candidates), then quote it WHOLE
+Answering from the SOPs: pick the SOP by keyword (search_sops; MySQL
+MATCH (search_text) AGAINST (search_terms(question)) on sops compares the same words and
+gives the same candidates), then quote it WHOLE
 from sop_steps, citing doc no, revision and line numbers. Never quote one step on its own:
 a safety step out of its procedure is how someone gets hurt. Keyword, not semantic search:
 see 'Search: keyword, not a vector database' in docs/ingest_sops.md.
@@ -90,7 +91,7 @@ RAW_COLUMNS = ["raw_id", "run_id", "source_folder", "source_file", "file_sha256"
                "header_line", "doc_no", "revision", "line_count", "raw_text", "status",
                "reject_reason", "duplicate_of_raw_id", "warnings"]
 SOP_COLUMNS = ["doc_no", "revision", "raw_id", "title", "rev_month", "rev_label", "applies_to",
-               "is_current", "step_count", "full_text"]
+               "is_current", "step_count", "full_text", "search_text"]
 STEP_COLUMNS = ["doc_no", "revision", "step_no", "line_no", "marker", "step_text", "refers_to"]
 LINK_COLUMNS = ["doc_no", "revision", "machine_id", "how", "evidence"]
 
@@ -128,10 +129,12 @@ DDL = [
         applies_to  VARCHAR(255) NULL COMMENT 'the Applies to: line, if any',
         is_current  TINYINT(1)   NOT NULL COMMENT '1 = highest revision of this doc no loaded',
         step_count  INT          NOT NULL,
-        full_text   TEXT         NOT NULL COMMENT 'title + every step, for search',
+        full_text   TEXT         NOT NULL COMMENT 'title + every step, as written',
+        search_text TEXT         NOT NULL COMMENT 'full_text as search_sops reads it: lower case, stop words dropped, plural s removed',
         PRIMARY KEY (doc_no, revision),
         UNIQUE KEY uq_sops_raw (raw_id),
         FULLTEXT KEY ft_sops (title, full_text),
+        FULLTEXT KEY ft_sops_search (search_text),
         CONSTRAINT fk_sops_raw FOREIGN KEY (raw_id) REFERENCES sop_documents_raw (raw_id)
             ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -373,6 +376,12 @@ def add_machine_warnings(docs: list[Document], machines: dict[str, str] | None) 
 
 # ------------------------------------------------------------------ prepare ---
 
+def sop_full_text(d: Document) -> str:
+    """Title, 'Applies to' line and every step, as written: what search reads."""
+    return "\n".join([d.title] + ([f"Applies to: {d.applies_to}"] if d.applies_to else [])
+                     + [s.text for s in d.steps])
+
+
 def process(files: list[SopFile], *, source_folder: str = "sops", run_id: int = 0,
             machines: dict[str, str] | None = None) -> dict:
     """Parse, check and link. Returns DataFrames: raw, sops, steps, links."""
@@ -403,8 +412,8 @@ def process(files: list[SopFile], *, source_folder: str = "sops", run_id: int = 
         "doc_no": d.doc_no, "revision": d.revision or 0, "raw_id": raw_id(n), "title": d.title,
         "rev_month": d.rev_month, "rev_label": d.rev_label, "applies_to": d.applies_to,
         "is_current": int((d.revision or 0) == current[d.doc_no]), "step_count": len(d.steps),
-        "full_text": "\n".join([d.title] + ([f"Applies to: {d.applies_to}"] if d.applies_to else [])
-                               + [s.text for s in d.steps]),
+        "full_text": sop_full_text(d),
+        "search_text": search_text(sop_full_text(d)),
     } for n, d in loaded], columns=SOP_COLUMNS)
     steps = pd.DataFrame([{
         "doc_no": d.doc_no, "revision": d.revision or 0, "step_no": s.step_no, "line_no": s.line_no,
@@ -468,14 +477,28 @@ def _words(s: str) -> list[str]:
     return out
 
 
+def search_text(text: str) -> str:
+    """Text as search_sops reads it, for the sops.search_text column: lower-case words,
+    stop words dropped, a plural 's' removed. MySQL FULLTEXT doesn't stem ('tank' and
+    'tanks' are different words to it), so MATCH searches this column with search_terms()
+    and both searches compare the same words."""
+    return " ".join(_words(text))
+
+
+def search_terms(question: str) -> str:
+    """The question as search_sops reads it (synonyms added, then search_text's rules):
+    pass this to MATCH (search_text) AGAINST (...)."""
+    return " ".join(dict.fromkeys(_words(expand_question(question))))
+
+
 def search_sops(question: str, sops: pd.DataFrame, links: pd.DataFrame | None = None,
                 limit: int = 3) -> list[tuple[str, int, float]]:
     """(doc_no, revision, score) of current SOPs, best first; [] if nothing scores at least
     MIN_SCORE, so the app can say 'no SOP in the data covers this' (trap list D3). This is
     the gate for that answer. The question is first widened by expand_question. Title
     words count double; a machine the SOP is linked to (id or evidence phrase in the
-    question) counts 3. MySQL MATCH ... AGAINST on sops, with the same stop words
-    (sop_ft_stopwords), gives the same candidates in the database."""
+    question) counts 3. In the database, MATCH (search_text) AGAINST (search_terms(question))
+    on sops compares the same words and finds the same candidates."""
     question = expand_question(question)
     q = set(_words(question))
     qtext = question.lower()
@@ -521,6 +544,7 @@ MYSQL_DEFAULT_STOPWORDS = {"a", "about", "an", "are", "as", "at", "be", "by", "c
                            "that", "the", "this", "to", "was", "what", "when", "where", "who",
                            "will", "with", "und", "www"}
 FULLTEXT_INDEXES = [("sops", "ft_sops", "title, full_text"),
+                    ("sops", "ft_sops_search", "search_text"),
                     ("sop_steps", "ft_sop_steps", "step_text")]
 
 
@@ -556,11 +580,24 @@ def rebuild_fulltext(conn) -> None:
         conn.execute(text(f"ALTER TABLE {table} ADD FULLTEXT INDEX {index} ({cols})"))
 
 
+def schema_out_of_date(sops_columns: set[str]) -> bool:
+    """True if a `sops` table exists without search_text (added 4 Nov 2026).
+    CREATE TABLE IF NOT EXISTS doesn't add columns, so it needs one load with --recreate."""
+    return bool(sops_columns) and "search_text" not in {c.lower() for c in sops_columns}
+
+
 def create_tables(engine, recreate: bool) -> None:
     from sqlalchemy import text
 
     with engine.begin() as conn:  # DDL commits implicitly in MySQL
         conn.execute(text(RUNS_DDL))
+        if not recreate:
+            cols = {c for (c,) in conn.execute(text(
+                "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sops'"))}
+            if schema_out_of_date(cols):
+                sys.exit("The sops table is from an older version (no search_text column). "
+                         "Run once with --recreate; nothing was changed.")
         if recreate:
             for v in ["sop_steps_audit", "sops_audit"]:
                 conn.execute(text(f"DROP VIEW IF EXISTS {v}"))
