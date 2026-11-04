@@ -16,6 +16,8 @@ erDiagram
     cmms_machines ||..o{ img_nameplates : "has nameplate photo"
     cmms_safety_incidents ||..o{ img_incident_reports : "has scanned form"
     cmms_machines |o..o{ img_incident_reports : "named on scanned forms"
+    cmms_machines ||..o{ sop_machines : "covered by SOPs"
+    sops ||--o{ sop_machines : "names machines"
     cmms_machines {
         varchar machine_id UK
         varchar machine_name
@@ -100,6 +102,22 @@ erDiagram
         varchar immediate_action
         varchar root_cause
         tinyint signature_present
+    }
+    sops {
+        varchar doc_no PK "e.g. SOP-LOTO-01"
+        int revision PK
+        varchar title
+        char rev_month "YYYY-MM"
+        tinyint is_current "highest revision loaded"
+        int step_count "steps in sop_steps, quoted whole"
+        text search_text "what the app searches (FULLTEXT)"
+    }
+    sop_machines {
+        varchar doc_no PK, FK
+        int revision PK, FK
+        varchar machine_id PK, FK
+        varchar how "id | name | alias"
+        varchar evidence "the SOP's words"
     }
 ```
 
