@@ -62,12 +62,13 @@ folder and one SHA-256 over all its files (`lineage.folder_sha256`), as for the 
 
 1. **Find the SOP.** `search_sops(question, sops, links)` first widens the question with
    `expand_question` (`SYNONYMS`: "sandblasting" adds "blasting chamber", "isolating" adds
-   "lockout"), then scores the current SOPs: a question word in the title counts 2, in the
-   text 1, a machine the SOP is linked to 3. Words every SOP uses ("work", "machine",
-   "before") don't count, and a score below 2 is no match. In the database,
-   `MATCH (search_text) AGAINST (:terms)` on `sops`, with `terms = search_terms(question)`,
-   compares the same words (see [MySQL FULLTEXT](#mysql-fulltext-what-it-does-for-the-search)),
-   so it finds every SOP `search_sops` finds.
+   "lockout"; plus the entry rule below), then scores the current SOPs: a question word in
+   the title counts 2, in the text 1, a machine the SOP is linked to 3. Words every SOP uses
+   ("work", "machine", "before") don't count, and a score below 2 is no match. In the
+   database, `MATCH (search_text) AGAINST (:terms)` on `sops`, with
+   `terms = search_terms(question)`, compares the same words (see
+   [MySQL FULLTEXT](#mysql-fulltext-what-it-does-for-the-search)), so it finds every SOP
+   `search_sops` finds.
 2. **Nothing found means no SOP.** 58 of the 85 incidents are of a kind no SOP covers
    (welding, grinding, chucks, portable electrics, housekeeping, D3). For those the app
    must say "no SOP in the data covers this", never stretch another SOP. **`search_sops`
@@ -85,6 +86,24 @@ Checked in the tests: "before entering the blasting chamber" finds SOP-CONFINED-
 load of CRN-01" SOP-CRANE-02, "lock out CNC-02" SOP-LOTO-01, "going inside the
 sandblasting booth" SOP-CONFINED-03, "isolating power on the lathe" SOP-LOTO-01, and
 "welding hot work PPE for grinding" finds nothing.
+
+### Entry needs a space (5 Nov 2026)
+
+On the real data, the client's own headline question, "before entering the blasting
+chamber", scored exactly `MIN_SCORE` (2.0: "entering" never matched "ENTRY" in the SOP's
+title), and a closer paraphrase, "going into the blast chamber", found nothing at all —
+"blast chamber" wasn't in `SYNONYMS` and "going into" shares no word with "entry" either.
+
+The fix adds `"entry"` to the expanded question, but only when it has **both** a verb of
+going into something (`ENTRY_VERBS`: enter, go into, get inside, climb into, ...) **and**
+a word naming a kind of space (`SPACE_WORDS`: chamber, tank, sump, booth, vessel, ...). A
+plain `"enter": "entry"` synonym was tried first and rejected: it also matched "how do I
+enter a work order" and "what's going into the incident report" (score 3, since "entry"
+appears throughout SOP-CONFINED-03's text), which would have handed someone filling in a
+work order the confined-space procedure. Requiring a space word keeps those two apart.
+`"blast chamber": "blasting chamber"` was also added to `SYNONYMS` for the closer
+paraphrase. Like `SYNONYMS` and `ALIASES`, this is a judgement, not data: add a word, with
+its question as a test in `test_sops.py`, when a real question misses.
 
 ## Stop words: how they help retrieval
 
@@ -202,8 +221,8 @@ in a semantic database?"
 - **Size.** 3 SOPs, 18 steps, each under 1 KB. That is choosing among three documents,
   not retrieval over a corpus.
 - **Keyword's weakness is real but small and testable.** Paraphrases that share no word
-  with the SOP are missed. The two found so far are in `SYNONYMS` and in the tests, along
-  with a test that they're missed without it.
+  with the SOP are missed. The ones found so far are in `SYNONYMS` (or the entry rule)
+  and in the tests, along with a test that they're missed without it.
 
 **What was done instead.**
 
@@ -221,7 +240,11 @@ in a semantic database?"
 3. **The same plural rule on both sides.** MySQL doesn't stem, so "shackle" missed
    "shackles". `sops.search_text` stores the text as `search_sops` reads it, and the app
    searches it with `search_terms(question)`.
-4. **`search_sops` stays the gate** for "no SOP covers this" (score of at least 2). A
+4. **A paired-condition rule for "entry"** (`ENTRY_VERBS` + `SPACE_WORDS`), rather than a
+   plain synonym, for the same reason `SYNONYMS` entries are kept narrow: a one-word
+   synonym for "enter" matched unrelated questions about entering data. See
+   [Entry needs a space](#entry-needs-a-space-5-nov-2026).
+5. **`search_sops` stays the gate** for "no SOP covers this" (score of at least 2). A
    `MATCH` score isn't used as a cut-off: it depends on how common each word is across all
    rows, so it shifts whenever the client adds an SOP.
 
@@ -315,7 +338,7 @@ WHERE status = 'rejected';
 
 ## Tests
 
-`tests/test_sops.py` (49 tests, no database): the client's three SOPs exactly as delivered
+`tests/test_sops.py` (63 tests, no database): the client's three SOPs exactly as delivered
 (em dash, no final newline) and the GM's email, built as bytes. Covers the header (number,
 title, revision, month; a hyphen instead of the em dash; no revision), UTF-8 where cp1252
 would garble the title, a BOM and CRLF read like plain UTF-8, a non-UTF-8 file rejected,
@@ -326,14 +349,17 @@ kept apart, gas-test limits kept exactly as written, references to missing docum
 an incident report not counted as one), personal data flagged, machine links by id, CMMS
 name and alias (`CRN-01/CRN-02`, `CNC-01/02/03`, `test pump sump`), an unknown machine
 flagged, search for four real questions and two paraphrases (and the paraphrases missed
-without `SYNONYMS`), synonyms matching whole words only, nothing for welding, superseded
-revisions never searched, the whole SOP quoted with its citation, the `FULLTEXT` stop words
-covering `_STOP` and MySQL's defaults, the stopword setting made before both indexes are
-re-added (on a recording connection), a primary key on the stopword table, `search_text`
-holding the words `search_sops` scores, singular and plural questions giving the same
-terms, MySQL-style matching on `search_text` finding every SOP `search_sops` finds (and
-nothing for welding), an old `sops` table without `search_text` stopping the load, the
-client folder end to end, and a dry run the pipeline can parse. `test_the_real_sop_folder` reads `data/sops/` if it's there.
+without `SYNONYMS` or the entry rule), synonyms matching whole words only, five real
+"going into a space" questions scoring well above the minimum, three "entering data"
+questions that must NOT find the confined-space SOP, singular/plural space words, nothing
+for welding, superseded revisions never searched, the whole SOP quoted with its citation,
+the `FULLTEXT` stop words covering `_STOP` and MySQL's defaults, the stopword setting made
+before both indexes are re-added (on a recording connection), a primary key on the
+stopword table, `search_text` holding the words `search_sops` scores, singular and plural
+questions giving the same terms, MySQL-style matching on `search_text` finding every SOP
+`search_sops` finds (and nothing for welding), an old `sops` table without `search_text`
+stopping the load, the client folder end to end, and a dry run the pipeline can parse.
+`test_the_real_sop_folder` reads `data/sops/` if it's there.
 
 **Checked on a real server (4 Nov 2026):** the DDL, the load (3 SOPs, 7 machine links,
 CMMS loaded with 12 machines), `MATCH` for "blasting chamber entry" (SOP-CONFINED-03
@@ -342,6 +368,11 @@ only, 1.59), and the stopword rebuild: after it, the welding audit query returns
 `MATCH (search_text)` finds SOP-CRANE-02 for "shackle kink" (0.46; nothing before), and
 the welding query on `search_text` returns no rows. `agent_user.py` then granted all 19
 objects, SOP ones included, and `--check` passed.
+
+**Checked on the client's own question (5 Nov 2026):** before the entry-rule fix,
+"before entering the blasting chamber" scored exactly 2.0 (the minimum) and "going into
+the blast chamber" scored nothing. After it, both score 4.0 or higher, and "how do I
+enter a work order" / "what's going into the incident report" still find no SOP.
 
 **The app user** (`agent_user.py`) can read `sops` (for `MATCH`: the `FULLTEXT` index is on
 the table), `sops_audit`, `sop_steps_audit` and `sop_machines`. It can't read

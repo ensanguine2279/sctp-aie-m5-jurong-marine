@@ -249,6 +249,7 @@ def test_the_paraphrases_are_found_only_through_synonyms(question, _, monkeypatc
     """Proves the paraphrase tests test SYNONYMS: without it, keyword search misses them."""
     out = sp.process(client_folder(), machines=MACHINES)
     monkeypatch.setattr(sp, "SYNONYMS", {})
+    monkeypatch.setattr(sp, "ENTRY_VERBS", ())                  # the entry rule too
     assert sp.search_sops(question, out["sops"], out["links"]) == []
 
 
@@ -276,6 +277,45 @@ def test_an_sop_is_quoted_whole_with_its_citation():
     assert q.splitlines()[0] == f"SOP-CONFINED-03 {DASH} CONFINED SPACE ENTRY (rev 2, Sep 2025)"
     assert q.count("\n- ") == 4                                         # every step, not one
     assert q.endswith("[Source: SOP-CONFINED-03, lines 3-6]")
+
+
+# ------------------------------------------------------------------- entry ---
+
+ENTRY_QUESTIONS = [
+    "What's the SOP before entering the blasting chamber?",
+    "going into the blast chamber",
+    "can I go inside the chamber?",
+    "climbing into the ballast tank on the vessel",
+    "what do I need to get into the test pump sump",
+]
+
+
+@pytest.mark.parametrize("question", ENTRY_QUESTIONS)
+def test_going_into_a_space_finds_confined_space_entry_with_margin(question):
+    """Real data, 5 Nov 2026: the client's own question scored exactly MIN_SCORE (2.0),
+    and 'going into the blast chamber' found nothing. 'entering' never matched 'ENTRY'."""
+    out = sp.process(client_folder(), machines=MACHINES)
+    hits = sp.search_sops(question, out["sops"], out["links"])
+    assert hits[0][0] == "SOP-CONFINED-03" and hits[0][2] >= sp.MIN_SCORE + 2
+
+
+@pytest.mark.parametrize("question", [
+    "how do I enter a work order",
+    "what's going into the incident report",
+    "enter the reading in the log",
+])
+def test_entering_data_is_not_entering_a_space(question):
+    """A plain 'enter': 'entry' synonym found SOP-CONFINED-03 for 'how do I enter a work
+    order' (score 3). 'entry' is added only when the question also names a space."""
+    out = sp.process(client_folder(), machines=MACHINES)
+    assert sp.expand_question(question) == question
+    found = [d for d, _, _ in sp.search_sops(question, out["sops"], out["links"])]
+    assert "SOP-CONFINED-03" not in found
+
+
+def test_space_words_match_singular_and_plural_whole_words():
+    assert sp.expand_question("going into the tanks").endswith(" entry")
+    assert sp.expand_question("entering the tankard") == "entering the tankard"
 
 
 # ---------------------------------------------------------- MySQL FULLTEXT ---
@@ -369,6 +409,7 @@ def _mysql_candidates(question: str, sops) -> set[str]:
     "gas test limits for the ballast tank",
     "shackle with a kink",               # the SOP says 'shackles' and 'kinks'
     *[q for q, _ in PARAPHRASES],
+    *ENTRY_QUESTIONS,                                           # the entry rule too
 ])
 def test_mysql_finds_every_sop_search_sops_finds(question):
     """search_sops is the gate; MATCH must never miss what it finds (or the database

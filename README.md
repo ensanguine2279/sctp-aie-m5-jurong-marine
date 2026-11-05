@@ -279,6 +279,28 @@ view to the allow-list (`allowed_objects` in the script). A refused object is re
 It's also the evidence for the PDPA question on demo day; run `--check` live. Details,
 errors and hosted MySQL in [`agent_user.md`](docs/agent_user.md).
 
+## The agent's tools
+
+Ingestion and linking give you a clean, grant-controlled database; `scripts/agent_tools.py`
+is the layer on top that the LLM agent actually calls. It's not an ingest script and
+loads nothing — it's a fixed set of tools (list machines, check a nameplate, count and
+list incidents on one severity scale, compare a machine's sensor trend, find and quote
+an SOP, and a last-resort checked `query_sql`) that the model picks from and fills in
+arguments for, never writing free SQL itself. Every tool runs as the read-only
+`agent_ro` user from `agent_user.py` above, and returns its answer with citations back to
+the audit views (`*_audit`) and lineage (`ingest_runs`) described in this file.
+
+```bash
+python scripts/agent_tools.py schemas                                     # the tool definitions
+python scripts/agent_tools.py call find_sop '{"question": "entering the blasting chamber"}'
+```
+
+Full tool list, error codes, and how each trap-list item is handled in code:
+[`agent_tools.md`](docs/agent_tools.md). The agent's tools are tested the same way as the
+ingest scripts (`tests/test_agent_tools.py`, no MySQL needed) and have been checked
+against the real database too
+([verification pass](docs/agent_tools.md#checked-against-the-real-database-5-nov-2026)).
+
 ## Lineage: traceability and reproducibility
 
 Every cleaned value can be followed back to the exact line of the exact file it came
@@ -625,12 +647,14 @@ pytest tests/test_spares.py -v                      # one line per test, with na
 pytest -k lead_time                                 # only tests whose name contains "lead_time"
 pytest -k "spares and not size"                     # combine name filters
 pytest -k severity                                  # the CMMS severity-scale tests
-pytest -k crlf                                      # the Windows line-ending tests
+pytest -k crlf                                       # the Windows line-ending tests
 pytest -k ink                                       # the blue-ink severity reader
 pytest tests/test_images.py                         # the scans (OCR text given; no Tesseract needed)
 pytest tests/test_relationships.py                  # the linking script (SOP links included)
 pytest tests/test_sops.py                           # the SOPs (no database)
-pytest -k "mysql or plural or synonym"              # the SOP search: MySQL vs search_sops
+pytest -k "mysql or plural or synonym or entry"     # the SOP search: MySQL vs search_sops, the entry rule
+pytest tests/test_agent_tools.py                    # the agent's tools (SQLite stand-in, no MySQL)
+pytest -k "severity and (incident or count)"        # the severity kill-shot, on the tools layer
 pytest tests/test_logs.py::test_temperature_units   # one specific test
 pytest -x                                           # stop at the first failure
 pytest --lf                                         # re-run only the tests that failed last time
@@ -643,37 +667,43 @@ With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
 
 | File | Covers | Tests |
 |---|---|---|
+| `tests/test_agent_tools.py` | [`agent_tools.py`](docs/agent_tools.md): every tool's schema; machine names written six ways, ambiguous and unknown machines; **the severity kill-shot**: four phrasings without a scale asked about on both incident tools, the same question on either scale giving the same incidents, the naive logged-value count never produced, July 2025 reported apart; listings by date with no employee data; form vs CMMS disagreements; OCR confidence per field, known plate problems, no photo; oil from two sources that disagree (shop-wide vs the machine's own), and an unreadable one; spares in both units, shop-wide only, below minimum once each; open costs apart and double entries; no sensors on a crane; weekly coverage; CNC-02 `machine_specific` against flat machines; the blasting chamber SOP quoted whole, nothing for welding; `query_sql` refusing writes, two statements, employees, `SELECT *`, the logged severity, `SLEEP` and `UNION`, and capping rows; a dead database giving `tool_failed`; bad, extra and JSON-string arguments; the app refusing the owner account | 83 |
 | `tests/test_logs.py` | [`ingest_logs.py`](docs/ingest_logs.md): ISO/epoch timestamps (incl. the 8-hour bug), timezones, °C/°F, unknown units, every CSV line kept in raw with its line number, clean rows linked to raw, reject reasons, duplicates within the file and against rows already loaded, Windows (CRLF) line endings read exactly like LF | 10 |
 | `tests/test_spares.py` | [`ingest_spares.py`](docs/ingest_spares.md): costs (`$38/spool`), lead times (`2-3 weeks (Germany)`, `local`), metric/imperial sizes, machine lists; on a messy sheet: raw rows and row numbers, `raw_id`, duplicate/missing part numbers, warnings for unreadable values | 18 |
 | `tests/test_cmms.py` | [`ingest_cmms.py`](docs/ingest_cmms.md): dump parsing (`;` and quotes inside strings, comments, multi-row INSERTs with line and tuple numbers, column lists, malformed tuples); ids, numbers (`S$1,050`), day-first dates; the severity flip (old scale inverted, July 2025 left unconverted, a confirmed cutover, out-of-range values never guessed); on a messy dump: duplicates and conflicting duplicates, orphan machines/employees flagged not dropped, raw text kept, `work_orders.status` not clashing with the load status; employee names masked to their last 4 characters in everything printed | 27 |
 | `tests/test_images.py` | [`ingest_images.py`](docs/ingest_images.md): the sample scans' real OCR text (mistakes included); label parsing, the printed severity scale, [four-pass voting](docs/ingest_images.md#four-pass-voting) (majority, format checks, ties, the only reading shaped like a machine id, a misread digit not accepted as a letter), asset-tag and location parsing, id fixes (`BLAST` stays `BLAST`); the 12-plate audit (oil-name misreadings undone before the vote, `ocr_no_majority_*` when no two readings agree, impossible manufacture dates rejected, a label line never taken as the maker), forms that contradict the date rule or settle July 2025, an unreadable scale never guessed, a name never stored as `emp_code`, welding ratings, lb -> kg, every reject reason, the LLM engine, the cache, the folder hash, audit views without OCR text; the [blue-ink severity reader](docs/ingest_images.md#colour-separation-severity-from-the-blue-value-ink) (recovers a lost severity and flags it, never outvotes page readings that agree, abstains on weak or split votes, never returns a wrong digit on a mock of the overlapping line); reads the real scans, incl. forms 904 and 906, if Tesseract is installed | 87 |
-| `tests/test_sops.py` | [`ingest_sops.py`](docs/ingest_sops.md): the client's SOPs as delivered; header, UTF-8 where cp1252 garbles the title, BOM/CRLF, the GM's email rejected and never printed, duplicate files and revisions, only the highest revision current, steps with line numbers, references to missing documents, personal data flagged, machine links by id, CMMS name and alias; search for real questions and paraphrases (`SYNONYMS`), nothing for welding; MySQL's side kept in step: the `FULLTEXT` stop words, the index rebuild order, a primary key on the stopword table, `search_text` and plurals, MySQL-style matching never missing an SOP `search_sops` finds, an old `sops` table stopping the load; the whole SOP quoted with its citation | 49 |
+| `tests/test_sops.py` | [`ingest_sops.py`](docs/ingest_sops.md): the client's SOPs as delivered; header, UTF-8 where cp1252 garbles the title, BOM/CRLF, the GM's email rejected and never printed, duplicate files and revisions, only the highest revision current, steps with line numbers, references to missing documents, personal data flagged, machine links by id, CMMS name and alias; search for real questions and paraphrases (`SYNONYMS`, the `ENTRY_VERBS`/`SPACE_WORDS` entry rule), nothing for welding, "enter a work order" never found as confined-space entry; MySQL's side kept in step: the `FULLTEXT` stop words, the index rebuild order, a primary key on the stopword table, `search_text` and plurals, MySQL-style matching never missing an SOP `search_sops` finds, an old `sops` table stopping the load; the whole SOP quoted with its citation | 63 |
 | `tests/test_relationships.py` | [`relationships.py`](docs/relationships.md): orphan/NULL/`ALL` counting, keys compared like MySQL (case, spaces), when a foreign key is added or skipped, table prefixes, no view exposes `emp_name`, incidents (and the form comparison) only offer `severity_5_worst`, the form comparison on one collation with July left open, machines without a nameplate kept, the ER diagram, the run fingerprint, successful and failed runs recorded in `ingest_runs`; the SOP links (the client's 7 all matching the CMMS, an unknown machine kept as an orphan with the FK off, `sop_doc` enforced by `ingest_sops.py`'s composite key and never given a second FK, earlier revisions ambiguous but never orphans) and `machine_sops` (machines without an SOP kept, current revisions only) | 58 |
 | `tests/test_pipeline.py` | [`pipeline.py`](docs/pipeline.md): step order and flags (images after the CMMS), foreign keys dropped first and re-added last (never in a dry run), sample rows with names kept out of the report, counts from every script's summary, the images folder hashed like the load, a failure stopping the rest, `--keep-going`, Ctrl+C, the report's tables, `--save-log`, `--audit`; the SOP step (after the CMMS and before the linking, its folder hashed like the load, one summary line per SOP with the step table and the rejected email's name kept out) | 40 |
 | `tests/test_agent_user.py` | [`agent_user.py`](docs/agent_user.md): the allow-list never includes employees or raw tables (nor the raw OCR, nor the raw SOP files), the scans' and SOPs' objects granted, objects with `emp_name` refused, missing objects skipped, a refused object told apart as "not created yet" or "exists but not granted", `SELECT`-only grants after a full reset, password never written into SQL or output, bad user/host/database names rejected, MySQL error codes read correctly, errors never include the password, failed steps named with MySQL's message, no statement needing rights over every database, the access check reads no rows; settings with Windows line endings (from the shell or a CRLF `.env`) read without the trailing `\r`, and no settings leak in from your shell or `.env` | 28 |
 | `tests/test_shared.py` | `db_config.py`, `lineage.py`: password never printed, passwords with special characters, values of a failed query kept out of error messages, table-name check, file SHA-256, a run recorded without a file, values passed to MySQL are plain Python types, `getenv` and `load_db_config` strip a trailing `\r` (CRLF `.env`) | 9 |
-| **Total** | | **326** |
+| **Total** | | **423** |
 
 **Not covered:** anything that needs MySQL, i.e. creating tables, views and users,
 the inserts, the one-transaction rollback and the `ingest_runs` record. After
 changing DDL or load code, check with a real load (`--recreate`) and the audit
 queries above; after changing a view in `relationships.py`, run it and query the view;
-for the app user's grants, `agent_user.py --check` is the real test.
+for the app user's grants, `agent_user.py --check` is the real test; for the agent's
+tools, the real-database verification pass in
+[`agent_tools.md`](docs/agent_tools.md#checked-against-the-real-database-5-nov-2026).
 
 ### Reading the output
 
 ```
-tests/test_agent_user.py ............................               [  9%]
-tests/test_cmms.py ...........................                      [ 18%]
-tests/test_images.py ............................................... [ 33%]
-........................................                            [ 46%]
-tests/test_logs.py ..........                                       [ 49%]
-tests/test_pipeline.py ........................................     [ 60%]
-tests/test_relationships.py ..........................................................[ 75%]
-tests/test_shared.py .........                                      [ 78%]
-tests/test_sops.py .................................................[ 94%]
-tests/test_spares.py ..................                             [100%]
-========== 326 passed in 9.80s ==========
+tests/test_agent_tools.py ...................................................... [ 19%]
+.........................                                                        [ 20%]
+tests/test_agent_user.py ............................                            [ 26%]
+tests/test_cmms.py ...........................                                   [ 33%]
+tests/test_images.py ............................................................[ 53%]
+...........................                                                      [ 53%]
+tests/test_logs.py ..........                                                    [ 56%]
+tests/test_pipeline.py ........................................                  [ 65%]
+tests/test_relationships.py ..........................................................[ 79%]
+tests/test_shared.py .........                                                   [ 81%]
+tests/test_sops.py ...................................................................[ 96%]
+..........
+tests/test_spares.py ..................                                         [100%]
+========== 423 passed in 12.3s ==========
 ```
 
 | Mark | Meaning |
@@ -688,16 +718,16 @@ tests/test_spares.py ..................                             [100%]
 | Message | Cause | Fix |
 |---|---|---|
 | `collected 0 items` | pytest isn't running from the repo root, or `tests/` is missing | `cd` to the folder with `pytest.ini`; check `ls tests` |
-| `ModuleNotFoundError: No module named 'ingest_logs'` (or `db_config`, `relationships`) | `pytest.ini` not found, or the scripts aren't in `scripts/` | Run from the repo root; check `pythonpath = scripts` matches the folder name |
-| `ModuleNotFoundError: No module named 'pandas'` (or `openpyxl`, `cv2`, ...) | Virtual environment not active, or requirements not installed | Activate `.venv`, then `pip install -r requirements-dev.txt` |
+| `ModuleNotFoundError: No module named 'ingest_logs'` (or `db_config`, `relationships`, `agent_tools`) | `pytest.ini` not found, or the scripts aren't in `scripts/` | Run from the repo root; check `pythonpath = scripts` matches the folder name |
+| `ModuleNotFoundError: No module named 'pandas'` (or `openpyxl`, `cv2`, `pydantic`, `sqlglot`, ...) | Virtual environment not active, or requirements not installed | Activate `.venv`, then `pip install -r requirements-dev.txt` |
 | `pytest: command not found` | pytest not installed in the active environment | `pip install -r requirements-dev.txt`, or use `python -m pytest` |
 | `Invalid user name: 'agent_ro\r'` (or another value ending in `\r`) | `.env` has Windows line endings and was loaded with `source .env`, so every value in your shell ends in `\r` | Update to the current scripts (they strip it), and fix the file: `sed -i 's/\r$//' .env`, then open a new shell |
 
 ### Adding a test
 
-- Put it in the file for the script it tests (`test_logs.py`, `test_spares.py`, `test_cmms.py`, `test_images.py`, `test_sops.py`, `test_relationships.py`), or `test_shared.py` for `db_config.py` / `lineage.py`.
+- Put it in the file for the script it tests (`test_logs.py`, `test_spares.py`, `test_cmms.py`, `test_images.py`, `test_sops.py`, `test_relationships.py`, `test_agent_tools.py`), or `test_shared.py` for `db_config.py` / `lineage.py`.
 - Name the function `test_...`, otherwise pytest won't find it.
-- Test the cleaning functions directly with a small `DataFrame` (see `test_temperature_units`), or a whole file through `process()` / `prepare()` using the `tmp_path` fixture (see the `lineage_run` and `messy_sheet` fixtures). For the CMMS script, pass a dump as a string to `parse_dump()` and then `process()` (see `test_pipeline_end_to_end`). For the scans, pass OCR text as an `Extraction` to `process()` (see `test_incident_form_end_to_end`); copy the text from `img_documents_raw.ocr_text` when a real scan misreads. For `relationships.py`, pass key counts to `check_relationship()` (see `test_check_counts_matched_null_and_orphans`). For an SOP question that finds the wrong SOP or none, add it to the search tests in `test_sops.py`, with a `SYNONYMS` entry if it's a paraphrase.
+- Test the cleaning functions directly with a small `DataFrame` (see `test_temperature_units`), or a whole file through `process()` / `prepare()` using the `tmp_path` fixture (see the `lineage_run` and `messy_sheet` fixtures). For the CMMS script, pass a dump as a string to `parse_dump()` and then `process()` (see `test_pipeline_end_to_end`). For the scans, pass OCR text as an `Extraction` to `process()` (see `test_incident_form_end_to_end`); copy the text from `img_documents_raw.ocr_text` when a real scan misreads. For `relationships.py`, pass key counts to `check_relationship()` (see `test_check_counts_matched_null_and_orphans`). For an SOP question that finds the wrong SOP or none, add it to the search tests in `test_sops.py`, with a `SYNONYMS` entry (or an `ENTRY_VERBS`/`SPACE_WORDS` case) if it's a paraphrase. For a tool that answers wrong on a real call, add that exact question and arguments to `test_agent_tools.py` using the SQLite fixture, with a comment pointing at the real-data check that found it.
 - When you find a new problem in the client's data, add a test with that exact value **before** fixing the code. It fails first, then passes with the fix, and it keeps the problem from coming back. The harness checklist asks for this pattern in your git history.
 
 ## Rules worth knowing
@@ -721,7 +751,10 @@ confirms the switch-over day; then re-run `ingest_cmms.py` with
 `--severity-cutover <date> --severity-ambiguous-until none`. See
 [`ingest_cmms.md`](docs/ingest_cmms.md). Scanned forms print their own scale;
 `img_incident_reports.severity_5_worst` uses it, and `incident_report_vs_cmms` shows
-where form and CMMS disagree ([`ingest_images.md`](docs/ingest_images.md)).
+where form and CMMS disagree ([`ingest_images.md`](docs/ingest_images.md)). The agent's
+`count_incidents` / `list_incidents` tools enforce the same rule in code: a severity
+number must come with the scale it's on, or the tool asks rather than assumes
+([`agent_tools.md`](docs/agent_tools.md)).
 
 **Scans:** cite the image file (`img_*_audit.source_file`), and treat a value flagged
 `ocr_disagreed_*` as read from a poor photo. A severity flagged
@@ -732,7 +765,8 @@ answer from model memory.
 **SOPs:** find the SOP with `MATCH (search_text) AGAINST (search_terms(question))`, decide
 with `search_sops` (no match = "no SOP in the data covers this"), and quote the whole SOP
 from `sop_steps_audit` with its revision and line numbers, never one step on its own. See
-[`ingest_sops.md`](docs/ingest_sops.md#answering-from-the-sops).
+[`ingest_sops.md`](docs/ingest_sops.md#answering-from-the-sops). The agent's `find_sop` tool
+is the one path the app uses to answer this; see [The agent's tools](#the-agents-tools).
 
 **Employee names (PDPA):** `emp_name` stays in `cmms_employees`. None of the linking
 views select it; they give `emp_code`, trade and shift only. The app connects as the

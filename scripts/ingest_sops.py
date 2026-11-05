@@ -455,15 +455,37 @@ SYNONYMS = {
     "de-energize": "lockout",
     "de-energising": "lockout",
     "de-energizing": "lockout",
+    "blast chamber": "blasting chamber",     # 'going into the blast chamber' (5 Nov 2026)
 }
+
+# Going into a space is what SOP-CONFINED-03 calls "entry" ("CONFINED SPACE ENTRY"). A verb
+# alone isn't enough: "enter a work order" or "what's going into the report" must not find
+# the confined-space SOP, so expand_question adds "entry" only when the question also names
+# a kind of space. On the real data (5 Nov 2026) the client's own question, "before entering
+# the blasting chamber", scored exactly MIN_SCORE (2.0: 'entering' never matched 'entry'), and
+# "going into the blast chamber" found nothing. A judgement, like SYNONYMS: add a word with
+# its question as a test in test_sops.py.
+ENTRY_VERBS = ("enter", "enters", "entering", "go in", "go into", "going into", "go inside",
+               "going inside", "get into", "getting into", "get inside", "climb into",
+               "climbing into", "step into", "stepping into", "work inside", "working inside")
+SPACE_WORDS = ("chamber", "booth", "tank", "sump", "pit", "vessel", "hold", "space", "room",
+               "enclosure", "duct", "silo", "hatch", "manhole")
+
+
+def _has(low: str, phrase: str, plural: bool = False):
+    """`phrase` as whole words in `low` (a trailing 's' allowed when plural)."""
+    return re.search(rf"(?<![\w-]){re.escape(phrase)}{'s?' if plural else ''}(?![\w-])", low)
 
 
 def expand_question(question: str) -> str:
     """The question plus the SOP words for any SYNONYMS phrase in it (whole words only:
-    'isolated' is not 'isolate'). Pass the result to MATCH ... AGAINST too."""
+    'isolated' is not 'isolate'), and 'entry' when it has a verb of going into a space AND
+    names a space (ENTRY_VERBS, SPACE_WORDS). Pass the result to MATCH ... AGAINST too."""
     low = question.lower()
-    extra = [w for phrase, w in SYNONYMS.items()
-             if re.search(rf"(?<![\w-]){re.escape(phrase)}(?![\w-])", low)]
+    extra = [w for phrase, w in SYNONYMS.items() if _has(low, phrase)]
+    if any(_has(low, v) for v in ENTRY_VERBS) and \
+            any(_has(low, w, plural=True) for w in SPACE_WORDS):
+        extra.append("entry")
     return " ".join([question] + list(dict.fromkeys(extra)))
 
 

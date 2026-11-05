@@ -1,0 +1,1388 @@
+{
+  "tool": "compare_sensor_windows",
+  "ok": true,
+  "data": {
+    "machine_id": "CNC-02",
+    "verdict": "machine_specific",
+    "elevated_metrics": [
+      "vib",
+      "temp"
+    ],
+    "other_machines_elevated": [],
+    "rule": "A metric is 'elevated' when the recent window's mean is at least 3 standard deviations (of the baseline's daily means) above the baseline mean, and the rise is at least 10% for vibration or 2 °C for temperature. The other sensored machines are compared over the same windows, to tell a machine problem from a shop-wide change.",
+    "baseline": {
+      "from": "2026-01-01",
+      "to": "2026-03-31"
+    },
+    "recent": {
+      "from": "2026-06-01",
+      "to": "2026-06-30"
+    },
+    "target": {
+      "vib": {
+        "baseline_mean": 2.3,
+        "baseline_daily_sd": 0.032,
+        "recent_mean": 4.41,
+        "change": 2.11,
+        "change_pct": 91.4,
+        "change_in_sd": 66.3,
+        "baseline_days": 90,
+        "recent_days": 30,
+        "elevated": true
+      },
+      "temp": {
+        "baseline_mean": 51.93,
+        "baseline_daily_sd": 0.499,
+        "recent_mean": 55.97,
+        "change": 4.04,
+        "change_pct": 7.8,
+        "change_in_sd": 8.1,
+        "baseline_days": 90,
+        "recent_days": 30,
+        "elevated": true
+      }
+    },
+    "others": {
+      "CMP-01": {
+        "vib": {
+          "baseline_mean": 3.4,
+          "baseline_daily_sd": 0.034,
+          "recent_mean": 3.4,
+          "change": 0.0,
+          "change_pct": 0.0,
+          "change_in_sd": 0.0,
+          "baseline_days": 90,
+          "recent_days": 30,
+          "elevated": false
+        },
+        "temp": {
+          "baseline_mean": 52.0,
+          "baseline_daily_sd": 0.628,
+          "recent_mean": 51.93,
+          "change": -0.06,
+          "change_pct": -0.1,
+          "change_in_sd": -0.1,
+          "baseline_days": 90,
+          "recent_days": 30,
+          "elevated": false
+        }
+      },
+      "CNC-01": {
+        "vib": {
+          "baseline_mean": 2.1,
+          "baseline_daily_sd": 0.032,
+          "recent_mean": 2.09,
+          "change": -0.01,
+          "change_pct": -0.6,
+          "change_in_sd": -0.4,
+          "baseline_days": 90,
+          "recent_days": 30,
+          "elevated": false
+        },
+        "temp": {
+          "baseline_mean": 52.13,
+          "baseline_daily_sd": 0.579,
+          "recent_mean": 51.98,
+          "change": -0.15,
+          "change_pct": -0.3,
+          "change_in_sd": -0.3,
+          "baseline_days": 90,
+          "recent_days": 30,
+          "elevated": false
+        }
+      },
+      "CNC-03": {
+        "vib": {
+          "baseline_mean": 1.8,
+          "baseline_daily_sd": 0.027,
+          "recent_mean": 1.79,
+          "change": -0.01,
+          "change_pct": -0.5,
+          "change_in_sd": -0.3,
+          "baseline_days": 90,
+          "recent_days": 30,
+          "elevated": false
+        },
+        "temp": {
+          "baseline_mean": 51.93,
+          "baseline_daily_sd": 0.578,
+          "recent_mean": 51.78,
+          "change": -0.15,
+          "change_pct": -0.3,
+          "change_in_sd": -0.3,
+          "baseline_days": 90,
+          "recent_days": 30,
+          "elevated": false
+        }
+      },
+      "PMP-T01": {
+        "vib": {
+          "baseline_mean": 2.9,
+          "baseline_daily_sd": 0.031,
+          "recent_mean": 2.89,
+          "change": -0.01,
+          "change_pct": -0.4,
+          "change_in_sd": -0.3,
+          "baseline_days": 90,
+          "recent_days": 30,
+          "elevated": false
+        },
+        "temp": {
+          "baseline_mean": 51.91,
+          "baseline_daily_sd": 0.595,
+          "recent_mean": 52.11,
+          "change": 0.2,
+          "change_pct": 0.4,
+          "change_in_sd": 0.3,
+          "baseline_days": 90,
+          "recent_days": 30,
+          "elevated": false
+        }
+      }
+    },
+    "chart_weekly": [
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2025-12-29 00:00:00",
+        "vib_mean": 3.41,
+        "temp_mean": 51.92,
+        "days": 4,
+        "coverage_pct": 98.3
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-01-05 00:00:00",
+        "vib_mean": 3.42,
+        "temp_mean": 51.91,
+        "days": 7,
+        "coverage_pct": 98.0
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-01-12 00:00:00",
+        "vib_mean": 3.4,
+        "temp_mean": 52.16,
+        "days": 7,
+        "coverage_pct": 98.1
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-01-19 00:00:00",
+        "vib_mean": 3.37,
+        "temp_mean": 52.13,
+        "days": 7,
+        "coverage_pct": 97.3
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-01-26 00:00:00",
+        "vib_mean": 3.41,
+        "temp_mean": 51.59,
+        "days": 7,
+        "coverage_pct": 98.2
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-02-02 00:00:00",
+        "vib_mean": 3.41,
+        "temp_mean": 52.42,
+        "days": 7,
+        "coverage_pct": 97.5
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-02-09 00:00:00",
+        "vib_mean": 3.39,
+        "temp_mean": 51.75,
+        "days": 7,
+        "coverage_pct": 97.5
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-02-16 00:00:00",
+        "vib_mean": 3.38,
+        "temp_mean": 51.42,
+        "days": 7,
+        "coverage_pct": 98.7
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-02-23 00:00:00",
+        "vib_mean": 3.4,
+        "temp_mean": 52.22,
+        "days": 7,
+        "coverage_pct": 97.9
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-03-02 00:00:00",
+        "vib_mean": 3.42,
+        "temp_mean": 52.12,
+        "days": 7,
+        "coverage_pct": 97.6
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-03-09 00:00:00",
+        "vib_mean": 3.39,
+        "temp_mean": 52.13,
+        "days": 7,
+        "coverage_pct": 97.6
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-03-16 00:00:00",
+        "vib_mean": 3.39,
+        "temp_mean": 52.1,
+        "days": 7,
+        "coverage_pct": 97.6
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-03-23 00:00:00",
+        "vib_mean": 3.4,
+        "temp_mean": 52.05,
+        "days": 7,
+        "coverage_pct": 97.6
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-03-30 00:00:00",
+        "vib_mean": 3.43,
+        "temp_mean": 52.16,
+        "days": 7,
+        "coverage_pct": 97.6
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-04-06 00:00:00",
+        "vib_mean": 3.4,
+        "temp_mean": 51.88,
+        "days": 7,
+        "coverage_pct": 98.5
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-04-13 00:00:00",
+        "vib_mean": 3.38,
+        "temp_mean": 52.11,
+        "days": 7,
+        "coverage_pct": 98.5
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-04-20 00:00:00",
+        "vib_mean": 3.41,
+        "temp_mean": 51.71,
+        "days": 7,
+        "coverage_pct": 98.5
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-04-27 00:00:00",
+        "vib_mean": 3.4,
+        "temp_mean": 52.09,
+        "days": 7,
+        "coverage_pct": 98.3
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-05-04 00:00:00",
+        "vib_mean": 3.39,
+        "temp_mean": 51.96,
+        "days": 7,
+        "coverage_pct": 97.7
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-05-11 00:00:00",
+        "vib_mean": 3.38,
+        "temp_mean": 51.73,
+        "days": 7,
+        "coverage_pct": 98.9
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-05-18 00:00:00",
+        "vib_mean": 3.38,
+        "temp_mean": 52.04,
+        "days": 7,
+        "coverage_pct": 98.8
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-05-25 00:00:00",
+        "vib_mean": 3.39,
+        "temp_mean": 51.91,
+        "days": 7,
+        "coverage_pct": 97.4
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-06-01 00:00:00",
+        "vib_mean": 3.39,
+        "temp_mean": 52.16,
+        "days": 7,
+        "coverage_pct": 98.8
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-06-08 00:00:00",
+        "vib_mean": 3.41,
+        "temp_mean": 51.56,
+        "days": 7,
+        "coverage_pct": 97.1
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-06-15 00:00:00",
+        "vib_mean": 3.38,
+        "temp_mean": 51.74,
+        "days": 7,
+        "coverage_pct": 97.3
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-06-22 00:00:00",
+        "vib_mean": 3.4,
+        "temp_mean": 52.27,
+        "days": 7,
+        "coverage_pct": 97.5
+      },
+      {
+        "machine_id": "CMP-01",
+        "week_start": "2026-06-29 00:00:00",
+        "vib_mean": 3.43,
+        "temp_mean": 51.94,
+        "days": 2,
+        "coverage_pct": 98.8
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2025-12-29 00:00:00",
+        "vib_mean": 2.07,
+        "temp_mean": 52.38,
+        "days": 4,
+        "coverage_pct": 97.9
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-01-05 00:00:00",
+        "vib_mean": 2.09,
+        "temp_mean": 51.92,
+        "days": 7,
+        "coverage_pct": 97.4
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-01-12 00:00:00",
+        "vib_mean": 2.1,
+        "temp_mean": 52.3,
+        "days": 7,
+        "coverage_pct": 97.6
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-01-19 00:00:00",
+        "vib_mean": 2.09,
+        "temp_mean": 52.35,
+        "days": 7,
+        "coverage_pct": 98.6
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-01-26 00:00:00",
+        "vib_mean": 2.11,
+        "temp_mean": 51.75,
+        "days": 7,
+        "coverage_pct": 97.6
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-02-02 00:00:00",
+        "vib_mean": 2.11,
+        "temp_mean": 52.27,
+        "days": 7,
+        "coverage_pct": 98.0
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-02-09 00:00:00",
+        "vib_mean": 2.11,
+        "temp_mean": 51.96,
+        "days": 7,
+        "coverage_pct": 98.3
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-02-16 00:00:00",
+        "vib_mean": 2.11,
+        "temp_mean": 51.91,
+        "days": 7,
+        "coverage_pct": 97.5
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-02-23 00:00:00",
+        "vib_mean": 2.1,
+        "temp_mean": 51.78,
+        "days": 7,
+        "coverage_pct": 98.0
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-03-02 00:00:00",
+        "vib_mean": 2.11,
+        "temp_mean": 51.99,
+        "days": 7,
+        "coverage_pct": 98.3
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-03-09 00:00:00",
+        "vib_mean": 2.09,
+        "temp_mean": 52.54,
+        "days": 7,
+        "coverage_pct": 97.7
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-03-16 00:00:00",
+        "vib_mean": 2.07,
+        "temp_mean": 52.3,
+        "days": 7,
+        "coverage_pct": 98.0
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-03-23 00:00:00",
+        "vib_mean": 2.09,
+        "temp_mean": 52.24,
+        "days": 7,
+        "coverage_pct": 97.4
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-03-30 00:00:00",
+        "vib_mean": 2.1,
+        "temp_mean": 52.36,
+        "days": 7,
+        "coverage_pct": 97.1
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-04-06 00:00:00",
+        "vib_mean": 2.13,
+        "temp_mean": 52.01,
+        "days": 7,
+        "coverage_pct": 97.7
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-04-13 00:00:00",
+        "vib_mean": 2.1,
+        "temp_mean": 51.91,
+        "days": 7,
+        "coverage_pct": 97.9
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-04-20 00:00:00",
+        "vib_mean": 2.08,
+        "temp_mean": 51.85,
+        "days": 7,
+        "coverage_pct": 97.5
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-04-27 00:00:00",
+        "vib_mean": 2.1,
+        "temp_mean": 51.78,
+        "days": 7,
+        "coverage_pct": 98.5
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-05-04 00:00:00",
+        "vib_mean": 2.1,
+        "temp_mean": 52.14,
+        "days": 7,
+        "coverage_pct": 97.9
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-05-11 00:00:00",
+        "vib_mean": 2.09,
+        "temp_mean": 52.05,
+        "days": 7,
+        "coverage_pct": 97.9
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-05-18 00:00:00",
+        "vib_mean": 2.1,
+        "temp_mean": 51.98,
+        "days": 7,
+        "coverage_pct": 98.0
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-05-25 00:00:00",
+        "vib_mean": 2.11,
+        "temp_mean": 52.1,
+        "days": 7,
+        "coverage_pct": 98.6
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-06-01 00:00:00",
+        "vib_mean": 2.07,
+        "temp_mean": 52.08,
+        "days": 7,
+        "coverage_pct": 98.0
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-06-08 00:00:00",
+        "vib_mean": 2.08,
+        "temp_mean": 51.72,
+        "days": 7,
+        "coverage_pct": 98.2
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-06-15 00:00:00",
+        "vib_mean": 2.1,
+        "temp_mean": 52.04,
+        "days": 7,
+        "coverage_pct": 98.1
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-06-22 00:00:00",
+        "vib_mean": 2.09,
+        "temp_mean": 52.02,
+        "days": 7,
+        "coverage_pct": 98.3
+      },
+      {
+        "machine_id": "CNC-01",
+        "week_start": "2026-06-29 00:00:00",
+        "vib_mean": 2.1,
+        "temp_mean": 52.22,
+        "days": 2,
+        "coverage_pct": 97.9
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2025-12-29 00:00:00",
+        "vib_mean": 2.32,
+        "temp_mean": 52.04,
+        "days": 4,
+        "coverage_pct": 98.8
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-01-05 00:00:00",
+        "vib_mean": 2.31,
+        "temp_mean": 51.85,
+        "days": 7,
+        "coverage_pct": 97.5
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-01-12 00:00:00",
+        "vib_mean": 2.3,
+        "temp_mean": 51.8,
+        "days": 7,
+        "coverage_pct": 98.6
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-01-19 00:00:00",
+        "vib_mean": 2.3,
+        "temp_mean": 52.18,
+        "days": 7,
+        "coverage_pct": 97.9
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-01-26 00:00:00",
+        "vib_mean": 2.29,
+        "temp_mean": 51.88,
+        "days": 7,
+        "coverage_pct": 98.3
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-02-02 00:00:00",
+        "vib_mean": 2.29,
+        "temp_mean": 51.7,
+        "days": 7,
+        "coverage_pct": 98.1
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-02-09 00:00:00",
+        "vib_mean": 2.3,
+        "temp_mean": 51.93,
+        "days": 7,
+        "coverage_pct": 97.4
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-02-16 00:00:00",
+        "vib_mean": 2.31,
+        "temp_mean": 51.94,
+        "days": 7,
+        "coverage_pct": 98.0
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-02-23 00:00:00",
+        "vib_mean": 2.31,
+        "temp_mean": 51.96,
+        "days": 7,
+        "coverage_pct": 98.2
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-03-02 00:00:00",
+        "vib_mean": 2.31,
+        "temp_mean": 51.84,
+        "days": 7,
+        "coverage_pct": 97.9
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-03-09 00:00:00",
+        "vib_mean": 2.31,
+        "temp_mean": 51.99,
+        "days": 7,
+        "coverage_pct": 97.6
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-03-16 00:00:00",
+        "vib_mean": 2.31,
+        "temp_mean": 51.92,
+        "days": 7,
+        "coverage_pct": 97.1
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-03-23 00:00:00",
+        "vib_mean": 2.32,
+        "temp_mean": 52.08,
+        "days": 7,
+        "coverage_pct": 98.1
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-03-30 00:00:00",
+        "vib_mean": 2.36,
+        "temp_mean": 51.98,
+        "days": 7,
+        "coverage_pct": 98.2
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-04-06 00:00:00",
+        "vib_mean": 2.54,
+        "temp_mean": 52.49,
+        "days": 7,
+        "coverage_pct": 98.0
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-04-13 00:00:00",
+        "vib_mean": 2.73,
+        "temp_mean": 52.4,
+        "days": 7,
+        "coverage_pct": 98.3
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-04-20 00:00:00",
+        "vib_mean": 2.91,
+        "temp_mean": 53.27,
+        "days": 7,
+        "coverage_pct": 98.6
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-04-27 00:00:00",
+        "vib_mean": 3.1,
+        "temp_mean": 53.35,
+        "days": 7,
+        "coverage_pct": 97.1
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-05-04 00:00:00",
+        "vib_mean": 3.31,
+        "temp_mean": 53.81,
+        "days": 7,
+        "coverage_pct": 98.7
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-05-11 00:00:00",
+        "vib_mean": 3.5,
+        "temp_mean": 54.5,
+        "days": 7,
+        "coverage_pct": 98.2
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-05-18 00:00:00",
+        "vib_mean": 3.69,
+        "temp_mean": 54.6,
+        "days": 7,
+        "coverage_pct": 97.9
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-05-25 00:00:00",
+        "vib_mean": 3.93,
+        "temp_mean": 54.99,
+        "days": 7,
+        "coverage_pct": 97.7
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-06-01 00:00:00",
+        "vib_mean": 4.09,
+        "temp_mean": 55.48,
+        "days": 7,
+        "coverage_pct": 98.1
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-06-08 00:00:00",
+        "vib_mean": 4.28,
+        "temp_mean": 55.7,
+        "days": 7,
+        "coverage_pct": 97.9
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-06-15 00:00:00",
+        "vib_mean": 4.48,
+        "temp_mean": 56.1,
+        "days": 7,
+        "coverage_pct": 98.3
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-06-22 00:00:00",
+        "vib_mean": 4.68,
+        "temp_mean": 56.3,
+        "days": 7,
+        "coverage_pct": 98.6
+      },
+      {
+        "machine_id": "CNC-02",
+        "week_start": "2026-06-29 00:00:00",
+        "vib_mean": 4.79,
+        "temp_mean": 57.04,
+        "days": 2,
+        "coverage_pct": 97.9
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2025-12-29 00:00:00",
+        "vib_mean": 1.79,
+        "temp_mean": 52.15,
+        "days": 4,
+        "coverage_pct": 97.7
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-01-05 00:00:00",
+        "vib_mean": 1.8,
+        "temp_mean": 51.89,
+        "days": 7,
+        "coverage_pct": 97.5
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-01-12 00:00:00",
+        "vib_mean": 1.81,
+        "temp_mean": 52.0,
+        "days": 7,
+        "coverage_pct": 97.7
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-01-19 00:00:00",
+        "vib_mean": 1.81,
+        "temp_mean": 51.88,
+        "days": 7,
+        "coverage_pct": 98.3
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-01-26 00:00:00",
+        "vib_mean": 1.8,
+        "temp_mean": 51.88,
+        "days": 7,
+        "coverage_pct": 97.7
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-02-02 00:00:00",
+        "vib_mean": 1.8,
+        "temp_mean": 52.16,
+        "days": 7,
+        "coverage_pct": 97.4
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-02-09 00:00:00",
+        "vib_mean": 1.81,
+        "temp_mean": 52.22,
+        "days": 7,
+        "coverage_pct": 98.2
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-02-16 00:00:00",
+        "vib_mean": 1.78,
+        "temp_mean": 51.87,
+        "days": 7,
+        "coverage_pct": 97.9
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-02-23 00:00:00",
+        "vib_mean": 1.78,
+        "temp_mean": 51.98,
+        "days": 7,
+        "coverage_pct": 98.7
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-03-02 00:00:00",
+        "vib_mean": 1.78,
+        "temp_mean": 51.85,
+        "days": 7,
+        "coverage_pct": 97.9
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-03-09 00:00:00",
+        "vib_mean": 1.8,
+        "temp_mean": 51.74,
+        "days": 7,
+        "coverage_pct": 98.2
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-03-16 00:00:00",
+        "vib_mean": 1.78,
+        "temp_mean": 52.02,
+        "days": 7,
+        "coverage_pct": 97.5
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-03-23 00:00:00",
+        "vib_mean": 1.81,
+        "temp_mean": 51.57,
+        "days": 7,
+        "coverage_pct": 98.2
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-03-30 00:00:00",
+        "vib_mean": 1.8,
+        "temp_mean": 51.8,
+        "days": 7,
+        "coverage_pct": 98.0
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-04-06 00:00:00",
+        "vib_mean": 1.8,
+        "temp_mean": 51.82,
+        "days": 7,
+        "coverage_pct": 98.1
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-04-13 00:00:00",
+        "vib_mean": 1.79,
+        "temp_mean": 52.0,
+        "days": 7,
+        "coverage_pct": 98.2
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-04-20 00:00:00",
+        "vib_mean": 1.81,
+        "temp_mean": 52.12,
+        "days": 7,
+        "coverage_pct": 98.0
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-04-27 00:00:00",
+        "vib_mean": 1.8,
+        "temp_mean": 51.94,
+        "days": 7,
+        "coverage_pct": 98.9
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-05-04 00:00:00",
+        "vib_mean": 1.8,
+        "temp_mean": 52.09,
+        "days": 7,
+        "coverage_pct": 97.6
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-05-11 00:00:00",
+        "vib_mean": 1.8,
+        "temp_mean": 51.93,
+        "days": 7,
+        "coverage_pct": 97.7
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-05-18 00:00:00",
+        "vib_mean": 1.81,
+        "temp_mean": 51.71,
+        "days": 7,
+        "coverage_pct": 98.3
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-05-25 00:00:00",
+        "vib_mean": 1.79,
+        "temp_mean": 51.95,
+        "days": 7,
+        "coverage_pct": 97.9
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-06-01 00:00:00",
+        "vib_mean": 1.78,
+        "temp_mean": 51.92,
+        "days": 7,
+        "coverage_pct": 97.6
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-06-08 00:00:00",
+        "vib_mean": 1.77,
+        "temp_mean": 51.65,
+        "days": 7,
+        "coverage_pct": 97.9
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-06-15 00:00:00",
+        "vib_mean": 1.81,
+        "temp_mean": 51.97,
+        "days": 7,
+        "coverage_pct": 98.1
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-06-22 00:00:00",
+        "vib_mean": 1.8,
+        "temp_mean": 51.66,
+        "days": 7,
+        "coverage_pct": 98.1
+      },
+      {
+        "machine_id": "CNC-03",
+        "week_start": "2026-06-29 00:00:00",
+        "vib_mean": 1.78,
+        "temp_mean": 51.51,
+        "days": 2,
+        "coverage_pct": 99.6
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2025-12-29 00:00:00",
+        "vib_mean": 2.91,
+        "temp_mean": 52.11,
+        "days": 4,
+        "coverage_pct": 98.3
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-01-05 00:00:00",
+        "vib_mean": 2.9,
+        "temp_mean": 52.01,
+        "days": 7,
+        "coverage_pct": 98.3
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-01-12 00:00:00",
+        "vib_mean": 2.92,
+        "temp_mean": 51.98,
+        "days": 7,
+        "coverage_pct": 97.7
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-01-19 00:00:00",
+        "vib_mean": 2.91,
+        "temp_mean": 51.88,
+        "days": 7,
+        "coverage_pct": 98.1
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-01-26 00:00:00",
+        "vib_mean": 2.9,
+        "temp_mean": 52.15,
+        "days": 7,
+        "coverage_pct": 98.0
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-02-02 00:00:00",
+        "vib_mean": 2.89,
+        "temp_mean": 52.04,
+        "days": 7,
+        "coverage_pct": 98.5
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-02-09 00:00:00",
+        "vib_mean": 2.89,
+        "temp_mean": 51.88,
+        "days": 7,
+        "coverage_pct": 97.4
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-02-16 00:00:00",
+        "vib_mean": 2.91,
+        "temp_mean": 51.94,
+        "days": 7,
+        "coverage_pct": 96.5
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-02-23 00:00:00",
+        "vib_mean": 2.87,
+        "temp_mean": 52.09,
+        "days": 7,
+        "coverage_pct": 98.3
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-03-02 00:00:00",
+        "vib_mean": 2.9,
+        "temp_mean": 52.0,
+        "days": 7,
+        "coverage_pct": 97.7
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-03-09 00:00:00",
+        "vib_mean": 2.92,
+        "temp_mean": 51.69,
+        "days": 7,
+        "coverage_pct": 97.6
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-03-16 00:00:00",
+        "vib_mean": 2.91,
+        "temp_mean": 51.64,
+        "days": 7,
+        "coverage_pct": 97.7
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-03-23 00:00:00",
+        "vib_mean": 2.89,
+        "temp_mean": 51.58,
+        "days": 7,
+        "coverage_pct": 98.3
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-03-30 00:00:00",
+        "vib_mean": 2.91,
+        "temp_mean": 52.03,
+        "days": 7,
+        "coverage_pct": 98.1
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-04-06 00:00:00",
+        "vib_mean": 2.9,
+        "temp_mean": 51.74,
+        "days": 7,
+        "coverage_pct": 98.6
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-04-13 00:00:00",
+        "vib_mean": 2.9,
+        "temp_mean": 51.87,
+        "days": 7,
+        "coverage_pct": 97.6
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-04-20 00:00:00",
+        "vib_mean": 2.89,
+        "temp_mean": 51.84,
+        "days": 7,
+        "coverage_pct": 97.7
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-04-27 00:00:00",
+        "vib_mean": 2.9,
+        "temp_mean": 52.39,
+        "days": 7,
+        "coverage_pct": 98.1
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-05-04 00:00:00",
+        "vib_mean": 2.91,
+        "temp_mean": 51.89,
+        "days": 7,
+        "coverage_pct": 97.9
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-05-11 00:00:00",
+        "vib_mean": 2.9,
+        "temp_mean": 51.97,
+        "days": 7,
+        "coverage_pct": 97.6
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-05-18 00:00:00",
+        "vib_mean": 2.9,
+        "temp_mean": 52.02,
+        "days": 7,
+        "coverage_pct": 97.9
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-05-25 00:00:00",
+        "vib_mean": 2.9,
+        "temp_mean": 51.8,
+        "days": 7,
+        "coverage_pct": 98.6
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-06-01 00:00:00",
+        "vib_mean": 2.89,
+        "temp_mean": 51.95,
+        "days": 7,
+        "coverage_pct": 98.6
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-06-08 00:00:00",
+        "vib_mean": 2.91,
+        "temp_mean": 52.14,
+        "days": 7,
+        "coverage_pct": 97.5
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-06-15 00:00:00",
+        "vib_mean": 2.86,
+        "temp_mean": 52.05,
+        "days": 7,
+        "coverage_pct": 97.5
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-06-22 00:00:00",
+        "vib_mean": 2.89,
+        "temp_mean": 52.44,
+        "days": 7,
+        "coverage_pct": 97.7
+      },
+      {
+        "machine_id": "PMP-T01",
+        "week_start": "2026-06-29 00:00:00",
+        "vib_mean": 2.92,
+        "temp_mean": 51.64,
+        "days": 2,
+        "coverage_pct": 96.7
+      }
+    ]
+  },
+  "sources": [
+    {
+      "kind": "file",
+      "object": "vibration_temp_audit",
+      "file": "vibration_temp_2026H1.csv",
+      "locator": "21276 readings, lines 5-106384",
+      "sha256": "05c18527593e5d5dc4bd0b3d17b6ef8c67b7987b30d50efa77bebbe3bc6bd023",
+      "what": "CMP-01 sensor log",
+      "label": "CMP-01 sensor log: vibration_temp_2026H1.csv, 21276 readings, lines 5-106384 (vibration_temp_audit), SHA-256 05c18527593e…"
+    },
+    {
+      "kind": "file",
+      "object": "vibration_temp_audit",
+      "file": "vibration_temp_2026H1.csv",
+      "locator": "21268 readings, lines 2-106381",
+      "sha256": "05c18527593e5d5dc4bd0b3d17b6ef8c67b7987b30d50efa77bebbe3bc6bd023",
+      "what": "CNC-01 sensor log",
+      "label": "CNC-01 sensor log: vibration_temp_2026H1.csv, 21268 readings, lines 2-106381 (vibration_temp_audit), SHA-256 05c18527593e…"
+    },
+    {
+      "kind": "file",
+      "object": "vibration_temp_audit",
+      "file": "vibration_temp_2026H1.csv",
+      "locator": "21291 readings, lines 3-106382",
+      "sha256": "05c18527593e5d5dc4bd0b3d17b6ef8c67b7987b30d50efa77bebbe3bc6bd023",
+      "what": "CNC-02 sensor log",
+      "label": "CNC-02 sensor log: vibration_temp_2026H1.csv, 21291 readings, lines 3-106382 (vibration_temp_audit), SHA-256 05c18527593e…"
+    },
+    {
+      "kind": "file",
+      "object": "vibration_temp_audit",
+      "file": "vibration_temp_2026H1.csv",
+      "locator": "21285 readings, lines 4-106383",
+      "sha256": "05c18527593e5d5dc4bd0b3d17b6ef8c67b7987b30d50efa77bebbe3bc6bd023",
+      "what": "CNC-03 sensor log",
+      "label": "CNC-03 sensor log: vibration_temp_2026H1.csv, 21285 readings, lines 4-106383 (vibration_temp_audit), SHA-256 05c18527593e…"
+    },
+    {
+      "kind": "file",
+      "object": "vibration_temp_audit",
+      "file": "vibration_temp_2026H1.csv",
+      "locator": "21264 readings, lines 6-106385",
+      "sha256": "05c18527593e5d5dc4bd0b3d17b6ef8c67b7987b30d50efa77bebbe3bc6bd023",
+      "what": "PMP-T01 sensor log",
+      "label": "PMP-T01 sensor log: vibration_temp_2026H1.csv, 21264 readings, lines 6-106385 (vibration_temp_audit), SHA-256 05c18527593e…"
+    }
+  ],
+  "notes": [
+    "Vibration is RMS in mm/s; temperature in °C (Fahrenheit readings were converted at ingest, trap list L2).",
+    "Single readings are noisy (about ±6 °C reading to reading): use the means, not one reading (trap list L6).",
+    "In chart_weekly, a week with days < 7 is partial (the data starts on a Thursday, 1 Jan 2026): plot it, but don't read it as a full week."
+  ],
+  "error": null,
+  "ms": 990,
+  "queries": [
+    {
+      "sql": "SELECT machine_id, machine_name, model, sensor_readings, first_reading, last_reading FROM machine_overview ORDER BY machine_id",
+      "params": {},
+      "rows": 12,
+      "ms": 356
+    },
+    {
+      "sql": "SELECT DATE(sampled_at) AS day, COUNT(*) AS readings, AVG(vib_rms_mms) AS vib_mean, MAX(vib_rms_mms) AS vib_max, AVG(temp_c) AS temp_mean, MAX(temp_c) AS temp_max FROM vibration_temp_audit WHERE machine_id = :m AND sampled_at >= :a AND sampled_at < :b GROUP BY DATE(sampled_at) ORDER BY day",
+      "params": {
+        "m": "CMP-01",
+        "a": "2026-01-01 00:00:00",
+        "b": "2026-07-01 00:00:00"
+      },
+      "rows": 181,
+      "ms": 102
+    },
+    {
+      "sql": "SELECT source_file, file_sha256, COUNT(*) AS readings, MIN(source_line) AS first_line, MAX(source_line) AS last_line FROM vibration_temp_audit WHERE machine_id = :m AND sampled_at >= :a AND sampled_at < :b GROUP BY source_file, file_sha256",
+      "params": {
+        "m": "CMP-01",
+        "a": "2026-01-01 00:00:00",
+        "b": "2026-07-01 00:00:00"
+      },
+      "rows": 1,
+      "ms": 86
+    },
+    {
+      "sql": "SELECT DATE(sampled_at) AS day, COUNT(*) AS readings, AVG(vib_rms_mms) AS vib_mean, MAX(vib_rms_mms) AS vib_max, AVG(temp_c) AS temp_mean, MAX(temp_c) AS temp_max FROM vibration_temp_audit WHERE machine_id = :m AND sampled_at >= :a AND sampled_at < :b GROUP BY DATE(sampled_at) ORDER BY day",
+      "params": {
+        "m": "CNC-01",
+        "a": "2026-01-01 00:00:00",
+        "b": "2026-07-01 00:00:00"
+      },
+      "rows": 181,
+      "ms": 50
+    },
+    {
+      "sql": "SELECT source_file, file_sha256, COUNT(*) AS readings, MIN(source_line) AS first_line, MAX(source_line) AS last_line FROM vibration_temp_audit WHERE machine_id = :m AND sampled_at >= :a AND sampled_at < :b GROUP BY source_file, file_sha256",
+      "params": {
+        "m": "CNC-01",
+        "a": "2026-01-01 00:00:00",
+        "b": "2026-07-01 00:00:00"
+      },
+      "rows": 1,
+      "ms": 49
+    },
+    {
+      "sql": "SELECT DATE(sampled_at) AS day, COUNT(*) AS readings, AVG(vib_rms_mms) AS vib_mean, MAX(vib_rms_mms) AS vib_max, AVG(temp_c) AS temp_mean, MAX(temp_c) AS temp_max FROM vibration_temp_audit WHERE machine_id = :m AND sampled_at >= :a AND sampled_at < :b GROUP BY DATE(sampled_at) ORDER BY day",
+      "params": {
+        "m": "CNC-02",
+        "a": "2026-01-01 00:00:00",
+        "b": "2026-07-01 00:00:00"
+      },
+      "rows": 181,
+      "ms": 46
+    },
+    {
+      "sql": "SELECT source_file, file_sha256, COUNT(*) AS readings, MIN(source_line) AS first_line, MAX(source_line) AS last_line FROM vibration_temp_audit WHERE machine_id = :m AND sampled_at >= :a AND sampled_at < :b GROUP BY source_file, file_sha256",
+      "params": {
+        "m": "CNC-02",
+        "a": "2026-01-01 00:00:00",
+        "b": "2026-07-01 00:00:00"
+      },
+      "rows": 1,
+      "ms": 48
+    },
+    {
+      "sql": "SELECT DATE(sampled_at) AS day, COUNT(*) AS readings, AVG(vib_rms_mms) AS vib_mean, MAX(vib_rms_mms) AS vib_max, AVG(temp_c) AS temp_mean, MAX(temp_c) AS temp_max FROM vibration_temp_audit WHERE machine_id = :m AND sampled_at >= :a AND sampled_at < :b GROUP BY DATE(sampled_at) ORDER BY day",
+      "params": {
+        "m": "CNC-03",
+        "a": "2026-01-01 00:00:00",
+        "b": "2026-07-01 00:00:00"
+      },
+      "rows": 181,
+      "ms": 47
+    },
+    {
+      "sql": "SELECT source_file, file_sha256, COUNT(*) AS readings, MIN(source_line) AS first_line, MAX(source_line) AS last_line FROM vibration_temp_audit WHERE machine_id = :m AND sampled_at >= :a AND sampled_at < :b GROUP BY source_file, file_sha256",
+      "params": {
+        "m": "CNC-03",
+        "a": "2026-01-01 00:00:00",
+        "b": "2026-07-01 00:00:00"
+      },
+      "rows": 1,
+      "ms": 48
+    },
+    {
+      "sql": "SELECT DATE(sampled_at) AS day, COUNT(*) AS readings, AVG(vib_rms_mms) AS vib_mean, MAX(vib_rms_mms) AS vib_max, AVG(temp_c) AS temp_mean, MAX(temp_c) AS temp_max FROM vibration_temp_audit WHERE machine_id = :m AND sampled_at >= :a AND sampled_at < :b GROUP BY DATE(sampled_at) ORDER BY day",
+      "params": {
+        "m": "PMP-T01",
+        "a": "2026-01-01 00:00:00",
+        "b": "2026-07-01 00:00:00"
+      },
+      "rows": 181,
+      "ms": 47
+    },
+    {
+      "sql": "SELECT source_file, file_sha256, COUNT(*) AS readings, MIN(source_line) AS first_line, MAX(source_line) AS last_line FROM vibration_temp_audit WHERE machine_id = :m AND sampled_at >= :a AND sampled_at < :b GROUP BY source_file, file_sha256",
+      "params": {
+        "m": "PMP-T01",
+        "a": "2026-01-01 00:00:00",
+        "b": "2026-07-01 00:00:00"
+      },
+      "rows": 1,
+      "ms": 48
+    }
+  ]
+}
