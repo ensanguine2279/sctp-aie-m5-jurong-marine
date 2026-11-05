@@ -254,6 +254,55 @@ in a semantic database?"
 suggest candidates, never as the gate for "no SOP covers this", and keep quoting the
 chosen SOP whole from `sop_steps`.
 
+## Why not have an LLM pick the SOP? (decision, 5 Nov 2026)
+
+Asked when `SYNONYMS` and the entry rule above needed another round of maintenance:
+"as more SOPs are added we'll need to keep adding words — wouldn't an LLM call be more
+direct and maintenance-free?"
+
+**Decision.** No. An LLM call to pick the matching SOP is not maintenance-free — it
+trades a word list for a prompt and an eval suite — and it gives up the one property
+this whole design is built around: that the same question gets the same answer, and
+that "no SOP covers this" is a fact the code can check, not a guess the model makes.
+
+**The maintenance doesn't disappear, it moves.**
+
+| | Keyword (chosen) | LLM picks the SOP |
+|---|---|---|
+| What gets tuned as SOPs are added | A word list, each entry shipped with a test (`SYNONYMS`, `ENTRY_VERBS`/`SPACE_WORDS`) | A prompt, tuned against an eval suite |
+| "No SOP covers this" (D3) | A fixed score threshold (`MIN_SCORE`), inspectable | The model has to *decide* to say none apply, and LLMs skew toward finding something relevant rather than admitting nothing fits |
+| Reproducibility | Same question -> same score -> same SOP, every time | Not guaranteed even at `temperature=0`: model updates and context ordering can shift the pick |
+| Explaining a match | The words it shares with the question, listed | "the model thought so" |
+| New failure mode | A paraphrase is missed (visible: `found: false`, fixable with one word and one test) | A paraphrase is matched to the *wrong* SOP and confidently quoted (silent, and for lockout or confined-space entry, dangerous) |
+
+**Why this matters more here than for a general search problem.** The failure that
+matters most, per the vector-database decision above, is a confident wrong SOP, not a
+missed one. A keyword miss fails loud (`found: false`, and the question goes in
+`SYNONYMS` or the entry rule with a test). An LLM mis-pick fails quiet: the wrong
+procedure gets quoted whole, with a citation, looking exactly as trustworthy as a right
+one. For three SOPs covering lockout, crane lifting and confined-space entry, that
+failure mode is the one to design against, not the one to accept for less upkeep.
+
+**The maintenance cost is also smaller than it looks.** Every `SYNONYMS` or entry-rule
+addition so far has come from a real question that actually missed, added as one line
+plus one test (`test_sops.py`), reviewed like any other code change — not a dictionary
+maintained ahead of need. At 3 SOPs that's about 15 entries and one paired-condition
+rule, which is bounded, low-frequency work, not a growing liability.
+
+**A middle ground, if the list keeps growing.** Two ways to cut paraphrase misses
+without handing the decision to an LLM:
+
+1. **LLM for query expansion only, not for the final pick.** Use a call to turn the
+   question into canonical search terms (standing in for `SYNONYMS`/`ENTRY_VERBS`), but
+   still score those terms with the same fixed `search_sops` logic and `MIN_SCORE` gate.
+   The model only ever proposes words; the gate still decides whether any SOP applies.
+2. **Embeddings as a second signal, not the gate** — the same move already planned for
+   a growing SOP collection, above: rank or suggest with them, never use them to decide
+   "no SOP covers this", and keep quoting the chosen SOP whole from `sop_steps`.
+
+Either still needs the same eval-suite discipline this file already asks for — that
+discipline isn't avoided by moving from a word list to a prompt, only relocated.
+
 ## Warnings
 
 | Warning | Meaning |
