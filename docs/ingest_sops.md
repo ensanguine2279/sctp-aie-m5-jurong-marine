@@ -62,12 +62,13 @@ folder and one SHA-256 over all its files (`lineage.folder_sha256`), as for the 
 
 1. **Find the SOP.** `search_sops(question, sops, links)` first widens the question with
    `expand_question` (`SYNONYMS`: "sandblasting" adds "blasting chamber", "isolating" adds
-   "lockout"), then scores the current SOPs: a question word in the title counts 2, in the
-   text 1, a machine the SOP is linked to 3. Words every SOP uses ("work", "machine",
-   "before") don't count, and a score below 2 is no match. In the database,
-   `MATCH (search_text) AGAINST (:terms)` on `sops`, with `terms = search_terms(question)`,
-   compares the same words (see [MySQL FULLTEXT](#mysql-fulltext-what-it-does-for-the-search)),
-   so it finds every SOP `search_sops` finds.
+   "lockout"; plus the entry rule below), then scores the current SOPs: a question word in
+   the title counts 2, in the text 1, a machine the SOP is linked to 3. Words every SOP uses
+   ("work", "machine", "before") don't count, and a score below 2 is no match. In the
+   database, `MATCH (search_text) AGAINST (:terms)` on `sops`, with
+   `terms = search_terms(question)`, compares the same words (see
+   [MySQL FULLTEXT](#mysql-fulltext-what-it-does-for-the-search)), so it finds every SOP
+   `search_sops` finds.
 2. **Nothing found means no SOP.** 58 of the 85 incidents are of a kind no SOP covers
    (welding, grinding, chucks, portable electrics, housekeeping, D3). For those the app
    must say "no SOP in the data covers this", never stretch another SOP. **`search_sops`
@@ -85,6 +86,91 @@ Checked in the tests: "before entering the blasting chamber" finds SOP-CONFINED-
 load of CRN-01" SOP-CRANE-02, "lock out CNC-02" SOP-LOTO-01, "going inside the
 sandblasting booth" SOP-CONFINED-03, "isolating power on the lathe" SOP-LOTO-01, and
 "welding hot work PPE for grinding" finds nothing.
+
+### Entry needs a space
+
+On the real data, the client's own headline question, "before entering the blasting
+chamber", scored exactly `MIN_SCORE` (2.0: "entering" never matched "ENTRY" in the SOP's
+title), and a closer paraphrase, "going into the blast chamber", found nothing at all —
+"blast chamber" wasn't in `SYNONYMS` and "going into" shares no word with "entry" either.
+
+The fix adds `"entry"` to the expanded question, but only when it has **both** a verb of
+going into something (`ENTRY_VERBS`: enter, go into, get inside, climb into, ...) **and**
+a word naming a kind of space (`SPACE_WORDS`: chamber, tank, sump, booth, vessel, ...). A
+plain `"enter": "entry"` synonym was tried first and rejected: it also matched "how do I
+enter a work order" and "what's going into the incident report" (score 3, since "entry"
+appears throughout SOP-CONFINED-03's text), which would have handed someone filling in a
+work order the confined-space procedure. Requiring a space word keeps those two apart.
+`"blast chamber": "blasting chamber"` was also added to `SYNONYMS` for the closer
+paraphrase. Like `SYNONYMS` and `ALIASES`, this is a judgement, not data: add a word, with
+its question as a test in `test_sops.py`, when a real question misses.
+
+### Worked example: a question becomes a score
+
+```mermaid
+flowchart TD
+    Q["Question arrives, e.g.\n'going into the blast chamber'"]
+    Q --> EXP
+
+    subgraph EXP["expand_question()"]
+        direction TB
+        SYN["SYNONYMS: whole-word phrase match\n'blast chamber' -> add 'blasting chamber'"]
+        ENT["Entry rule: ENTRY_VERBS present\nAND SPACE_WORDS present\n('going into' + 'chamber') -> add 'entry'"]
+        SYN --> ENT
+    end
+
+    EXP --> WORDS
+
+    subgraph WORDS["_words(): tokenize"]
+        direction TB
+        TOK["lower-case, split into words"]
+        STOP["drop _STOP words\n(the, a, of, work, machine, before...)"]
+        PLU["strip plural 's'\n(tanks -> tank)"]
+        TOK --> STOP --> PLU
+    end
+
+    WORDS --> SCORE
+
+    subgraph SCORE["search_sops(): score every current SOP"]
+        direction TB
+        T["title word shared x2"]
+        B["body (full_text) word shared x1"]
+        M["machine the SOP links to,\nnamed in the question x3"]
+        T --> SUM
+        B --> SUM
+        M --> SUM
+        SUM["total score"]
+    end
+
+    SCORE --> GATE{"score >= MIN_SCORE (2.0)?"}
+    GATE -->|yes| FOUND["found: true\nquote the SOP whole"]
+    GATE -->|no, for every SOP| NONE["found: false\n'no SOP in the data covers this'"]
+```
+
+Four real questions traced through it (`SOP-CONFINED-03` title = "CONFINED SPACE ENTRY"),
+computed from the actual scoring function, not by hand:
+
+| Question | After `expand_question` | Words scored (stop words gone, plurals stripped) | SOP-CONFINED-03 score | Result |
+|---|---|---|---|---|
+| "before entering the blasting chamber" | no synonym fires ("blasting chamber" is already the SOP's own wording) `+ entry` (entry rule: "entering" + "chamber") | `blasting`, `chamber`, `entering`, `entry` | title `entry`×2 + body `blasting,chamber,entry`×1 = **5.0** | found |
+| "going into the blast chamber" | `+ blasting chamber` (SYNONYMS) `+ entry` (entry rule: "going into" + "chamber") | `blast`, `blasting`, `chamber`, `entry`, `going`, `into` | title `entry`×2 + body `blasting,chamber,entry`×1 = **5.0** | found |
+| "how do I enter a work order" | nothing added ("enter" has no space word nearby) | `enter`, `order` | no shared words -> **0.0** | not found |
+| "welding hot work PPE for grinding" | nothing matches any rule | `grinding`, `hot`, `ppe`, `welding` | no shared words -> **0.0** | not found |
+
+What each piece is doing, concretely:
+
+- **Stop words** quietly remove the noise that would otherwise cause a false match —
+  "work" is in `_STOP` specifically because `SOP-LOTO-01` has "After work:", and without
+  dropping it, the welding question above would have scored on that one shared word.
+- **`SYNONYMS`** bridges a *vocabulary* gap — the client says "blast chamber", the SOP
+  says "blasting chamber". It's a flat phrase-to-word substitution.
+- **The entry rule (`ENTRY_VERBS` + `SPACE_WORDS`)** bridges a different gap — no single
+  word swap works, because "entering"/"going into" never share a word with "ENTRY" on
+  their own. It only fires when *both* an entry-type verb and a space word are present,
+  which is exactly why "enter a work order" scores 0 instead of falsely matching.
+- **The gate (`MIN_SCORE = 2.0`)** turns "some word overlap" into a yes/no decision —
+  the welding question doesn't even get a near-miss; it shares *nothing* with any SOP
+  once stop words are gone.
 
 ## Stop words: how they help retrieval
 
@@ -179,7 +265,7 @@ So `MATCH` on `search_text` is the database-side finder and never misses an SOP
 SOP covers the question. `full_text` keeps the text as written, for display and ad-hoc
 `MATCH (title, full_text)` searches, which don't have the plural rule.
 
-## Search: keyword, not a vector database (decision, 4 Nov 2026)
+## Search: keyword, not a vector database
 
 **Decision.** SOPs are found by keyword: `search_sops` in Python, with MySQL `FULLTEXT`
 kept in step through the same stop words and synonyms. No embeddings and no vector
@@ -202,8 +288,8 @@ in a semantic database?"
 - **Size.** 3 SOPs, 18 steps, each under 1 KB. That is choosing among three documents,
   not retrieval over a corpus.
 - **Keyword's weakness is real but small and testable.** Paraphrases that share no word
-  with the SOP are missed. The two found so far are in `SYNONYMS` and in the tests, along
-  with a test that they're missed without it.
+  with the SOP are missed. The ones found so far are in `SYNONYMS` (or the entry rule)
+  and in the tests, along with a test that they're missed without it.
 
 **What was done instead.**
 
@@ -221,7 +307,11 @@ in a semantic database?"
 3. **The same plural rule on both sides.** MySQL doesn't stem, so "shackle" missed
    "shackles". `sops.search_text` stores the text as `search_sops` reads it, and the app
    searches it with `search_terms(question)`.
-4. **`search_sops` stays the gate** for "no SOP covers this" (score of at least 2). A
+4. **A paired-condition rule for "entry"** (`ENTRY_VERBS` + `SPACE_WORDS`), rather than a
+   plain synonym, for the same reason `SYNONYMS` entries are kept narrow: a one-word
+   synonym for "enter" matched unrelated questions about entering data. See
+   [Entry needs a space](#entry-needs-a-space).
+5. **`search_sops` stays the gate** for "no SOP covers this" (score of at least 2). A
    `MATCH` score isn't used as a cut-off: it depends on how common each word is across all
    rows, so it shifts whenever the client adds an SOP.
 
@@ -230,6 +320,55 @@ in a semantic database?"
 `sops` or `sop_steps`; brute-force cosine is fine at that size). Use them to rank or to
 suggest candidates, never as the gate for "no SOP covers this", and keep quoting the
 chosen SOP whole from `sop_steps`.
+
+## Why not have an LLM pick the SOP?
+
+Asked when `SYNONYMS` and the entry rule above needed another round of maintenance:
+"as more SOPs are added we'll need to keep adding words — wouldn't an LLM call be more
+direct and maintenance-free?"
+
+**Decision.** No. An LLM call to pick the matching SOP is not maintenance-free — it
+trades a word list for a prompt and an eval suite — and it gives up the one property
+this whole design is built around: that the same question gets the same answer, and
+that "no SOP covers this" is a fact the code can check, not a guess the model makes.
+
+**The maintenance doesn't disappear, it moves.**
+
+| | Keyword (chosen) | LLM picks the SOP |
+|---|---|---|
+| What gets tuned as SOPs are added | A word list, each entry shipped with a test (`SYNONYMS`, `ENTRY_VERBS`/`SPACE_WORDS`) | A prompt, tuned against an eval suite |
+| "No SOP covers this" (D3) | A fixed score threshold (`MIN_SCORE`), inspectable | The model has to *decide* to say none apply, and LLMs skew toward finding something relevant rather than admitting nothing fits |
+| Reproducibility | Same question -> same score -> same SOP, every time | Not guaranteed even at `temperature=0`: model updates and context ordering can shift the pick |
+| Explaining a match | The words it shares with the question, listed | "the model thought so" |
+| New failure mode | A paraphrase is missed (visible: `found: false`, fixable with one word and one test) | A paraphrase is matched to the *wrong* SOP and confidently quoted (silent, and for lockout or confined-space entry, dangerous) |
+
+**Why this matters more here than for a general search problem.** The failure that
+matters most, per the vector-database decision above, is a confident wrong SOP, not a
+missed one. A keyword miss fails loud (`found: false`, and the question goes in
+`SYNONYMS` or the entry rule with a test). An LLM mis-pick fails quiet: the wrong
+procedure gets quoted whole, with a citation, looking exactly as trustworthy as a right
+one. For three SOPs covering lockout, crane lifting and confined-space entry, that
+failure mode is the one to design against, not the one to accept for less upkeep.
+
+**The maintenance cost is also smaller than it looks.** Every `SYNONYMS` or entry-rule
+addition so far has come from a real question that actually missed, added as one line
+plus one test (`test_sops.py`), reviewed like any other code change — not a dictionary
+maintained ahead of need. At 3 SOPs that's about 15 entries and one paired-condition
+rule, which is bounded, low-frequency work, not a growing liability.
+
+**A middle ground, if the list keeps growing.** Two ways to cut paraphrase misses
+without handing the decision to an LLM:
+
+1. **LLM for query expansion only, not for the final pick.** Use a call to turn the
+   question into canonical search terms (standing in for `SYNONYMS`/`ENTRY_VERBS`), but
+   still score those terms with the same fixed `search_sops` logic and `MIN_SCORE` gate.
+   The model only ever proposes words; the gate still decides whether any SOP applies.
+2. **Embeddings as a second signal, not the gate** — the same move already planned for
+   a growing SOP collection, above: rank or suggest with them, never use them to decide
+   "no SOP covers this", and keep quoting the chosen SOP whole from `sop_steps`.
+
+Either still needs the same eval-suite discipline this file already asks for — that
+discipline isn't avoided by moving from a word list to a prompt, only relocated.
 
 ## Warnings
 
@@ -315,7 +454,7 @@ WHERE status = 'rejected';
 
 ## Tests
 
-`tests/test_sops.py` (49 tests, no database): the client's three SOPs exactly as delivered
+`tests/test_sops.py` (63 tests, no database): the client's three SOPs exactly as delivered
 (em dash, no final newline) and the GM's email, built as bytes. Covers the header (number,
 title, revision, month; a hyphen instead of the em dash; no revision), UTF-8 where cp1252
 would garble the title, a BOM and CRLF read like plain UTF-8, a non-UTF-8 file rejected,
@@ -326,14 +465,17 @@ kept apart, gas-test limits kept exactly as written, references to missing docum
 an incident report not counted as one), personal data flagged, machine links by id, CMMS
 name and alias (`CRN-01/CRN-02`, `CNC-01/02/03`, `test pump sump`), an unknown machine
 flagged, search for four real questions and two paraphrases (and the paraphrases missed
-without `SYNONYMS`), synonyms matching whole words only, nothing for welding, superseded
-revisions never searched, the whole SOP quoted with its citation, the `FULLTEXT` stop words
-covering `_STOP` and MySQL's defaults, the stopword setting made before both indexes are
-re-added (on a recording connection), a primary key on the stopword table, `search_text`
-holding the words `search_sops` scores, singular and plural questions giving the same
-terms, MySQL-style matching on `search_text` finding every SOP `search_sops` finds (and
-nothing for welding), an old `sops` table without `search_text` stopping the load, the
-client folder end to end, and a dry run the pipeline can parse. `test_the_real_sop_folder` reads `data/sops/` if it's there.
+without `SYNONYMS` or the entry rule), synonyms matching whole words only, five real
+"going into a space" questions scoring well above the minimum, three "entering data"
+questions that must NOT find the confined-space SOP, singular/plural space words, nothing
+for welding, superseded revisions never searched, the whole SOP quoted with its citation,
+the `FULLTEXT` stop words covering `_STOP` and MySQL's defaults, the stopword setting made
+before both indexes are re-added (on a recording connection), a primary key on the
+stopword table, `search_text` holding the words `search_sops` scores, singular and plural
+questions giving the same terms, MySQL-style matching on `search_text` finding every SOP
+`search_sops` finds (and nothing for welding), an old `sops` table without `search_text`
+stopping the load, the client folder end to end, and a dry run the pipeline can parse.
+`test_the_real_sop_folder` reads `data/sops/` if it's there.
 
 **Checked on a real server (4 Nov 2026):** the DDL, the load (3 SOPs, 7 machine links,
 CMMS loaded with 12 machines), `MATCH` for "blasting chamber entry" (SOP-CONFINED-03
@@ -342,6 +484,11 @@ only, 1.59), and the stopword rebuild: after it, the welding audit query returns
 `MATCH (search_text)` finds SOP-CRANE-02 for "shackle kink" (0.46; nothing before), and
 the welding query on `search_text` returns no rows. `agent_user.py` then granted all 19
 objects, SOP ones included, and `--check` passed.
+
+**Checked on the client's own question (5 Nov 2026):** before the entry-rule fix,
+"before entering the blasting chamber" scored exactly 2.0 (the minimum) and "going into
+the blast chamber" scored nothing. After it, both score 4.0 or higher, and "how do I
+enter a work order" / "what's going into the incident report" still find no SOP.
 
 **The app user** (`agent_user.py`) can read `sops` (for `MATCH`: the `FULLTEXT` index is on
 the table), `sops_audit`, `sop_steps_audit` and `sop_machines`. It can't read
