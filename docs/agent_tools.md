@@ -162,7 +162,7 @@ because the sample data didn't reproduce the exact numbers):
 |---|---|---|
 | `compare_sensor_windows '{"machine": "CNC-02"}'` | `elevated: false` on a +4.04 °C / 8.1σ temperature rise, because the 10%-relative rule is meaningless for Celsius; only the target machine was cited, not the other sensored ones | Absolute 2 °C minimum for temperature (kept 10% relative for vibration); every sensored machine now gets its own citation |
 | `machine_lubrication '{"machine": "CNC-03"}'` | CNC-03's own plate (ISO VG68) was reported as disagreeing with the shop-wide `ALL`-listed hydraulic oil (ISO VG32) — a false conflict, since that item isn't this machine's spec | Spares split into `own` vs `shop` (by `listed_for`); grades compared only against `own`; eye-checked trap-list values (I15) surfaced alongside the OCR ones |
-| `find_sop '{"question": "before entering the blasting chamber"}'` | Scored exactly `MIN_SCORE` (2.0, the bare minimum); a closer paraphrase, "going into the blast chamber", found nothing | `ENTRY_VERBS` + `SPACE_WORDS` paired-condition rule in `ingest_sops.expand_question` (see [`ingest_sops.md`](ingest_sops.md#entry-needs-a-space-5-nov-2026)); both questions now score 4.0 or higher |
+| `find_sop '{"question": "before entering the blasting chamber"}'` | Scored exactly `MIN_SCORE` (2.0, the bare minimum); a closer paraphrase, "going into the blast chamber", found nothing | `ENTRY_VERBS` + `SPACE_WORDS` paired-condition rule in `ingest_sops.expand_question` (see [`ingest_sops.md`](ingest_sops.md#entry-needs-a-space)); both questions now score 4.0 or higher |
 
 Re-verified after the fixes, all against the real database:
 
