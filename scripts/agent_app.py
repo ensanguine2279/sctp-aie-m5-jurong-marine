@@ -40,11 +40,15 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import agent_tools as at
 
 MODEL = os.environ.get("AGENT_MODEL", "gpt-4o-mini")
+# A tool asking for a clarification is passed to the user as-is; the model never gets to
+# answer over it (trap C1: a severity number with no scale must be asked, not guessed).
+CLARIFY_CODES = ("needs_clarification", "ambiguous_machine")
 MAX_TOOL_ROUNDS = 6   # a round is one model call; stops a loop, never a crash (#4)
 
 SYSTEM_PROMPT = """\
@@ -68,6 +72,13 @@ guess what the data "should" say.
 
 log = logging.getLogger("agent_app")
 log.addHandler(logging.NullHandler())
+
+
+def _emit(logger, event: str, **fields) -> None:
+    """One JSON line per event, always with a UTC timestamp (#7 observability)."""
+    rec = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+           "event": event, **fields}
+    logger.info(json.dumps(rec, default=str))
 
 
 class ChatError(Exception):
@@ -129,8 +140,7 @@ def run_turn(db, client, messages, *, model=MODEL, max_rounds=MAX_TOOL_ROUNDS,
         try:
             resp = complete_fn(client, model, messages, at.tool_schemas())
         except ChatError as e:
-            logger.info(json.dumps({"event": "chat_error", "round": round_no,
-                                     "model": model, "error": str(e)}))
+            _emit(logger, "chat_error", round=round_no, model=model, error=str(e))
             return ("I couldn't reach the language model just now, so I can't answer "
                     "this turn. Please try again in a moment."), sources, tool_names
 
@@ -138,25 +148,38 @@ def run_turn(db, client, messages, *, model=MODEL, max_rounds=MAX_TOOL_ROUNDS,
         usage = getattr(resp, "usage", None)
         messages.append(_assistant_message(msg))
         calls = getattr(msg, "tool_calls", None) or []
-        logger.info(json.dumps({
-            "event": "chat_call", "round": round_no, "model": model,
-            "prompt_tokens": getattr(usage, "prompt_tokens", None),
-            "completion_tokens": getattr(usage, "completion_tokens", None),
-            "tool_calls": [c.function.name for c in calls],
-            "ms": round((time.monotonic() - t0) * 1000, 1),
-        }))
+        _emit(logger, "chat_call", round=round_no, model=model,
+              prompt_tokens=getattr(usage, "prompt_tokens", None),
+              completion_tokens=getattr(usage, "completion_tokens", None),
+              tool_calls=[c.function.name for c in calls],
+              ms=round((time.monotonic() - t0) * 1000, 1))
 
         if not calls:
             return msg.content, sources, tool_names
 
+        clarify = None
         for call in calls:
+            t1 = time.monotonic()
             result = at.run_tool(db, call.function.name, call.function.arguments)
+            err = getattr(result, "error", None)
+            _emit(logger, "tool_call", round=round_no, tool=call.function.name,
+                  arguments=str(call.function.arguments)[:500],
+                  ok=getattr(result, "ok", None),
+                  error_code=err.get("code") if isinstance(err, dict) else None,
+                  n_sources=len(result.sources),
+                  ms=round((time.monotonic() - t1) * 1000, 1))
             tool_names.append(call.function.name)
+            if clarify is None and isinstance(err, dict) and err.get("code") in CLARIFY_CODES:
+                clarify = err.get("message") or "Could you clarify your question?"
             sources.extend(result.sources)
             messages.append({"role": "tool", "tool_call_id": call.id,
                               "content": result.for_model()})
+        if clarify:
+            _emit(logger, "clarification_returned", round=round_no)
+            messages.append({"role": "assistant", "content": clarify})
+            return clarify, sources, tool_names
 
-    logger.info(json.dumps({"event": "max_rounds_exceeded", "rounds": max_rounds}))
+    _emit(logger, "max_rounds_exceeded", rounds=max_rounds)
     return ("I wasn't able to settle on an answer within the allowed number of tool "
             "calls. Try asking a narrower question."), sources, tool_names
 
@@ -170,8 +193,8 @@ def ask(db, client, messages, question, *, model=MODEL, logger=log):
     labels). `messages` is mutated in place so the caller can keep the conversation."""
     messages.append({"role": "user", "content": question})
     answer, sources, tool_names = run_turn(db, client, messages, model=model, logger=logger)
-    logger.info(json.dumps({"event": "turn", "question": question[:200],
-                             "tools_called": tool_names, "n_sources": len(sources)}))
+    _emit(logger, "turn", question=question[:200],
+          tools_called=tool_names, n_sources=len(sources))
     return answer, format_sources(sources)
 
 
