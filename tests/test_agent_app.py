@@ -225,3 +225,45 @@ def test_ask_logs_one_turn_summary_line(monkeypatch, caplog):
     assert len(turn_lines) == 1
     assert turn_lines[0]["question"] == "hello"
     assert turn_lines[0]["tools_called"] == []
+
+
+def test_every_log_line_has_a_timestamp_and_tool_calls_log_their_arguments(monkeypatch, caplog):
+    call = FakeToolCall("c1", "count_incidents", '{"date_from": "2025-01-01"}')
+    first = FakeResponse(FakeMessage(content=None, tool_calls=[call]))
+    second = FakeResponse(FakeMessage(content="done"))
+    monkeypatch.setattr(app, "complete", scripted(first, second))
+    refused = FakeToolResult()
+    refused.ok, refused.error = False, {"code": "needs_clarification"}
+    monkeypatch.setattr(app.at, "run_tool", lambda db, name, args: refused)
+    with caplog.at_level("INFO", logger="agent_app"):
+        app.ask(None, client=None, messages=app.new_conversation(), question="q")
+    lines = [json.loads(r.message) for r in caplog.records]
+    assert all("ts" in x for x in lines)
+    tc = [x for x in lines if x["event"] == "tool_call"]
+    assert len(tc) == 1
+    assert tc[0]["arguments"] == '{"date_from": "2025-01-01"}'
+    assert tc[0]["ok"] is False and tc[0]["error_code"] == "needs_clarification"
+
+
+def test_a_clarification_goes_straight_to_the_user_and_the_model_never_answers_over_it(monkeypatch):
+    call = FakeToolCall("c1", "count_incidents", '{"at_least_as_severe_as": 4}')
+    first = FakeResponse(FakeMessage(content=None, tool_calls=[call]))
+    seen = []
+
+    def complete_fn(client, model, messages, tools):
+        seen.append(1)
+        if len(seen) > 1:
+            raise AssertionError("the model was called again after a clarification")
+        return first
+
+    refused = FakeToolResult()
+    refused.ok = False
+    refused.error = {"code": "needs_clarification",
+                     "message": "Which scale: 5 = most severe, or 1 = most severe?"}
+    monkeypatch.setattr(app.at, "run_tool", lambda db, name, args: refused)
+    messages = [{"role": "user", "content": "severity 4 or worse in 2025?"}]
+    answer, sources, tools_called = app.run_turn(
+        None, client=None, messages=messages, complete_fn=complete_fn)
+    assert answer == "Which scale: 5 = most severe, or 1 = most severe?"
+    assert sources == [] and tools_called == ["count_incidents"]
+    assert [m["role"] for m in messages] == ["user", "assistant", "tool", "assistant"]
