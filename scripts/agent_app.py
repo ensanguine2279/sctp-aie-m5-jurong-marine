@@ -38,6 +38,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -59,6 +60,9 @@ through the tools you are given.
 Rules you must follow:
 - Every fact, number or date in your answer must come from a tool call made just now. \
 Never answer from memory, never estimate, never round a number the tool didn't give you.
+- A severity number needs the scale the USER named. Only set severity_scale if the user \
+said which scale (current or old), and copy their exact words into scale_quote. If they \
+didn't, leave severity_scale out so the tool asks.
 - If a tool's error is needs_clarification or ambiguous_machine, ask the user the exact \
 question in its message - do not guess a severity scale or pick a machine for them.
 - If a tool's error is no_data or tool_failed, say plainly that you could not check that. \
@@ -79,6 +83,46 @@ def _emit(logger, event: str, **fields) -> None:
     rec = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
            "event": event, **fields}
     logger.info(json.dumps(rec, default=str))
+
+
+SEVERITY_TOOLS = ("count_incidents", "list_incidents")
+# Words that actually name a severity scale; "severity 4 or worse" alone names none.
+_SCALE_CUE = re.compile(r"scale|worst|most severe|least severe|highest|lowest|"
+                        r"\b(current|new|old|previous|legacy|former)\b")
+
+
+def _norm(text: str) -> str:
+    return " ".join(str(text).lower().split())
+
+
+def scale_guessed(name: str, arguments, messages) -> bool:
+    """True when the model gave a severity number AND a severity_scale the user never
+    stated (trap C1: the scale must be asked, never guessed). The model has to quote the
+    user's own words naming the scale in `scale_quote`; the quote must really appear in a
+    user message and must name a scale."""
+    if name not in SEVERITY_TOOLS:
+        return False
+    try:
+        args = json.loads(arguments) if isinstance(arguments, str) else dict(arguments or {})
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(args, dict) or args.get("severity_scale") is None:
+        return False
+    if args.get("at_least_as_severe_as") is None and args.get("exact_severity") is None:
+        return False
+    quote = _norm(args.get("scale_quote") or "")
+    if not quote or not _SCALE_CUE.search(quote):
+        return True
+    said = " ".join(_norm(m.get("content") or "") for m in messages if m.get("role") == "user")
+    return quote not in said
+
+
+def _without_scale(arguments) -> str:
+    """The same arguments with the guessed scale removed, so the tool itself asks."""
+    args = json.loads(arguments) if isinstance(arguments, str) else dict(arguments)
+    args.pop("severity_scale", None)
+    args.pop("scale_quote", None)
+    return json.dumps(args)
 
 
 class ChatError(Exception):
@@ -160,10 +204,15 @@ def run_turn(db, client, messages, *, model=MODEL, max_rounds=MAX_TOOL_ROUNDS,
         clarify = None
         for call in calls:
             t1 = time.monotonic()
-            result = at.run_tool(db, call.function.name, call.function.arguments)
+            arguments = call.function.arguments
+            if scale_guessed(call.function.name, arguments, messages):
+                _emit(logger, "scale_guess_blocked", round=round_no,
+                      tool=call.function.name, arguments=str(arguments)[:500])
+                arguments = _without_scale(arguments)
+            result = at.run_tool(db, call.function.name, arguments)
             err = getattr(result, "error", None)
             _emit(logger, "tool_call", round=round_no, tool=call.function.name,
-                  arguments=str(call.function.arguments)[:500],
+                  arguments=str(arguments)[:500],
                   ok=getattr(result, "ok", None),
                   error_code=err.get("code") if isinstance(err, dict) else None,
                   n_sources=len(result.sources),

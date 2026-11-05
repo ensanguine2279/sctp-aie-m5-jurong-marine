@@ -267,3 +267,52 @@ def test_a_clarification_goes_straight_to_the_user_and_the_model_never_answers_o
     assert answer == "Which scale: 5 = most severe, or 1 = most severe?"
     assert sources == [] and tools_called == ["count_incidents"]
     assert [m["role"] for m in messages] == ["user", "assistant", "tool", "assistant"]
+
+
+# --------------------------------------------------- the severity-scale guess (C1) ---
+
+SEV = '{"at_least_as_severe_as": 4, "severity_scale": "5_is_worst"%s}'
+
+
+def _user(*texts):
+    return [{"role": "user", "content": t} for t in texts]
+
+
+def test_a_scale_the_user_never_named_is_a_guess():
+    msgs = _user("how many incidents in 2025 were severity 4 or worse?")
+    assert app.scale_guessed("count_incidents", SEV % "", msgs)                       # no quote
+    assert app.scale_guessed("count_incidents", SEV % ', "scale_quote": "5 is worst"', msgs)  # invented
+    assert app.scale_guessed("count_incidents", SEV % ', "scale_quote": "severity 4 or worse"', msgs)  # names no scale
+
+
+def test_a_scale_the_user_named_is_not_a_guess():
+    msgs = _user("severity 4 or worse in 2025?", "the current scale")
+    assert not app.scale_guessed("count_incidents", SEV % ', "scale_quote": "the current scale"', msgs)
+    assert not app.scale_guessed("list_incidents", SEV % ', "scale_quote": "The  Current Scale"', msgs)
+
+
+def test_other_tools_and_calls_without_a_severity_number_are_left_alone():
+    msgs = _user("hi")
+    assert not app.scale_guessed("list_machines", "{}", msgs)
+    assert not app.scale_guessed("count_incidents", '{"date_from": "2025-01-01"}', msgs)
+    assert not app.scale_guessed("count_incidents", "not json", msgs)
+
+
+def test_run_turn_strips_a_guessed_scale_so_the_tool_asks(monkeypatch):
+    call = FakeToolCall("c1", "count_incidents", SEV % ', "scale_quote": "5 is worst"')
+    first = FakeResponse(FakeMessage(content=None, tool_calls=[call]))
+    seen = {}
+
+    def run_tool(db, name, args):
+        seen["args"] = json.loads(args)
+        r = FakeToolResult()
+        r.ok, r.error = False, {"code": "needs_clarification", "message": "Which scale?"}
+        return r
+
+    monkeypatch.setattr(app.at, "run_tool", run_tool)
+    messages = [{"role": "user", "content": "how many were severity 4 or worse in 2025?"}]
+    answer, _, _ = app.run_turn(None, client=None, messages=messages,
+                                complete_fn=scripted(first))
+    assert answer == "Which scale?"
+    assert "severity_scale" not in seen["args"] and "scale_quote" not in seen["args"]
+    assert seen["args"]["at_least_as_severe_as"] == 4

@@ -309,7 +309,10 @@ cross-restart state, evals), and its tests: [`agent_app.md`](docs/agent_app.md).
 
 ```bash
 python scripts/agent_app.py "is CNC-02 running differently now?"
+streamlit run scripts/agent_ui.py          # the same, as a chat page for the demo
 ```
+
+To host the page (Google Cloud Run, Aiven for the data): [`deploy_gcp.md`](docs/deploy_gcp.md).
 
 ## Lineage: traceability and reproducibility
 
@@ -679,7 +682,8 @@ With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
 | File | Covers | Tests |
 |---|---|---|
 | `tests/test_agent_tools.py` | [`agent_tools.py`](docs/agent_tools.md): every tool's schema; machine names written six ways, ambiguous and unknown machines; **the severity kill-shot**: four phrasings without a scale asked about on both incident tools, the same question on either scale giving the same incidents, the naive logged-value count never produced, July 2025 reported apart; listings by date with no employee data; form vs CMMS disagreements; OCR confidence per field, known plate problems, no photo; oil from two sources that disagree (shop-wide vs the machine's own), and an unreadable one; spares in both units, shop-wide only, below minimum once each; open costs apart and double entries; no sensors on a crane; weekly coverage; CNC-02 `machine_specific` against flat machines; the blasting chamber SOP quoted whole, nothing for welding; `query_sql` refusing writes, two statements, employees, `SELECT *`, the logged severity, `SLEEP` and `UNION`, and capping rows; a dead database giving `tool_failed`; bad, extra and JSON-string arguments; the app refusing the owner account | 83 |
-| `tests/test_agent_app.py` | [`agent_app.py`](docs/agent_app.md): the loop's own logic, with `agent_tools.run_tool` and the chat call stubbed — a plain answer needing no tool, a tool call round-tripping into the next model call, several tool calls in one round all running and all cited, a tool's clarification question returned to the user with no further model call (the severity-scale guess), a failed chat call degrading to a plain message instead of raising, too many tool-call rounds stopping with an honest message instead of looping forever, the assistant-message shape matching the API with and without tool calls, source-label deduplication, a new conversation starting with only the system prompt, and `ask()` appending the question, returning formatted sources and logging one turn summary | 14 |
+| `tests/test_agent_app.py` | [`agent_app.py`](docs/agent_app.md): the loop's own logic, with `agent_tools.run_tool` and the chat call stubbed — a plain answer needing no tool, a tool call round-tripping into the next model call, several tool calls in one round all running and all cited, a tool's clarification question returned to the user with no further model call (the severity-scale guess), a severity scale the user never named stripped so the tool asks (the model's guess), a failed chat call degrading to a plain message instead of raising, too many tool-call rounds stopping with an honest message instead of looping forever, the assistant-message shape matching the API with and without tool calls, source-label deduplication, a new conversation starting with only the system prompt, and `ask()` appending the question, returning formatted sources and logging one turn summary | 18 |
+| `tests/test_agent_ui.py` | [`agent_ui.py`](docs/agent_app.md#the-demo-front-end): the trace table behind the demo page: one row per model call and tool call in order, with the arguments the model sent, a refusal and a failed chat call shown (Streamlit not needed), the page password check, and logging to stderr with no file | 4 |
 | `tests/test_logs.py` | [`ingest_logs.py`](docs/ingest_logs.md): ISO/epoch timestamps (incl. the 8-hour bug), timezones, °C/°F, unknown units, every CSV line kept in raw with its line number, clean rows linked to raw, reject reasons, duplicates within the file and against rows already loaded, Windows (CRLF) line endings read exactly like LF | 10 |
 | `tests/test_spares.py` | [`ingest_spares.py`](docs/ingest_spares.md): costs (`$38/spool`), lead times (`2-3 weeks (Germany)`, `local`), metric/imperial sizes, machine lists; on a messy sheet: raw rows and row numbers, `raw_id`, duplicate/missing part numbers, warnings for unreadable values | 18 |
 | `tests/test_cmms.py` | [`ingest_cmms.py`](docs/ingest_cmms.md): dump parsing (`;` and quotes inside strings, comments, multi-row INSERTs with line and tuple numbers, column lists, malformed tuples); ids, numbers (`S$1,050`), day-first dates; the severity flip (old scale inverted, July 2025 left unconverted, a confirmed cutover, out-of-range values never guessed); on a messy dump: duplicates and conflicting duplicates, orphan machines/employees flagged not dropped, raw text kept, `work_orders.status` not clashing with the load status; employee names masked to their last 4 characters in everything printed | 27 |
@@ -689,7 +693,7 @@ With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
 | `tests/test_pipeline.py` | [`pipeline.py`](docs/pipeline.md): step order and flags (images after the CMMS), foreign keys dropped first and re-added last (never in a dry run), sample rows with names kept out of the report, counts from every script's summary, the images folder hashed like the load, a failure stopping the rest, `--keep-going`, Ctrl+C, the report's tables, `--save-log`, `--audit`; the SOP step (after the CMMS and before the linking, its folder hashed like the load, one summary line per SOP with the step table and the rejected email's name kept out) | 40 |
 | `tests/test_agent_user.py` | [`agent_user.py`](docs/agent_user.md): the allow-list never includes employees or raw tables (nor the raw OCR, nor the raw SOP files), the scans' and SOPs' objects granted, objects with `emp_name` refused, missing objects skipped, a refused object told apart as "not created yet" or "exists but not granted", `SELECT`-only grants after a full reset, password never written into SQL or output, bad user/host/database names rejected, MySQL error codes read correctly, errors never include the password, failed steps named with MySQL's message, no statement needing rights over every database, the access check reads no rows; settings with Windows line endings (from the shell or a CRLF `.env`) read without the trailing `\r`, and no settings leak in from your shell or `.env` | 28 |
 | `tests/test_shared.py` | `db_config.py`, `lineage.py`: password never printed, passwords with special characters, values of a failed query kept out of error messages, table-name check, file SHA-256, a run recorded without a file, values passed to MySQL are plain Python types, `getenv` and `load_db_config` strip a trailing `\r` (CRLF `.env`) | 9 |
-| **Total** | | **437** |
+| **Total** | | **445** |
 
 **Not covered:** anything that needs MySQL, i.e. creating tables, views and users,
 the inserts, the one-transaction rollback and the `ingest_runs` record. After
@@ -716,7 +720,7 @@ tests/test_shared.py .........                                                  
 tests/test_sops.py ...................................................................[ 94%]
 ..........
 tests/test_spares.py ..................                                         [100%]
-========== 437 passed in 12.8s ==========
+========== 445 passed in 12.8s ==========
 ```
 
 | Mark | Meaning |
