@@ -198,7 +198,7 @@ So `MATCH` on `search_text` is the database-side finder and never misses an SOP
 SOP covers the question. `full_text` keeps the text as written, for display and ad-hoc
 `MATCH (title, full_text)` searches, which don't have the plural rule.
 
-## Search: keyword, not a vector database (decision, 4 Nov 2026)
+## Search: keyword, not a vector database
 
 **Decision.** SOPs are found by keyword: `search_sops` in Python, with MySQL `FULLTEXT`
 kept in step through the same stop words and synonyms. No embeddings and no vector
@@ -254,7 +254,7 @@ in a semantic database?"
 suggest candidates, never as the gate for "no SOP covers this", and keep quoting the
 chosen SOP whole from `sop_steps`.
 
-## Why not have an LLM pick the SOP? (decision, 5 Nov 2026)
+## Why not have an LLM pick the SOP?
 
 Asked when `SYNONYMS` and the entry rule above needed another round of maintenance:
 "as more SOPs are added we'll need to keep adding words — wouldn't an LLM call be more
@@ -436,4 +436,4 @@ current SOPs that name it, `has_sop = 0` when none does
 
 **In the pipeline:** `pipeline.py` runs this step after the CMMS (so names can be matched)
 and before `relationships.py`; `--only sops,relationships` reloads just the SOPs
-([`pipeline.md`](pipeline.md)).
+([`pipeline.md`](pipeline.md)). 
