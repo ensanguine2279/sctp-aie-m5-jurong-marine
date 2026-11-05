@@ -87,7 +87,7 @@ load of CRN-01" SOP-CRANE-02, "lock out CNC-02" SOP-LOTO-01, "going inside the
 sandblasting booth" SOP-CONFINED-03, "isolating power on the lathe" SOP-LOTO-01, and
 "welding hot work PPE for grinding" finds nothing.
 
-### Entry needs a space (5 Nov 2026)
+### Entry needs a space
 
 On the real data, the client's own headline question, "before entering the blasting
 chamber", scored exactly `MIN_SCORE` (2.0: "entering" never matched "ENTRY" in the SOP's
@@ -104,6 +104,73 @@ work order the confined-space procedure. Requiring a space word keeps those two 
 `"blast chamber": "blasting chamber"` was also added to `SYNONYMS` for the closer
 paraphrase. Like `SYNONYMS` and `ALIASES`, this is a judgement, not data: add a word, with
 its question as a test in `test_sops.py`, when a real question misses.
+
+### Worked example: a question becomes a score
+
+```mermaid
+flowchart TD
+    Q["Question arrives, e.g.\n'going into the blast chamber'"]
+    Q --> EXP
+
+    subgraph EXP["expand_question()"]
+        direction TB
+        SYN["SYNONYMS: whole-word phrase match\n'blast chamber' -> add 'blasting chamber'"]
+        ENT["Entry rule: ENTRY_VERBS present\nAND SPACE_WORDS present\n('going into' + 'chamber') -> add 'entry'"]
+        SYN --> ENT
+    end
+
+    EXP --> WORDS
+
+    subgraph WORDS["_words(): tokenize"]
+        direction TB
+        TOK["lower-case, split into words"]
+        STOP["drop _STOP words\n(the, a, of, work, machine, before...)"]
+        PLU["strip plural 's'\n(tanks -> tank)"]
+        TOK --> STOP --> PLU
+    end
+
+    WORDS --> SCORE
+
+    subgraph SCORE["search_sops(): score every current SOP"]
+        direction TB
+        T["title word shared x2"]
+        B["body (full_text) word shared x1"]
+        M["machine the SOP links to,\nnamed in the question x3"]
+        T --> SUM
+        B --> SUM
+        M --> SUM
+        SUM["total score"]
+    end
+
+    SCORE --> GATE{"score >= MIN_SCORE (2.0)?"}
+    GATE -->|yes| FOUND["found: true\nquote the SOP whole"]
+    GATE -->|no, for every SOP| NONE["found: false\n'no SOP in the data covers this'"]
+```
+
+Four real questions traced through it (`SOP-CONFINED-03` title = "CONFINED SPACE ENTRY"),
+computed from the actual scoring function, not by hand:
+
+| Question | After `expand_question` | Words scored (stop words gone, plurals stripped) | SOP-CONFINED-03 score | Result |
+|---|---|---|---|---|
+| "before entering the blasting chamber" | no synonym fires ("blasting chamber" is already the SOP's own wording) `+ entry` (entry rule: "entering" + "chamber") | `blasting`, `chamber`, `entering`, `entry` | title `entry`×2 + body `blasting,chamber,entry`×1 = **5.0** | found |
+| "going into the blast chamber" | `+ blasting chamber` (SYNONYMS) `+ entry` (entry rule: "going into" + "chamber") | `blast`, `blasting`, `chamber`, `entry`, `going`, `into` | title `entry`×2 + body `blasting,chamber,entry`×1 = **5.0** | found |
+| "how do I enter a work order" | nothing added ("enter" has no space word nearby) | `enter`, `order` | no shared words -> **0.0** | not found |
+| "welding hot work PPE for grinding" | nothing matches any rule | `grinding`, `hot`, `ppe`, `welding` | no shared words -> **0.0** | not found |
+
+What each piece is doing, concretely:
+
+- **Stop words** quietly remove the noise that would otherwise cause a false match —
+  "work" is in `_STOP` specifically because `SOP-LOTO-01` has "After work:", and without
+  dropping it, the welding question above would have scored on that one shared word.
+- **`SYNONYMS`** bridges a *vocabulary* gap — the client says "blast chamber", the SOP
+  says "blasting chamber". It's a flat phrase-to-word substitution.
+- **The entry rule (`ENTRY_VERBS` + `SPACE_WORDS`)** bridges a different gap — no single
+  word swap works, because "entering"/"going into" never share a word with "ENTRY" on
+  their own. It only fires when *both* an entry-type verb and a space word are present,
+  which is exactly why "enter a work order" scores 0 instead of falsely matching.
+- **The gate (`MIN_SCORE = 2.0`)** turns "some word overlap" into a yes/no decision —
+  the welding question doesn't even get a near-miss; it shares *nothing* with any SOP
+  once stop words are gone.
 
 ## Stop words: how they help retrieval
 
@@ -243,7 +310,7 @@ in a semantic database?"
 4. **A paired-condition rule for "entry"** (`ENTRY_VERBS` + `SPACE_WORDS`), rather than a
    plain synonym, for the same reason `SYNONYMS` entries are kept narrow: a one-word
    synonym for "enter" matched unrelated questions about entering data. See
-   [Entry needs a space](#entry-needs-a-space-5-nov-2026).
+   [Entry needs a space](#entry-needs-a-space).
 5. **`search_sops` stays the gate** for "no SOP covers this" (score of at least 2). A
    `MATCH` score isn't used as a cut-off: it depends on how common each word is across all
    rows, so it shifts whenever the client adds an SOP.
@@ -436,4 +503,4 @@ current SOPs that name it, `has_sop = 0` when none does
 
 **In the pipeline:** `pipeline.py` runs this step after the CMMS (so names can be matched)
 and before `relationships.py`; `--only sops,relationships` reloads just the SOPs
-([`pipeline.md`](pipeline.md)). 
+([`pipeline.md`](pipeline.md)).
