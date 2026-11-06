@@ -85,6 +85,14 @@ Every query runs with `MAX_EXECUTION_TIME` 10 s on MySQL.
 | No SOP for most incident types (D3) | `find_sop` uses `ingest_sops.search_sops`, the same gate: below the minimum score the answer is `found: false`. It never stretches another SOP; if the SOP found doesn't name the machine asked about, a note says so |
 | SOP steps quoted alone | `find_sop` always returns the SOP whole with its lines; steps pointing to documents not in the data get a note (D8) |
 
+## Photos: `fetch_image` (not a tool)
+
+The page shows the photo behind each image source (`agent_ui.md`). `fetch_image(db,
+image_sha256)` reads it from `img_files_public` and recomputes its SHA-256: bytes that don't
+match the hash recorded at ingest are never returned (logged as `image_hash_mismatch`).
+`image_sources(sources)` picks an answer's image sources, once each. Neither is offered to
+the model: it never handles images or links. `query_sql` refuses `image_bytes`.
+
 ## Machine names
 
 `resolve_machine` accepts `CNC-02`, `cnc 2`, `CNC2`, `pmp-t1`, an id inside text
@@ -136,7 +144,7 @@ code is `needs_clarification` or `ambiguous_machine`.
 
 ## Tests
 
-`tests/test_agent_tools.py` (97 tests, no MySQL): the tools run their real SQL on an
+`tests/test_agent_tools.py` (105 tests, no MySQL): the tools run their real SQL on an
 in-memory SQLite database whose tables have the names and columns of the granted views,
 filled with a small sample shaped like the client's data (machine names and some values are
 illustrative) and the client's three SOPs loaded through `ingest_sops.process`. Covers:

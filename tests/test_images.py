@@ -820,7 +820,7 @@ def test_folder_hash_covers_names_and_bytes_not_order(tmp_path):
 def test_audit_views_cite_the_image_but_not_the_raw_text():
     """The app reads *_audit; what OCR read verbatim stays in the raw table (PDPA)."""
     sql = "\n".join(ii.ddl("img_"))
-    views = [s for s in ii.ddl("img_") if "CREATE OR REPLACE VIEW" in s]
+    views = [s for s in ii.ddl("img_") if "CREATE OR REPLACE VIEW" in s and "_audit AS" in s]
     assert len(views) == 2
     for v in views:
         assert "r.source_file" in v and "r.image_sha256" in v and "folder_sha256" in v
@@ -966,3 +966,116 @@ def test_the_real_new_forms_give_their_severity_from_the_value_ink():
     """I12: the CMMS logs 904 as 2 and 906 as 3; the page text loses both."""
     assert ii.severity_from_ink(ii.read_image(SCANS / "IR-2025-904.jpg")) == "2"
     assert ii.severity_from_ink(ii.read_image(SCANS / "IR-2025-906.jpg")) == "3"
+
+
+# ------------------------------------------------- photos for the app (PDPA) ---
+
+def _jpg(path, color=(200, 200, 200), size=(120, 200)):
+    import cv2
+    import numpy as np
+    img = np.full((*size, 3), color, np.uint8)
+    cv2.imwrite(str(path), img)
+    return path
+
+
+def _docs(*rows):
+    return ii.pd.DataFrame([{"raw_id": i + 1, "source_file": f, "image_sha256": f"{i:064x}",
+                             "doc_type": t, "status": st, "warnings": None}
+                            for i, (f, t, st) in enumerate(rows)])
+
+
+def test_redaction_covers_the_boxes_and_nothing_else():
+    import numpy as np
+    img = np.full((100, 200, 3), 30, np.uint8)
+    out = ii.redact(img, [(50, 10, 200, 40)])
+    assert (out[12:38, 185:198] == ii.REDACT_FILL).all()            # covered (clear of the label)
+    assert (out[60:100] == 30).all() and (out[:, :45] == 30).all()  # the rest untouched
+    assert (img == 30).all()                                        # the input isn't changed
+
+
+def test_nameplates_are_stored_as_they_are_and_forms_only_redacted(tmp_path):
+    import hashlib
+    _jpg(tmp_path / "plate.jpg")
+    _jpg(tmp_path / "form.jpg", color=(20, 20, 20))
+    docs = _docs(("plate.jpg", "nameplate", "loaded"), ("form.jpg", "incident_report", "loaded"),
+                 ("cat.jpg", "unknown", "rejected"))
+    stats = Counter()
+    rows, skipped = ii.image_files(tmp_path, docs, stats,
+                                   boxes_fn=lambda p, sha, c: ([(0, 0, 200, 60)], None))
+    by = rows.set_index("variant")
+    plate = by.loc["original"]
+    assert plate["image_bytes"] == (tmp_path / "plate.jpg").read_bytes()   # byte for byte
+    assert plate["bytes_sha256"] == hashlib.sha256(plate["image_bytes"]).hexdigest()
+    form = by.loc["redacted"]
+    assert form["image_bytes"] != (tmp_path / "form.jpg").read_bytes()
+    assert form["bytes_sha256"] == hashlib.sha256(form["image_bytes"]).hexdigest()
+    assert len(rows) == 2 and not skipped                                  # rejected: no photo
+    assert stats["files:stored:original"] == stats["files:stored:redacted"] == 1
+
+
+def test_a_form_whose_labels_cant_be_found_is_not_stored_at_all(tmp_path):
+    _jpg(tmp_path / "form.jpg")
+    docs = _docs(("form.jpg", "incident_report", "loaded"))
+    stats = Counter()
+    rows, skipped = ii.image_files(tmp_path, docs, stats,
+                                   boxes_fn=lambda p, sha, c: (None, "labels_not_found"))
+    assert len(rows) == 0 and skipped == {1: "labels_not_found"}
+    assert stats["files:not_stored:labels_not_found"] == 1
+    flagged = ii.flag_unstored(docs, skipped)
+    assert flagged.loc[0, "warnings"] == "form_image_not_stored"
+
+
+def test_redacted_forms_can_be_written_out_to_check_by_eye(tmp_path):
+    _jpg(tmp_path / "IR-2024-900.jpg")
+    docs = _docs(("IR-2024-900.jpg", "incident_report", "loaded"))
+    ii.image_files(tmp_path, docs, Counter(), preview_dir=tmp_path / "preview",
+                   boxes_fn=lambda p, sha, c: ([(0, 0, 50, 50)], None))
+    assert (tmp_path / "preview" / "IR-2024-900_redacted.jpg").is_file()
+
+
+def test_the_public_view_offers_nameplates_and_redacted_forms_only():
+    sql = "\n".join(ii.ddl("img_"))
+    view = next(s for s in ii.ddl("img_") if "VIEW img_files_public" in s)
+    assert "doc_type = 'nameplate' AND f.variant = 'original'" in view
+    assert "doc_type = 'incident_report' AND f.variant = 'redacted'" in view
+    assert "status = 'loaded'" in view
+    assert "image_bytes" not in "\n".join(s for s in ii.ddl("img_") if "_audit AS" in s)
+    assert "PRIMARY KEY (image_sha256, variant)" in sql
+
+
+@pytest.mark.skipif(shutil.which("tesseract") is None or not (SCANS / "IR-2024-900.jpg").is_file(),
+                    reason="needs Tesseract and the sample scan")
+def test_the_real_form_redacted_shows_no_employee_code_and_keeps_the_rest():
+    import re
+    import pytesseract
+    img = ii.read_image(SCANS / "IR-2024-900.jpg")
+    boxes = ii.redaction_boxes(img)
+    assert boxes is not None and len(boxes) == 2
+    text = pytesseract.image_to_string(ii.redact(img, boxes), config="--psm 6")
+    assert not re.search(r"EMP\s*[0-9O]{2,}", text, re.I)          # the code is gone
+    assert "weld flash burn" in text and "IR-2024-900" in text.replace("9OO", "900")
+
+
+def _ink_left_below(img, boxes) -> int:
+    """Blue (value) ink pixels in the 120 px under the signature box, across its width."""
+    import numpy as np
+    x0, y0, x1, y1 = boxes[1]
+    band = img[y1: y1 + 120, x0: x1].astype(int)
+    if band.size == 0:
+        return 0
+    b, g, r = band[..., 0], band[..., 1], band[..., 2]
+    return int(((b - r > 40) & (b + g + r < 600)).sum())
+
+
+FORMS = sorted(SCANS.glob("IR-*.jpg")) if SCANS.is_dir() else []
+
+
+@pytest.mark.skipif(shutil.which("tesseract") is None or not FORMS,
+                    reason="needs Tesseract and the scanned forms in data/images/")
+@pytest.mark.parametrize("form", FORMS, ids=lambda p: p.stem)
+def test_no_signature_ink_is_left_below_the_box_on_any_real_form(form):
+    """6 Nov 2026: on 917, 918, 955 and 957 the signature's tail showed under the box."""
+    img = ii.read_image(form)
+    boxes = ii.redaction_boxes(img)
+    assert boxes is not None, "labels not found: this form would not be stored"
+    assert _ink_left_below(ii.redact(img, boxes), boxes) < 20

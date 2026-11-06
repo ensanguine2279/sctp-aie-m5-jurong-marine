@@ -273,3 +273,15 @@ def test_crlf_env_file_is_read_without_carriage_returns(monkeypatch, capsys, cle
     clean_env.write_bytes(b"AGENT_DB_USERNAME=agent_ro\r\nDB_NAME=jurong\r\n")
     out = _dry_run(monkeypatch, capsys, clean_env)
     assert "App user 'agent_ro'@'%' on database `jurong`" in out
+
+
+def test_the_page_may_show_photos_but_never_the_photo_table_or_raw_ocr():
+    """img_files_public: nameplates as they are, forms only redacted. The table behind it
+    and img_documents_raw (a form's person as read) stay out of reach."""
+    objs = au.allowed_objects(Names())
+    assert "img_files_public" in objs
+    assert "img_files" not in objs and "img_documents_raw" not in objs
+    assert "scan_files_public" in au.allowed_objects(Names(image_prefix="scan_"))
+    probes = dict(au.forbidden_probes(Names()))
+    assert "img_documents_raw" in probes["raw OCR of the scans"]
+    assert "`img_files`" in probes["the photo table itself"]

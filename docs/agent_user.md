@@ -24,10 +24,11 @@ not granted.
 | `table_relationships` (join paths, orphan counts) | every `*_raw` table, including `img_documents_raw` (the OCR text of each scan, and a form's "person involved" exactly as read) and `sop_documents_raw` (every file in the SOP folder as read, including the GM's email with names and addresses) |
 | The audit views for citations: `cmms_machines_audit`, `cmms_work_orders_audit`, `cmms_safety_incidents_audit`, `vibration_temp_audit`, `critical_spares_audit`, `img_nameplates_audit`, `img_incident_reports_audit` | the clean tables themselves (`vibration_temp`, `cmms_work_orders`, `img_nameplates`, ...) and `ingest_runs`, with two SOP exceptions (left) |
 | The SOPs: `sops` (to find an SOP with `MATCH ... AGAINST`), `sops_audit`, `sop_steps_audit` (to quote it whole with its citation), `sop_machines` (which SOPs cover a machine) | `sop_ft_stopwords` (the index's word list, not for the app) |
+| The photos the page shows: `img_files_public` (nameplates as they are; incident forms **only** with the person and the signature covered, see [`ingest_images.md`](ingest_images.md#photos-for-the-app)) | `img_files`, the table behind it |
 | | any write, any schema change, granting itself more |
 
 MySQL denies everything not granted, and every run drops the user and creates it again,
-so nothing granted earlier survives: the 20 objects above are all the user can read.
+so nothing granted earlier survives: the 21 objects above are all the user can read.
 (Dropping and recreating, rather than `REVOKE ALL`, also works on hosted MySQL, where
 even the admin account is kept out of some databases.)
 
@@ -113,6 +114,8 @@ Blocked (must fail):
   ok      employees audit view: denied
   ok      raw employee rows: denied
   ok      raw SOP files (the GM's email): denied
+  ok      raw OCR of the scans: denied
+  ok      the photo table itself: denied
   ok      writing data: denied
   ok      changing the schema: denied
 
@@ -190,9 +193,10 @@ again recreates the user from `.env`.
 
 ## Tests
 
-`tests/test_agent_user.py` (28 tests, no database): the allow-list never includes employees
+`tests/test_agent_user.py` (29 tests, no database): the allow-list never includes employees
 or raw tables (nor the scans' raw OCR, nor the raw SOP files) and follows the ingest
-prefixes, the scans' audit and comparison views granted, the SOP table and views granted,
+prefixes, the scans' audit and comparison views granted, the photos' public view granted
+but never the table behind it or the raw OCR, the SOP table and views granted,
 objects with `emp_name` refused, missing objects skipped, a denied object told apart as
 "not created yet" or "exists but not granted" from what the admin sees (and failed when
 nobody can tell), `SELECT`-only grants after a full

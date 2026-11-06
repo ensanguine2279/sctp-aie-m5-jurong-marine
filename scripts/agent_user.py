@@ -8,7 +8,9 @@ an allow-list of views, then proves it:
 
     allowed   the linking views (machine_overview, work_order_detail, ...), the
               table_relationships catalog, the *_audit views needed for citations
-              (including the scanned nameplates and incident forms), and the SOPs:
+              (including the scanned nameplates and incident forms), the photos the
+              page shows (img_files_public: nameplates, and incident forms ONLY with the
+              person and signature covered), and the SOPs:
               sops (for MATCH ... AGAINST, whose FULLTEXT index is on the table),
               sops_audit, sop_steps_audit, sop_machines
     never     cmms_employees, cmms_employees_raw, cmms_employees_audit, any *_raw table
@@ -68,6 +70,8 @@ def allowed_objects(names: Names) -> list[str]:
         "critical_spares_audit",
         f"{names['nameplates']}_audit",               # scanned images: file + SHA-256 cited
         f"{names['incident_reports']}_audit",
+        f"{names.image_prefix}files_public",          # the photos the page shows: nameplates
+                                                      # as they are, forms only redacted
         *SOP_OBJECTS,                                 # find an SOP, quote it whole, cite it
     ]
 
@@ -81,6 +85,8 @@ def forbidden_probes(names: Names) -> list[tuple[str, str]]:
         ("employees audit view", f"SELECT * FROM `{emp}_audit` LIMIT 1"),
         ("raw employee rows", f"SELECT * FROM `{emp}_raw` LIMIT 1"),
         ("raw SOP files (the GM's email)", "SELECT * FROM `sop_documents_raw` LIMIT 1"),
+        ("raw OCR of the scans", f"SELECT * FROM `{names.image_prefix}documents_raw` LIMIT 1"),
+        ("the photo table itself", f"SELECT image_sha256 FROM `{names.image_prefix}files` LIMIT 1"),
         ("writing data", f"UPDATE `{names['machines']}` SET machine_name = machine_name "
                          f"WHERE 1 = 0"),
         ("changing the schema", "CREATE TABLE agent_user_probe (x INT)"),
