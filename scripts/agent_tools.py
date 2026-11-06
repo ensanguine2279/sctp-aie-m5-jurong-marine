@@ -435,9 +435,12 @@ def list_machines(db: Db, a: NoArgs) -> ToolResult:
 NAMEPLATE_FIELDS = ["manufacturer", "plate_model", "serial_no", "mfg_month", "power_kw", "phases",
                     "voltage_min_v", "voltage_max_v", "capacity_raw", "rated_current_a",
                     "duty_cycle_pct", "weight_kg", "lubricant", "grease_interval_h"]
-# warning suffix (ingest_images.py) -> nameplate field
+# Everything parsed from the POWER line. ingest_images compares the two engines on these
+# (powers_agree), so a power warning means one of them differs: it applies to all four.
+POWER_FIELDS = ("power_kw", "phases", "voltage_min_v", "voltage_max_v")
+# warning suffix (ingest_images.py) -> nameplate field(s)
 _FLAG_FIELD = {"lubricant": "lubricant", "oil": "lubricant", "grease_interval": "grease_interval_h",
-               "grease": "grease_interval_h", "weight": "weight_kg", "power": "power_kw",
+               "grease": "grease_interval_h", "weight": "weight_kg", "power": POWER_FIELDS,
                "serial": "serial_no", "serial_no": "serial_no", "mfg_date": "mfg_month",
                "mfg_month": "mfg_month", "date": "mfg_month", "capacity": "capacity_raw",
                "model": "plate_model", "manufacturer": "manufacturer", "maker": "manufacturer",
@@ -445,8 +448,26 @@ _FLAG_FIELD = {"lubricant": "lubricant", "oil": "lubricant", "grease_interval": 
                "duty_cycle": "duty_cycle_pct"}
 _WHOLE_FLAGS = {"lubricant_without_grade": "lubricant", "bad_weight": "weight_kg",
                 "bad_mfg_date": "mfg_month", "duty_cycle_rating_on_non_welder": "capacity_raw",
-                "placeholder_manufacturer": "manufacturer"}
+                "placeholder_manufacturer": "manufacturer",
+                "capacity_looks_like_power_line": "capacity_raw"}
 _UNREADABLE = ("failed_format_", "bad_")
+# Prefixes of per-field OCR warnings, from ingest_images.py. engines_disagree_ and
+# one_engine_only_ come from --engine both (Tesseract and the vision model compared).
+_FIELD_PREFIXES = ("engines_disagree_", "one_engine_only_", "ocr_no_majority_",
+                   "ocr_disagreed_", "failed_format_", "bad_")
+# Plate values checked by eye against the photo (trap list I15, I18, I21). Not a
+# correction: the stored value is never changed here. If it matches, the field is
+# 'checked_by_eye'; if it doesn't (an older load, a re-read), the answer gives both.
+# (machine, field) -> (the photo's value, how to say it)
+EYE_CHECKED = {
+    ("CNC-03", "grease_interval_h"): (500, "500 h"),
+    ("CNC-03", "weight_kg"): (8092, "8092 kg"),
+    ("CRN-02", "grease_interval_h"): (500, "500 h"),
+    ("CRN-02", "capacity_raw"): ("2000 kg", "2000 kg"),
+    ("WELD-02", "lubricant"): ("Shell Tonna S3 M68", "Shell Tonna S3 M68"),
+    ("CMP-01", "lubricant"): ("Shell Tonna S3 M68", "Shell Tonna S3 M68"),
+}
+EYE_CHECK_DATE = "4 Nov 2026"
 # Trap-list findings about plate values that a clear OCR reading doesn't settle. Kept in
 # code, not in the prompt, so every answer that touches these fields carries them.
 KNOWN_CONCERNS = {
@@ -454,23 +475,17 @@ KNOWN_CONCERNS = {
         "rating on a blasting chamber; the client has been asked (trap list I2, Q15).",
     ("CRN-01", "capacity_raw"): "The plate's capacity line is a welder's rating, not a crane "
         "load. For crane loads cite SOP-CRANE-02 (find_sop) (trap list I19, D7).",
-    ("CRN-02", "capacity_raw"): "OCR stored 2600 kg; checked by eye, the photo reads 2000 kg, "
-        "as SOP-CRANE-02 says. For crane loads cite SOP-CRANE-02 (find_sop) (trap list I15, D7).",
-    # Values checked by eye against the photo (trap list I15). The stored value is the OCR
-    # tie-break and is NOT changed here; the answer gives both. The lasting fix is a
-    # reviewed-corrections table at ingest, so the value itself carries its provenance.
-    ("CNC-03", "grease_interval_h"): "OCR stored 590 h; checked by eye, the photo reads 500 h "
-        "(trap list I15). Give 500 h as the photo's value and say how it was checked.",
-    ("CNC-03", "weight_kg"): "OCR stored 8892 kg; checked by eye, the photo reads 8092 kg "
-        "(trap list I15).",
-    ("CRN-02", "grease_interval_h"): "OCR stored 509 h; checked by eye, the photo reads 500 h "
-        "(trap list I15). Give 500 h as the photo's value and say how it was checked.",
+    ("CRN-02", "capacity_raw"): "For crane loads cite SOP-CRANE-02 (find_sop): CRN-02 = 2,000 kg "
+        "(trap list D7).",
     ("PMP-T01", "capacity_raw"): "The plate's capacity line is a welder's rating on a pump "
         "(trap list I19).",
     ("WELD-02", "capacity_raw"): "The plate's capacity line is a compressor's air delivery on a "
         "welder (trap list I19).",
     ("WELD-02", "weight_kg"): "The plate's weight is a compressor's, not a portable welder's "
         "(trap list I19).",
+    ("CNC-01", "weight_kg"): "Both OCR engines read 9257 kg, but that is 2.5 times CNC-02's "
+        "3680 kg, and CNC-02 is the larger lathe (Mazak QT-350 vs QT-250). The line may be "
+        "copied from another machine's plate; the client has been asked (trap list I19, Q15).",
     ("BLAST-01", "lubricant"): "The plate names a slideway oil for a blasting chamber; the "
         "client has been asked to confirm (trap list I3, I20, Q15-Q16).",
     ("CMP-01", "lubricant"): "The plate names a slideway oil; screw compressors normally take "
@@ -489,25 +504,65 @@ def field_flags(warnings: str | None) -> dict[str, list[str]]:
     for w in [x.strip() for x in str(warnings or "").split(",") if x.strip()]:
         target = _WHOLE_FLAGS.get(w)
         if not target:
-            for prefix in ("ocr_no_majority_", "ocr_disagreed_", "failed_format_", "bad_"):
+            for prefix in _FIELD_PREFIXES:
                 if w.startswith(prefix):
                     target = _FLAG_FIELD.get(w[len(prefix):])
                     break
-        out.setdefault(target or "_other", []).append(w)
+        targets = target if isinstance(target, tuple) else (target or "_other",)
+        for t in targets:
+            out.setdefault(t, []).append(w)
     return out
 
 
 def confidence(flags: list[str]) -> str:
-    """unreadable: the value failed its check, don't quote it as fact. uncertain: no two
-    OCR passes agreed, the stored value is a tie-break. read_by_majority: passes differed
-    but two agreed. clear: no flag."""
-    if any(f.startswith(_UNREADABLE) or f == "lubricant_without_grade" for f in flags):
+    """From least to most trusted:
+    unreadable         the value failed its check: don't quote it as fact
+    engines_disagreed  Tesseract and the vision model read different values; the stored one
+                       was chosen by rule (ingest_images.md, decision tree 2): not confirmed
+    uncertain          no two Tesseract passes agreed: the stored value is a tie-break
+    read_by_majority   Tesseract's passes differed, but two agreed
+    read_by_one_engine with --engine both, only one engine read the field
+    clear              no flag (with --engine both: both engines read the same value)"""
+    if any(f.startswith(_UNREADABLE) or f in ("lubricant_without_grade",
+                                               "capacity_looks_like_power_line") for f in flags):
         return "unreadable"
+    if any(f.startswith("engines_disagree_") for f in flags):
+        return "engines_disagreed"
     if any(f.startswith("ocr_no_majority_") for f in flags):
         return "uncertain"
     if any(f.startswith("ocr_disagreed_") for f in flags):
         return "read_by_majority"
+    if any(f.startswith("one_engine_only_") for f in flags):
+        return "read_by_one_engine"
     return "clear"
+
+
+# Confidences the answer must not state as fact.
+NOT_RELIABLE = ("uncertain", "unreadable", "engines_disagreed")
+
+
+def _same_value(a, b) -> bool:
+    if a is None or b is None or (pd.api.types.is_scalar(a) and pd.isna(a)):
+        return False
+    if isinstance(b, (int, float)):
+        try:
+            return abs(float(a) - float(b)) < 1e-6
+        except (TypeError, ValueError):
+            return False
+    return re.sub(r"[\W_]", "", str(a).lower()) == re.sub(r"[\W_]", "", str(b).lower())
+
+
+def eye_check(mid: str, f: str, value) -> tuple[str | None, str | None]:
+    """(new confidence or None, note or None) for a value checked by eye against the photo."""
+    if (mid, f) not in EYE_CHECKED:
+        return None, None
+    photo, said = EYE_CHECKED[(mid, f)]
+    item = "I18" if f == "lubricant" else "I15"
+    if _same_value(value, photo):
+        return "checked_by_eye", (f"Checked by eye against the photo ({EYE_CHECK_DATE}): it "
+                                  f"reads {said}, as stored (trap list {item}).")
+    return None, (f"Stored {value}; checked by eye ({EYE_CHECK_DATE}), the photo reads {said}. "
+                  f"Give {said} as the photo's value and say how it was checked (trap list {item}).")
 
 
 class MachineArgs(Args):
@@ -518,7 +573,8 @@ class MachineArgs(Args):
 
 def _nameplate(db: Db, mid: str) -> tuple[dict | None, dict]:
     rows = db.query(
-        "SELECT n.*, a.source_file, a.image_sha256, a.warnings FROM machine_nameplate n "
+        "SELECT n.*, a.source_file, a.image_sha256, a.warnings, a.ocr_engine "
+        "FROM machine_nameplate n "
         "LEFT JOIN img_nameplates_audit a ON a.raw_id = n.raw_id WHERE n.machine_id = :m",
         {"m": mid})
     if not rows or not rows[0].get("has_nameplate"):
@@ -533,17 +589,24 @@ def _nameplate(db: Db, mid: str) -> tuple[dict | None, dict]:
         entry = {"value": r[f], "confidence": confidence(fl) if r[f] is not None else "not_read"}
         if fl:
             entry["ocr_flags"] = fl
-        if (mid, f) in KNOWN_CONCERNS:
-            entry["concern"] = KNOWN_CONCERNS[(mid, f)]
+        checked, check_note = eye_check(mid, f, r[f])
+        if checked:
+            entry["confidence"] = checked
+            entry["checked"] = check_note
+        concerns = [c for c in (check_note if not checked else None,
+                                KNOWN_CONCERNS.get((mid, f))) if c]
+        if concerns:
+            entry["concern"] = " ".join(concerns)
         fields[f] = entry
     return r, fields
 
 
 @tool("get_nameplate", """What a machine's nameplate photo says, field by field (maker,
 model, serial, manufacture month, power, voltage, capacity, weight, lubricant, grease
-interval), each with an OCR confidence: clear, read_by_majority, uncertain (no two OCR
-passes agreed) or unreadable. Quote an uncertain or unreadable value only as 'the photo
-reads ..., not certain' and cite the image.""", MachineArgs)
+interval), each with a confidence: checked_by_eye, clear, read_by_one_engine,
+read_by_majority, uncertain (no two OCR passes agreed), engines_disagreed (the two readers
+disagreed) or unreadable. Quote an uncertain, engines_disagreed or unreadable value only as
+'the photo reads ..., not certain' and cite the image.""", MachineArgs)
 def get_nameplate(db: Db, a: MachineArgs) -> ToolResult:
     mid = machine_arg(db, a.machine)
     r, fields = _nameplate(db, mid)
@@ -552,16 +615,20 @@ def get_nameplate(db: Db, a: MachineArgs) -> ToolResult:
                           notes=[f"There is no nameplate photo for {mid} in the data."],
                           sources=[cite("table", "machine_nameplate")])
     notes = [f"{f}: {e['concern']}" for f, e in fields.items() if "concern" in e]
-    shaky = [f for f, e in fields.items() if e["confidence"] in ("uncertain", "unreadable")]
+    notes += [f"{f}: {e['checked']}" for f, e in fields.items() if "checked" in e]
+    shaky = [f for f, e in fields.items() if e["confidence"] in NOT_RELIABLE]
     if shaky:
         notes.append("Not reliably read from the photo: " + ", ".join(shaky)
                      + ". Say so and cite the image; don't state these as fact.")
     if r.get("model_agrees") == 0:
         notes.append(f"The plate's model ({r.get('plate_model')}) differs from the CMMS model "
                      f"({r.get('logged_model')}).")
+    if any(e["confidence"] == "engines_disagreed" for e in fields.values()):
+        notes.append("engines_disagreed: Tesseract and the vision model read the photo "
+                     "differently; the value given was chosen by rule, not confirmed.")
     data = {"machine_id": mid, "machine_name": r.get("machine_name"), "has_nameplate": True,
             "cmms_model": r.get("logged_model"), "model_agrees": r.get("model_agrees"),
-            "fields": fields}
+            "read_by": r.get("ocr_engine"), "fields": fields}
     return ToolResult("get_nameplate", True, data=data, notes=notes, sources=[
         cite("image", "img_nameplates_audit", file=r.get("source_file"),
              sha256=r.get("image_sha256"), what=f"{mid} nameplate photo")])
@@ -674,11 +741,13 @@ def machine_lubrication(db: Db, a: MachineArgs) -> ToolResult:
         for label, f in (("oil", plate_oil), ("grease interval", plate_grease)):
             if not f or f["value"] is None:
                 notes.append(f"The nameplate gives no readable {label}.")
-            elif f["confidence"] in ("uncertain", "unreadable"):
+            elif f["confidence"] in NOT_RELIABLE:
                 notes.append(f"The nameplate's {label} ({f['value']}) was not reliably read "
                              f"({f['confidence']}): say so and point to the photo.")
             if f and f.get("concern"):
                 notes.append(f["concern"])
+            if f and f.get("checked"):
+                notes.append(f["checked"])
     if spares:
         sources += cite_rows(pd.DataFrame(spares), "critical_spares_audit", "file", "source_row",
                              "row", what="Critical spares sheet")

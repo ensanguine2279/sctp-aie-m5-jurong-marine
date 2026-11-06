@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -292,9 +293,18 @@ def test_incident_form_end_to_end():
         (4, "1_worst", 2)                                     # same as the CMMS date rule
     assert r["root_cause_attached"] == 1 and r["signature_present"] == 1
     warnings = out["documents"].iloc[0]["warnings"].split(",")
-    assert "root_cause_in_attachment" in warnings and "date_assumed_day_first" in warnings
+    assert "root_cause_in_attachment" in warnings
     assert "form_scale_contradicts_date_rule" not in warnings
     assert stats["incident_reports:scale:1_worst"] == 1
+
+
+def test_day_first_dates_are_not_flagged_on_forms():
+    """Every form writes dd/mm/yyyy: a warning on all 30 hid the ones that matter."""
+    out, _ = run(form_text(date="01/07/2024"), form_text(report_no="IR-2024-919",
+                                                          date="24/08/2024"))
+    assert str(out["incident_report"].iloc[0]["incident_date"]) == "2024-07-01"
+    assert str(out["incident_report"].iloc[1]["incident_date"]) == "2024-08-24"
+    assert not out["documents"]["warnings"].str.contains("date_assumed_day_first").any()
 
 
 def test_form_whose_printed_scale_contradicts_its_date_is_flagged_not_overruled():
@@ -431,6 +441,342 @@ def test_llm_fields_get_the_same_parsing_and_checks():
     assert r["signature_present"] == 0
     assert "signature_missing" in out["documents"].iloc[0]["warnings"]
     assert out["documents"].iloc[0]["ocr_engine"] == "llm:gpt-4o-mini"
+
+
+# ------------------------------------------------------- both engines ---
+
+LLM = "llm:gpt-4o-mini"
+PLATE_LLM = {"doc_type": "nameplate", "manufacturer": "CUSTOM", "model": "SG-Fab",
+             "serial_no": "CU6744884", "mfg_date": "03/2014", "power": "15 kW 3PH 380-440V",
+             "capacity": "450 A @ 60%", "weight": "7929 kg", "lubricant": "Shell Tonna S3 M68",
+             "grease_interval": "1000 h", "asset_tag": "BLAST-01"}
+FORM_LLM = {"doc_type": "incident_report", "report_no": "IR-2024-900", "date": "01/07/2024",
+            "location": "LTH-01 — workshop bay", "person": "EMP001",
+            "description": "weld flash burn", "severity": "4",
+            "severity_label": "1 = MOST SEVERE", "lost_work_days": "0",
+            "reporting": "found during audit",
+            "immediate_action": "first aid administered, sent to clinic",
+            "root_cause": "see attached"}
+
+
+def both(tess: Extraction, llm_fields: dict | None = None, *, llm_sig=None,
+         llm_error=None) -> Extraction:
+    llm = Extraction(LLM, fields=llm_fields, signature=llm_sig, error=llm_error)
+    return ii.combine(tess, llm, "gpt-4o-mini")
+
+
+def warnings_of(out) -> list[str]:
+    return (out["documents"].iloc[0]["warnings"] or "").split(",")
+
+
+def test_engines_agreeing_confirm_what_tesseract_was_unsure_of():
+    """BLAST-01: Tesseract's passes disagreed on the grease interval, tag and oil; the vision
+    model reads the same values, so those doubts are dropped."""
+    out, _ = run(both(PLATE, PLATE_LLM))
+    p = out["nameplate"].iloc[0]
+    assert (p["asset_tag"], p["grease_interval_h"], p["lubricant"]) == \
+        ("BLAST-01", 1000, "Shell Tonna S3 M68")
+    w = warnings_of(out)
+    assert not [x for x in w if x.startswith(("ocr_disagreed", "engines_disagree"))]
+    assert out["documents"].iloc[0]["ocr_engine"] == "both:tesseract-v2+llm-v3:gpt-4o-mini"
+
+
+def test_engines_disagreeing_are_flagged_with_both_readings():
+    """CRN-02: Tesseract's passes read 509 / 566 / 500 h (no majority, 509 kept)."""
+    tess = plate({"GREASE INTERVAL": "509 h"}, {"GREASE INTERVAL": "566 h"},
+                 {"GREASE INTERVAL": "500 h"})
+    out, _ = run(both(tess, PLATE_LLM | {"grease_interval": "500 h"}))
+    assert out["nameplate"].iloc[0]["grease_interval_h"] == 500     # the vision model's
+    w = warnings_of(out)
+    assert "engines_disagree_grease_interval" in w
+    # One warning per field: Tesseract's own doubts stay in ocr_notes, not in the warnings
+    assert "ocr_no_majority_grease_interval" not in w
+    assert "ocr_disagreed_grease_interval" not in w
+    notes = json.loads(out["documents"].iloc[0]["ocr_notes"])
+    assert {n["issue"] for n in notes if n["field"] == "grease_interval"} == \
+        {"engines_disagree", "disagreed", "no_majority"}
+    note = next(n for n in json.loads(out["documents"].iloc[0]["ocr_notes"])
+                if n["issue"] == "engines_disagree" and n["field"] == "grease_interval")
+    assert note["readings"] == {"tesseract": "509 h", "llm": "500 h"}
+
+
+def test_a_lone_model_misreading_never_overrules_a_tesseract_majority():
+    """BLAST-01: two of Tesseract's three passes read 1000 h. A model reading of 100 h
+    (also a valid interval) is flagged, not stored."""
+    out, _ = run(both(PLATE, PLATE_LLM | {"grease_interval": "100 h"}))
+    assert out["nameplate"].iloc[0]["grease_interval_h"] == 1000
+    assert "engines_disagree_grease_interval" in warnings_of(out)
+
+
+def test_on_disagreement_the_reading_that_passes_its_check_wins():
+    out, _ = run(both(PLATE, PLATE_LLM | {"asset_tag": "BLAST-O1"}))     # fails the tag check
+    assert out["nameplate"].iloc[0]["asset_tag"] == "BLAST-01"
+    assert "engines_disagree_asset_tag" in warnings_of(out)
+
+
+def test_a_value_both_engines_read_wrong_is_still_flagged():
+    """WELD-02: Tesseract read 'M58' on all three passes; if the model agrees, the grade
+    check still catches it."""
+    tess = plate({"LUBRICANT": "Shell Tonna S3 M58"})
+    out, _ = run(both(tess, PLATE_LLM | {"lubricant": "Shell Tonna S3 M58"}))
+    w = warnings_of(out)
+    assert "failed_format_lubricant" in w and "engines_disagree_lubricant" not in w
+
+
+def test_vision_model_supplies_a_severity_tesseract_lost():
+    """I12: the new form's severity under the label print; the ink reader abstained, and
+    the page text took the next line ('Lost work days: 0') as the value."""
+    tess = Extraction(ii.TESSERACT_TAG, texts={"gray": NEW_FORM}, signature=1)
+    llm = FORM_LLM | {"report_no": "IR-2025-904", "date": "29/12/2025", "severity": "2",
+                      "severity_label": "5 = MOST SEVERE, new WSH matrix"}
+    out, _ = run(both(tess, llm, llm_sig=1))
+    r = out["incident_report"].iloc[0]
+    assert (r["severity_scale"], r["severity_5_worst"]) == ("5_worst", 2)
+    w = warnings_of(out)
+    assert "engines_disagree_severity" in w                   # 'Lost work days: 0' fails
+    assert "engines_disagree_severity_label" not in w        # W8H vs WSH: same scale
+
+
+def test_value_ink_and_vision_model_agreeing_need_no_flag_beyond_the_ink_note():
+    tess = Extraction(ii.TESSERACT_TAG, texts={"gray": NEW_FORM}, signature=1,
+                      ink={"severity": "2"})
+    llm = FORM_LLM | {"report_no": "IR-2025-904", "date": "29/12/2025", "severity": "2",
+                      "severity_label": "5 = MOST SEVERE"}
+    out, _ = run(both(tess, llm, llm_sig=1))
+    w = warnings_of(out)
+    assert out["incident_report"].iloc[0]["severity_5_worst"] == 2
+    assert "engines_disagree_severity" not in w and "one_engine_only_severity" not in w
+
+
+def test_a_field_only_one_engine_read_is_kept_and_flagged():
+    llm = {k: v for k, v in PLATE_LLM.items() if k != "capacity"}
+    out, _ = run(both(PLATE, llm))
+    assert out["nameplate"].iloc[0]["rated_current_a"] == 450.0
+    assert "one_engine_only_capacity" in warnings_of(out)
+
+
+# What the two engines read on the 42 scans (6 Nov 2026, engines_disagree notes). The
+# model read the scale's '5' from '(5 = MOST SEVERE ...)' as the severity on every new form.
+
+def new_form(ink: str | None, llm_severity: str | None, *, page_severity=None) -> Extraction:
+    text = NEW_FORM if page_severity is None else NEW_FORM.replace(
+        "new W8H matrix):", f"new W8H matrix): {page_severity}")
+    tess = Extraction(ii.TESSERACT_TAG, texts={"gray": text, "otsu": text, "adaptive": text},
+                      signature=1, ink={"severity": ink} if ink else None)
+    llm = FORM_LLM | {"report_no": "IR-2025-904", "date": "29/12/2025",
+                      "severity": llm_severity, "severity_label": "MOST SEVERE, new WSH matrix"}
+    return both(tess, llm, llm_sig=1)
+
+
+@pytest.mark.parametrize("ink,model,kept", [
+    ("2", "5", 2),      # 904: ink 2 = CMMS; the model gave the label's 5
+    ("3", "5", 3),      # 906
+    ("2", "5", 2),      # 975
+    ("5", "2", 5),      # 913: ink 5 = CMMS; the model 2
+])
+def test_blue_ink_reading_beats_the_model_on_the_new_forms(ink, model, kept):
+    out, _ = run(new_form(ink, model))
+    assert out["incident_report"].iloc[0]["severity_5_worst"] == kept
+
+
+def test_model_reading_the_scale_digit_is_never_used_on_its_own():
+    """911: the ink reader abstained, the page text took the next line, the model gave 5."""
+    out, _ = run(new_form(None, "5"))
+    assert ii.pd.isna(out["incident_report"].iloc[0]["severity_5_worst"])
+    w = warnings_of(out)
+    assert "llm_read_scale_digit_severity" in w
+    assert "engines_disagree_severity" not in w            # the model's 5 wasn't a candidate
+    assert "one_engine_only_severity" not in w             # one flag per form, not two
+
+
+def test_blue_ink_kept_over_a_scale_digit_has_one_severity_flag_only():
+    out, _ = run(new_form("2", "5"))                        # 904
+    w = warnings_of(out)
+    assert out["incident_report"].iloc[0]["severity_5_worst"] == 2
+    assert "llm_read_scale_digit_severity" in w and "read_from_value_ink_severity" in w
+    assert "one_engine_only_severity" not in w
+
+
+def test_model_severity_that_is_not_the_scale_digit_fills_a_lost_value():
+    out, _ = run(new_form(None, "3"))
+    assert out["incident_report"].iloc[0]["severity_5_worst"] == 3
+    assert "engines_disagree_severity" in warnings_of(out)
+
+
+def test_scale_digit_guard_on_the_old_form_too():
+    out, _ = run(both(FORM, FORM_LLM | {"severity": "1"}))    # '1 = MOST SEVERE': page says 4
+    assert out["incident_report"].iloc[0]["severity_as_logged"] == 4
+    assert "llm_read_scale_digit_severity" in warnings_of(out)
+
+
+def test_scale_digit_agreeing_with_tesseract_is_kept():
+    out, _ = run(both(form_text(severity_line="Severity (1 = MOST SEVERE): 1"),
+                      FORM_LLM | {"severity": "1"}))
+    assert out["incident_report"].iloc[0]["severity_as_logged"] == 1
+    assert "llm_read_scale_digit" not in (out["documents"].iloc[0]["warnings"] or "")
+
+
+@pytest.mark.parametrize("field,tess_line,llm_value,kept", [
+    ("immediate_action", "area cordoned, toalbox briefing conducted",     # IR-2024-982
+     "area cordoned, toolbox briefing conducted", "area cordoned, toolbox briefing conducted"),
+    ("description", "weld flash bum", "weld flash burn", "weld flash burn"),
+])
+def test_free_text_goes_to_the_model(field, tess_line, llm_value, kept):
+    label = {"immediate_action": "first aid administered, sent to clinic",
+             "description": "weld flash burn"}[field]
+    texts = {k: v.replace(label, tess_line) for k, v in FORM.texts.items()}
+    out, _ = run(both(Extraction(ii.TESSERACT_TAG, texts=texts, signature=1),
+                      FORM_LLM | {field: llm_value}, llm_sig=1))
+    assert out["incident_report"].iloc[0][field] == kept
+    note = next(n for n in json.loads(out["documents"].iloc[0]["ocr_notes"])
+                if n["field"] == field)
+    assert note["rule"] == "free_text_llm"
+
+
+@pytest.mark.parametrize("tess,model,agree", [
+    ("22 kW 3PH 415y SOHz", "22 kW 3PH 415V 50Hz", True),     # CNC-01: typos, same values
+    ("7.5 kW 3PH 415V 56Hz", "7.5 kW 3PH 415V 50Hz", True),   # PMP-T01: Hz isn't stored
+    ("15 kW 3PH 389-440V", "15 kW 3PH 380-440V", False),      # a real voltage difference
+    ("22 kW 3PH 415V", "15 kW 3PH 415V", False),              # kW
+    ("22 kW 3PH 415y SOHz", "22 kW", False),                  # the model's line cut short
+    ("22 kW 1PH 415V", "22 kW 3PH 415V", False),              # phases
+    ("22 kW 3PH", "22 kW 3PH 415V", False),                   # a voltage only one has
+])
+def test_power_lines_are_compared_on_kw_phases_and_voltage(tess, model, agree):
+    assert ii.powers_agree(tess, model) is agree
+
+
+def test_power_typos_alone_are_not_a_disagreement_and_the_clean_text_is_kept():
+    """CNC-01: '22 kW 3PH 415y SOHz' x3 vs the model's '22 kW 3PH 415V 50Hz'."""
+    tess = plate({"POWER": "22 kW 3PH 415y SOHz"}, {"POWER": "22 kW 3PH 415y SOHz"},
+                 {"POWER": "22 kW 3PH 415y SOHz"})
+    out, _ = run(both(tess, PLATE_LLM | {"power": "22 kW 3PH 415V 50Hz"}))
+    p = out["nameplate"].iloc[0]
+    assert (p["power_kw"], p["phases"], p["voltage_min_v"]) == (22.0, 3, 415)
+    assert "engines_disagree_power" not in warnings_of(out)
+
+
+@pytest.mark.parametrize("label,field,tess,llm", [
+    ("MFG DATE", "mfg_date", "10/2018 a", "10/2018"),          # CNC-01, 6 Nov 2026
+    ("WEIGHT", "weight", "3588 ka", "3588 kg"),                # CMP-01
+    ("GREASE INTERVAL", "grease_interval", "1000 hrs", "1000 h"),
+])
+def test_engines_are_compared_on_the_stored_value_not_the_text(label, field, tess, llm):
+    out, _ = run(both(plate({label: tess}), PLATE_LLM | {field: llm}))
+    w = warnings_of(out)
+    assert f"engines_disagree_{field}" not in w
+    assert json.loads(out["documents"].iloc[0]["fields_raw"])[field] == llm   # cleaner text
+
+
+@pytest.mark.parametrize("text,hours", [
+    ("1000 h", 1000), ("1000 hrs", 1000), ("1,000 hours", 1000), ("1O00 h", 1000),
+    ("500h", 500), ("590 h", 590), ("5@8 4", None),
+])
+def test_grease_interval_units_are_never_mangled_by_the_digit_fixes(text, hours):
+    assert ii.hours_of(text) == hours
+
+
+@pytest.mark.parametrize("text,kg", [
+    ("3588 ka", 3588.0), ("3588 kq", 3588.0), ("9257 kg ,", 9257.0), ("2,000 lb", 907.18),
+    ("1.5 t", 1500.0), ("heavy", None),
+])
+def test_weight_reads_ocrs_kg_misreadings(text, kg):
+    assert ii.weight_of(text)[0] == kg
+
+
+def test_a_real_difference_in_the_stored_value_is_still_a_disagreement():
+    out, _ = run(both(plate({"MFG DATE": "10/2018"}), PLATE_LLM | {"mfg_date": "11/2018"}))
+    assert "engines_disagree_mfg_date" in warnings_of(out)
+
+
+def test_a_power_line_the_model_split_keeps_tesseracts_whole_line():
+    """CNC-01 (6 Nov 2026): Tesseract read the power line whole, with typos; the model put
+    '22 kW' under power and the rest under capacity, which the plate doesn't have."""
+    tess = plate({"POWER": "22 kW 3PH 415y SOHz", "CAPACITY": None})
+    out, _ = run(both(tess, PLATE_LLM | {"power": "22 kW", "capacity": "3PH 415V 50Hz"}))
+    p = out["nameplate"].iloc[0]
+    assert (p["power_kw"], p["phases"]) == (22.0, 3)            # phases kept
+    w = warnings_of(out)
+    assert "capacity_looks_like_power_line" in w and "one_engine_only_capacity" in w
+    note = next(n for n in json.loads(out["documents"].iloc[0]["ocr_notes"])
+                if n["field"] == "power")
+    assert note["rule"] == "llm_reading_cut_short"
+
+
+@pytest.mark.parametrize("power,volts", [
+    ("22 kW 3PH 415V 50Hz", (415, 415)), ("15 kW 3PH 380-440V", (380, 440)),
+    ("22 kW 3PH 415y SOHz", (None, None)), ("7.5 kW", (None, None)),
+])
+def test_a_single_voltage_is_read_as_well_as_a_range(power, volts):
+    assert ii.voltages_of(power) == volts
+
+
+@pytest.mark.parametrize("capacity,looks", [
+    ("3PH 415V 50Hz", True), ("450 A @ 60%", False), ("2000 kg", False),
+    ("30 kW FAD 88 cfm", False), (None, False),
+])
+def test_capacity_that_is_really_a_power_line(capacity, looks):
+    assert ii.looks_like_power_line(capacity) is looks
+
+
+def test_document_only_one_engine_recognised_is_flagged_not_recognised():
+    out, _ = run(both(FORM, {"doc_type": "unknown"}, llm_sig=1))
+    assert out["incident_report"].iloc[0]["incident_id"] == 900
+    w = warnings_of(out)
+    assert "not_recognised_by_llm" in w and "engine_failed_llm" not in w
+
+
+def test_signature_disagreement_is_left_unknown():
+    out, _ = run(both(FORM, FORM_LLM, llm_sig=0))                 # Tesseract saw ink
+    assert ii.pd.isna(out["incident_report"].iloc[0]["signature_present"])
+    w = warnings_of(out)
+    assert "signature_unknown" in w and "engines_disagree_signature" in w
+    out, _ = run(both(FORM, FORM_LLM, llm_sig=1))
+    assert out["incident_report"].iloc[0]["signature_present"] == 1
+
+
+def test_one_engine_failing_falls_back_to_the_other_and_says_so():
+    out, _ = run(both(PLATE, llm_error="APITimeoutError: timed out"))
+    assert out["nameplate"].iloc[0]["asset_tag"] == "BLAST-01"
+    assert "engine_failed_llm" in warnings_of(out)
+    bad = Extraction(ii.TESSERACT_TAG, error="ValueError: not an image")
+    out, _ = run(ii.combine(bad, Extraction(LLM, error="APIError: 500"), "gpt-4o-mini"))
+    assert out["documents"].iloc[0]["reject_reason"] == "unreadable_image"
+
+
+def test_engines_seeing_different_document_types_reject_the_image():
+    out, _ = run(both(PLATE, FORM_LLM))
+    assert out["documents"].iloc[0]["reject_reason"] == "unknown_document_type"
+
+
+def test_a_name_read_by_either_engine_is_never_stored():
+    out, _ = run(both(FORM, FORM_LLM | {"person": "Seah Jia Hui"}))
+    assert out["incident_report"].iloc[0]["emp_code"] == "EMP001"     # the code passes its check
+    assert "Seah" not in out["incident_report"].to_string()
+    out, _ = run(both(form_text(person="Seah Jia Hui"), FORM_LLM | {"person": "Seah Jia Hui"}))
+    assert "Seah" not in out["incident_report"].to_string()
+
+
+def test_both_engines_read_and_cached_separately(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(ii, "extract_tesseract", lambda p: calls.append("t") or PLATE)
+    monkeypatch.setattr(ii, "extract_llm",
+                        lambda p, m: calls.append("l") or Extraction(f"llm:{m}", fields=PLATE_LLM))
+    for _ in range(2):
+        ex = ii.extract(tmp_path / "a.jpg", "f" * 64, "both", "gpt-4o-mini", tmp_path / "c")
+        assert set(ex.parts) == {"tesseract", "llm"}
+    assert calls == ["t", "l"]
+    assert len(list((tmp_path / "c").glob("*.json"))) == 2
+
+
+def test_llm_setup_problems_stop_the_run(monkeypatch):
+    import types
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=object))
+    monkeypatch.setitem(sys.modules, "dotenv", types.SimpleNamespace(load_dotenv=lambda: None))
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
+    with pytest.raises(RuntimeError, match="OPENAI_BASE_URL"):
+        ii.llm_client()
 
 
 # ------------------------------------------------------- cache and lineage ---
