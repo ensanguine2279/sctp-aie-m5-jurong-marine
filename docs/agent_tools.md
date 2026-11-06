@@ -173,3 +173,6 @@ Re-verified after the fixes, all against the real database:
 **Still not covered:** a systematic sweep of every tool against every trap-list item on the
 real data (the checks above were targeted, not exhaustive). That gap is what the eval
 suite (`evals/cases.yaml`, planned) is for — see [`HARNESS_CHECKLIST.md`](HARNESS_CHECKLIST.md#8).
+
+
+**`scale_quote` (added 5 Nov 2026).** `count_incidents` and `list_incidents` accept `scale_quote`, the user's own words naming the severity scale. The tool itself ignores it; [`agent_app.py`](agent_app.md) checks it against the conversation and removes a `severity_scale` the user never stated, so the tool returns `needs_clarification`. Calling the tool directly (`agent_tools.py call ...`) needs no quote.

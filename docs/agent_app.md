@@ -34,6 +34,7 @@ just asked for in the prompt:
 |---|---|---|
 | 1 (grounding) | Every fact comes from a tool call made this turn | The model only ever picks a tool and fills in arguments; `agent_tools.py` validates them and runs the fixed SQL. There is no path from "the model says X" to "the answer says X" that skips a tool |
 | 2 (citations) | Every answer can be checked | Every tool result's `sources` are collected across the whole turn (every tool call, not just the last) and shown under the answer as `sources[].label` |
+| C1 (severity scale) | The model can't pick a severity scale for the user | `count_incidents` / `list_incidents` take a `scale_quote`: the user's own words naming the scale. `scale_guessed()` checks the quote is really in a user message and names a scale ("5 is worst", "the current scale", "the old scale"; "severity 4 or worse" names none). If not, the scale is removed before the tool runs, so the tool returns `needs_clarification` and the user is asked. Found on the real run, 5 Nov 2026: gpt-4o-mini sent `"severity_scale":"5_is_worst"` on its own. Logged as `scale_guess_blocked` |
 | 4 (honest degradation) | A failure never becomes an invented value | A tool that asks for a clarification (`needs_clarification`, `ambiguous_machine`, e.g. a severity number with no scale) has its message returned to the user **in code**; the model is not called again, so it can't answer over the question (found on the real run, 5 Nov 2026: gpt-4o-mini invented a count after the tool refused). A failed chat-API call (budget cap, network, timeout) is caught as `ChatError` and gives a plain "I couldn't reach the language model" — never a guess. A tool error (`needs_clarification`, `no_data`, `tool_failed`, ...) goes back to the model as the tool's own message, and the system prompt tells it to say so, not paper over it. A model that keeps calling tools past `MAX_TOOL_ROUNDS` (6) gets stopped with an honest "try a narrower question" instead of looping forever |
 
 What it does **not** yet do, by design (see the capstone task list, not an oversight):
@@ -72,6 +73,26 @@ final plain-text answer, the sources gathered along the way, and which tools ran
 `--debug` and the log). It never raises: a chat failure or an exhausted round budget
 both return a message instead.
 
+## The demo front end
+
+`scripts/agent_ui.py` is a Streamlit chat page over the same `ask()`; it adds no logic.
+
+```bash
+pip install streamlit          # team repo; with uv (personal repo): uv add streamlit
+streamlit run scripts/agent_ui.py
+```
+
+Under each answer it shows the sources the tools cited, and a **What happened** table:
+every model call (with seconds) and every tool call (the arguments the model sent, ok or
+refused, seconds), in order. The sidebar has the kill-shot questions as buttons and a
+New conversation button. Its trace comes from the same events as the log, collected per
+question, and the page also appends them to `logs/agent_app.jsonl` (run from the folder
+you start Streamlit in), so the file has the same lines as the table. `tests/test_agent_ui.py`
+(4 tests, no Streamlit needed) covers the trace table; the page itself is checked by
+running it. Setting `APP_PASSWORD` puts a password box in front of the page, and
+`AGENT_LOG_FILE=off` stops it writing the file (it still logs to stderr). To host it, see
+[`deploy_gcp.md`](deploy_gcp.md).
+
 ## Logging (toward #7, observability)
 
 Every call to `run_turn` logs, as one JSON line per event, on the `agent_app` logger.
@@ -84,6 +105,7 @@ Every line carries a UTC `ts` (ISO 8601, milliseconds):
 - `chat_call`: round number, model, prompt/completion tokens, which tools were
   requested, and how long the call took.
 - `chat_error`: a failed chat call and why.
+- `scale_guess_blocked`: the model gave a severity scale the user never stated; it was removed before the tool ran.
 - `clarification_returned`: a tool asked a question and the loop passed it on.
 - `max_rounds_exceeded`: the loop was stopped rather than left to run forever.
 - `turn`: one line per question — the question (truncated), every tool called, how
@@ -110,7 +132,7 @@ this one. See the task list for when it gets built.
 
 ## Tests
 
-`tests/test_agent_app.py` (14 tests, no database, no real LLM call): the loop's own
+`tests/test_agent_app.py` (18 tests, no database, no real LLM call): the loop's own
 logic only — `agent_tools.run_tool` and the chat call are both stubbed, since tool
 correctness is already covered by `tests/test_agent_tools.py`. Covers: a plain
 text answer needing no tool; one tool call round-tripping into the next model call;
@@ -120,7 +142,7 @@ with an honest message rather than looping forever; the assistant-message shape
 matching what the API expects, with and without tool calls; source label
 deduplication, keeping first-seen order; a new conversation starting with only the
 system prompt; and `ask()` appending the question, returning formatted sources, and
-a clarification going straight to the user with no further model call; logging one `turn` summary line; every log line carrying a timestamp and each tool call logging its arguments and refusal code. One test documents, rather than hides, that a bug
+a severity scale the user never named (no quote, an invented quote, a quote naming no scale) being stripped so the tool asks, and one the user did name passing; a clarification going straight to the user with no further model call; logging one `turn` summary line; every log line carrying a timestamp and each tool call logging its arguments and refusal code. One test documents, rather than hides, that a bug
 in `run_tool` itself (not a normal tool error) still propagates today — a deliberate
 choice to surface in a test, not a gap to silently paper over.
 

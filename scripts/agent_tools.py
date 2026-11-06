@@ -733,6 +733,13 @@ class IncidentFilter(Args):
                           "on. 5_is_worst = the current scale (since Jul 2025); 1_is_worst = "
                           "the old one. If the user didn't say which, leave it out: the tool "
                           "will ask them. Never assume.")
+    scale_quote: str | None = Field(
+        None, max_length=200,
+        description="REQUIRED whenever severity_scale is given: the user's own words, copied "
+                    "exactly from their messages, that name the scale (e.g. 'the current "
+                    "scale', '5 is worst', 'the old scale'). The app checks the quote is "
+                    "really in the conversation; a scale without one is discarded and the "
+                    "user is asked. Never write a quote the user didn't say.")
 
 
 def to_5_worst(value: int, scale: str) -> int:
