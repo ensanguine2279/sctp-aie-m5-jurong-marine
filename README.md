@@ -312,7 +312,7 @@ python scripts/agent_app.py "is CNC-02 running differently now?"
 streamlit run scripts/agent_ui.py          # the same, as a chat page for the demo
 ```
 
-To host the page (Google Cloud Run, Aiven for the data): [`deploy_gcp.md`](docs/deploy_gcp.md).
+To host the page (Google Cloud Run, Aiven for the data): [`agent_ui.md`](docs/agent_ui.md#deploying-on-google-cloud-run).
 
 ## Lineage: traceability and reproducibility
 

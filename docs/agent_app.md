@@ -91,7 +91,7 @@ you start Streamlit in), so the file has the same lines as the table. `tests/tes
 (4 tests, no Streamlit needed) covers the trace table; the page itself is checked by
 running it. Setting `APP_PASSWORD` puts a password box in front of the page, and
 `AGENT_LOG_FILE=off` stops it writing the file (it still logs to stderr). To host it, see
-[`deploy_gcp.md`](deploy_gcp.md).
+[`agent_ui.md`](agent_ui.md#deploying-on-google-cloud-run).
 
 ## Logging (toward #7, observability)
 
