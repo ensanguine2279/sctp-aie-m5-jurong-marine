@@ -26,6 +26,42 @@ Build and open it once before relying on it.
 
 The image holds no secrets and no data: settings come from the environment, data from Aiven.
 
+## 0. Get the files into Cloud Shell
+
+`gcloud run deploy --source .` builds whatever is in the current folder, so the files must be
+in Cloud Shell first. You need exactly these four things (the `Dockerfile` copies the whole of
+`scripts/`; nothing else is needed, and `.dockerignore` keeps the rest out):
+
+```
+Dockerfile
+.dockerignore            # a hidden file: make sure it is included
+requirements-app.txt
+scripts/
+```
+
+**Option A: the zip, like the proxy kit.** On your computer, from the repo root:
+
+```bash
+zip -r jme-agent.zip Dockerfile .dockerignore requirements-app.txt scripts -x "scripts/__pycache__/*"
+```
+
+(Windows without `zip`: select those four items in Explorer, Send to, Compressed folder.
+Check that `.dockerignore` is in it; hidden files are easy to miss.) Then in Cloud Shell: the
+⋮ menu, **Upload**, pick `jme-agent.zip`, and
+
+```bash
+mkdir -p jme-agent && unzip -o jme-agent.zip -d jme-agent && cd jme-agent
+ls -la Dockerfile .dockerignore requirements-app.txt scripts/agent_ui.py   # all four must exist
+```
+
+**Option B: git.** If the team repo is on GitHub and holds the Dockerfile and
+`requirements-app.txt` (commit them first): `git clone <repo-url> && cd <repo>`.
+
+**Option C: deploy from your own computer.** If `gcloud` is installed and logged in there, run
+section 2 from the repo root on your computer and skip the upload.
+
+Stay in that folder for section 2; the deploy command ends with `--source .`, the current folder.
+
 ## 1. One-off setup (Cloud Shell)
 
 ```bash
@@ -51,7 +87,7 @@ done
 Use the **agent_ro** password, never the owner's (`DB_USERNAME`/`DB_PASSWORD` are not set
 on Cloud Run, and `connect()` refuses the owner account anyway).
 
-## 2. Deploy (from the repo root, where the `Dockerfile` is)
+## 2. Deploy (from the folder with the `Dockerfile`, section 0)
 
 ```bash
 gcloud run deploy jme-agent --source . --region $REGION \
@@ -90,4 +126,5 @@ nothing connects until it's right. To make it private to Google accounts instead
 | `cryptography` error at login | `cryptography` missing from `requirements-app.txt` |
 | "Set OPENAI_API_KEY" | The secret isn't attached, or the service account can't read it |
 | Page loads then keeps reconnecting | Missing `--session-affinity`, or more than one instance |
-| Deploy fails building | Run `docker build -t jme-agent .` locally to see the error |
+| Build fails in a step named `universal_builder` (exit status 51) | Cloud Run found no `Dockerfile` and tried to guess the language. The files are not in the folder you deployed from: run the `ls -la` check in section 0 |
+| Deploy fails building | Run `docker build -t jme-agent .` locally to see the error, or `gcloud builds list --limit=1` then `gcloud builds log <ID> \| tail -40` |
