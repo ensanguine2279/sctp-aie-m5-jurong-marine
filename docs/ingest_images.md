@@ -16,7 +16,10 @@ python scripts/ingest_images.py data/images --dry-run      # read and check; no 
 python scripts/ingest_images.py data/images --recreate     # first load
 python scripts/ingest_images.py data/images                # later loads
 python scripts/ingest_images.py data/images --engine llm   # vision model via the class endpoint
+python scripts/ingest_images.py data/images --engine both  # both, compared field by field
 ```
+
+`IMAGE_ENGINE=both` in `.env` makes `both` the default, so `pipeline.py` uses it too.
 
 With uv (personal repo): `uv run python scripts/ingest_images.py data/images --dry-run`.
 `pipeline.py` runs it as step 4, after the CMMS load (so it can check machine ids) and before
@@ -43,7 +46,16 @@ the script stops with these instructions instead of rejecting every image.
 (default `gpt-4o-mini`, or `IMAGE_LLM_MODEL`). No other AI service is used, as the brief
 requires. The model is asked to copy values exactly as written, and its answers go through
 the same parsing and checks as Tesseract's. It costs budget per image and sends the scans,
-employee codes included, through the proxy: say so if asked about PDPA.
+employee codes included, through the proxy: say so if asked about PDPA. A wrong key, a
+missing `OPENAI_BASE_URL`, an unknown model or a used-up budget stops the run with a
+message, instead of rejecting every image.
+
+**`--engine both`** reads every image with both and compares them
+([below](#two-engines---engine-both)). Cost: one model call per image, the same as `llm`
+(about $0.005 per image, roughly $0.20-0.30 for the 42 scans; the proxy's
+`x-litellm-response-cost` header gives the real figure). Each engine's reads are cached
+separately, so switching between `tesseract`, `llm` and `both` never re-reads an image an
+engine has already read.
 
 ## How an image is read
 
@@ -137,6 +149,164 @@ The cache file name carries the engine tag (`tesseract-v2` since the blue-ink pa
 added). Change `TESSERACT_TAG` whenever preprocessing changes, so old cached reads are
 ignored; old-tag files can then be deleted.
 
+### Two engines: `--engine both`
+
+Tesseract's three passes are not independent witnesses: they are one OCR engine on three
+versions of the same image, so they can all be wrong together (WELD-02's `M58`). A vision
+model reads differently, so where the two agree that is real confirmation, and where they
+disagree a person should look. `interpret_both` compares them field by field, after the same
+clean-ups (`clean_lubricant`, the `(JME)` label).
+
+#### Decision tree 1: per image, which engines' reads are used
+
+```mermaid
+flowchart TD
+    A["Image read by Tesseract and the vision model"] --> B{"Did both engines fail?"}
+    B -- yes --> R1["Reject: unreadable_image"]
+    B -- no --> C{"Did one engine fail?<br/>timeout, bad response"}
+    C -- yes --> F1["Use the other engine's reads only<br/>flag engine_failed_&lt;engine&gt;"]
+    C -- no --> D{"Which engines recognised the document<br/>as a form or a nameplate?"}
+    D -- "neither" --> R2["Reject: unknown_document_type"]
+    D -- "both, but different types<br/>one says form, one says nameplate" --> R3["Reject: unknown_document_type<br/>both types in ocr_notes"]
+    D -- "only one" --> F2["Use that engine's reads only<br/>flag not_recognised_by_&lt;other&gt;"]
+    D -- "both, same type" --> T2["Compare field by field:<br/>decision tree 2"]
+```
+
+#### Decision tree 2: per field, which value is kept
+
+Implemented by `interpret_both` and `choose`; the rule that decided is saved in each
+`engines_disagree` note (`"rule": ...`, the names in brackets below).
+
+```mermaid
+flowchart TD
+    S["One field, e.g. grease_interval"] --> G{"Severity on a form:<br/>is the model's value just the number<br/>printed in the label, 5 of '5 = MOST SEVERE',<br/>and Tesseract doesn't read the same?"}
+    G -- yes --> GX["Drop the model's reading<br/>flag llm_read_scale_digit_severity<br/>(instead of one_engine_only)"]
+    G -- "no, or another field" --> Q1
+    GX --> Q1{"How many engines<br/>read a value?"}
+    Q1 -- "none" --> N["NULL<br/>usual missing_* warning"]
+    Q1 -- "one" --> O["Keep that value<br/>flag one_engine_only_&lt;field&gt;"]
+    Q1 -- "both" --> Q2{"Same value?<br/>date, weight, grease, power: the values stored;<br/>severity label: the scale;<br/>else the text, case, spaces, punctuation ignored"}
+    Q2 -- yes --> K["Keep the model's text, unless only<br/>Tesseract's passes its check.<br/>Drop Tesseract's own ocr_disagreed /<br/>ocr_no_majority: confirmed"]
+    Q2 -- "no: flag engines_disagree_&lt;field&gt;" --> Q3{"Does exactly one reading<br/>pass the field's format check?"}
+    Q3 -- yes --> P["Keep the one that passes<br/>(only_tesseract_passes_check /<br/>only_llm_passes_check)"]
+    Q3 -- "no: both pass, neither,<br/>or the field has no check" --> Q4{"Did Tesseract's value come<br/>from the blue-ink reader?"}
+    Q4 -- yes --> INK["Keep Tesseract's<br/>(tesseract_from_blue_ink)"]
+    Q4 -- no --> Q5{"Does the field have<br/>a format check?"}
+    Q5 -- "no: free text<br/>description, power, capacity, weight ..." --> Q7{"Is the model's reading<br/>the start of Tesseract's?"}
+    Q7 -- "yes: cut short" --> CUT["Keep Tesseract's longer reading<br/>(llm_reading_cut_short)"]
+    Q7 -- no --> FT["Keep the model's<br/>(free_text_llm)"]
+    Q5 -- yes --> Q6{"Did at least 2 of Tesseract's<br/>readings give its value?"}
+    Q6 -- yes --> TV["Keep Tesseract's<br/>(tesseract_majority)"]
+    Q6 -- no --> LV["Keep the model's<br/>(llm_over_tesseract_minority)"]
+    K --> Z{"Does the kept value pass<br/>the field's format check?"}
+    O --> Z
+    P --> Z
+    INK --> Z
+    CUT --> Z
+    FT --> Z
+    TV --> Z
+    LV --> Z
+    Z -- no --> FF["Also flag failed_format_&lt;field&gt;"]
+    Z -- yes --> DONE["Stored in the clean table"]
+    FF --> DONE
+```
+
+The signature is decided separately: both engines say the same, or only one gives an answer
+→ that answer. One sees ink and the other doesn't → NULL (`signature_unknown`), flagged
+`engines_disagree_signature`.
+
+**Why the rules are in this order.** They come from the first run of both engines on the
+42 scans (gpt-4o-mini, 6 Nov 2026), where the two disagreed on 31 field readings:
+
+- **Nameplates: the model was right every time** it disagreed (CRN-01 tag `CRN-O1`, CRN-02
+  `2600 kg` capacity, CNC-03 and CRN-02 grease intervals `590 h` / `509 h`, WELD-02 `M58`,
+  CNC-01 `415y SOHz`, PMP-T01 `56Hz`, CNC-03 serial `DN...` and weight `8892 kg`, CMP-01
+  `3588 ka`). Hence free text goes to the model, and the model wins where Tesseract has no
+  majority.
+- **New-form severity: the model was wrong every time.** It read the scale's `5` from
+  `(5 = MOST SEVERE, ...)` as the value: its `severity_label` readings all start at
+  "MOST SEVERE", without the 5. On 904, 906 and 975 it said 5 where the blue-ink reader
+  (agreeing with the CMMS) said 2, 3, 2; on 913 it said 2 where the ink and the CMMS say 5.
+  Hence the scale-digit check, and the blue-ink reading beating the model. The prompt now
+  tells the model which number is which (`LLM_TAG = "llm-v2"`, so the old answers are
+  re-read).
+- A Tesseract majority still beats a lone model reading on checked fields: a model
+  `100 h` against two passes' `1000 h` keeps 1000.
+- **Compared on what's stored** (second look at the real readings, 6 Nov 2026): dates,
+  weights and grease intervals are compared on the month, kg and hours they give, so
+  `10/2018 a` vs `10/2018` or `3588 ka` vs `3588 kg` is not a disagreement. When the two
+  agree the model's (cleaner) text is kept. This turned up two parser bugs, now fixed:
+  `hours_of` read `1000 hrs` as nothing (the letter-for-digit fixes turned `hrs` into `hr5`),
+  and `weight_of` now reads OCR's `ka` / `kq` for `kg`. A single voltage (`415V`) is read as
+  well as a range (`380-440V`).
+- **Power lines are compared on kW, phases and voltage** (`powers_agree`): CNC-01's
+  `415y SOHz` vs `415V 50Hz` and PMP-T01's `56Hz` vs `50Hz` are typos in parts that are
+  either unparsed or not stored, so they aren't disagreements. Before, the flag landed on
+  `power_kw`, which both engines read as 22, while the voltage only the model read showed
+  as clear. A real difference in kW, phases or voltage is still flagged, and the app then
+  treats all four values from the line as `engines_disagreed`.
+- **A reading cut short loses** (CNC-01): the model put `22 kW` under power and the rest of
+  the line, `3PH 415V 50Hz`, under capacity, which the plate doesn't have; the free-text rule
+  then kept `22 kW` and the phases were lost. Now a model reading that is just the start of
+  Tesseract's loses to the longer one, a capacity that is really a power line is flagged
+  `capacity_looks_like_power_line`, and the prompt says power is the whole line and capacity
+  only what follows a CAPACITY label (`LLM_TAG = "llm-v3"`: the model re-reads the scans).
+
+Worked examples (real readings, except where marked):
+
+| Field | Tesseract | Model | Path through tree 2 | Kept |
+|---|---|---|---|---|
+| CRN-02 grease interval | `509 h` / `566 h` / `500 h` | `500 h` | both pass → no ink → checked → Tesseract's `509 h` has 1 reading | `500 h` (llm_over_tesseract_minority) |
+| CRN-01 asset tag | `CRN-O1` | `CRN-01` | only the model's passes the tag check | `CRN-01` |
+| CNC-01 mfg date | `10/2018 a` | `10/2018` | same month, 2018-10 (compared on the stored value) | `10/2018`, no flag |
+| CNC-01 power (prompt v2) | `22 kW 3PH 415y SOHz` | `22 kW` (rest put under capacity) | kW agree, phases missing from the model's → disagree; no check → the model's is the start of Tesseract's | Tesseract's (llm_reading_cut_short): 22 kW, 3 phases |
+| CNC-01 power (prompt v3) | `22 kW 3PH 415y SOHz` | `22 kW 3PH 415V 50Hz` | same kW and phases; `415y` is an unparsed voltage, not a different one; Hz isn't stored → same values | the model's text, no flag: 22 kW, 3 phases, 415 V |
+| WELD-02 lubricant | `Shell Tonna S3 M58` | `Shell Tonna S3 M68` | only the model's is an ISO VG grade | `M68` |
+| CNC-01 power | `22 kW 3PH 415y SOHz` | `22 kW 3PH 415V 50Hz` | no check → free text | the model's |
+| IR-2024-982 immediate action | `toalbox briefing` | `toolbox briefing` | no check → free text | the model's |
+| IR-2025-904 severity | blue ink `2` (page passes lost it) | `5` | scale digit, Tesseract differs → model dropped | `2` |
+| IR-2026-913 severity | blue ink `5` | `2` | both pass → Tesseract's came from the ink | `5` |
+| IR-2025-911 severity | `Lost work days: 0` (next line; ink abstained) | `5` | scale digit → model dropped; Tesseract's fails 1-5 | NULL, `llm_read_scale_digit` |
+| IR-2025-939 severity | blue ink `3` | label text | only Tesseract's passes 1-5 | `3` |
+| BLAST-01 grease interval (*made up*) | `1000 h` / `1660 h` / `1000 h` | `100 h` | both pass → checked → Tesseract has 2 | `1000 h` (tesseract_majority) |
+| WELD-02 lubricant (*if both read M58*) | `M58` | `M58` | same value → fails the grade check | `M58`, `failed_format` |
+
+**Still needs a person** (check the photos): the signature on IR-2024-917, 936 and
+IR-2026-955 (Tesseract found no ink, the model says signed: stored as unknown); the CRN-01
+and LTH-01 serials. Tesseract read `KO04778956` / `CO05612371` and the model
+`K04778956` / `C05612371`. Only Tesseract's starts with two letters, so it is kept, but
+every other serial is two letters + 7 digits (`MA6955187`, `DM4958733`), so the plates
+probably say `KO4778956` and `CO5612371`: both engines are likely wrong.
+
+`ocr_notes` holds both readings and the rule: `{"field": "grease_interval", "issue":
+"engines_disagree", "chose": "500 h", "rule": "llm_over_tesseract_minority", "readings":
+{"tesseract": "509 h", "llm": "500 h"}}`. Format checks run again on the final value.
+
+**One warning per field.** When the engines disagree on a field, Tesseract's own doubts about
+it (its passes disagreeing, no majority) stay in `ocr_notes` as context, marked
+`"warn": false`, but don't become `ocr_disagreed_<field>` / `ocr_no_majority_<field>`
+warnings: `engines_disagree_<field>` already says to check the photo. CRN-02's grease
+interval carries one warning, not three.
+
+`ocr_engine` is `both:tesseract-v2+llm-v3:<model>`; `ocr_text` holds Tesseract's three
+pages and the model's answer as JSON.
+
+```sql
+-- Every field the two engines read differently, with the rule that decided
+-- (as the ingest user; the person field is left out: PDPA)
+SELECT d.source_file, jt.field, jt.tesseract, jt.llm, jt.chose, jt.rule
+FROM img_documents_raw d,
+     JSON_TABLE(d.ocr_notes, '$[*]' COLUMNS (
+         field     VARCHAR(40)  PATH '$.field',
+         issue     VARCHAR(40)  PATH '$.issue',
+         rule      VARCHAR(40)  PATH '$.rule',
+         tesseract VARCHAR(255) PATH '$.readings.tesseract',
+         llm       VARCHAR(255) PATH '$.readings.llm',
+         chose     VARCHAR(255) PATH '$.chose')) jt
+WHERE jt.issue IN ('engines_disagree', 'llm_read_scale_digit') AND jt.field <> 'person'
+ORDER BY jt.field, d.source_file;
+```
+
 ## Severity: the scale printed on the form
 
 The CMMS severity scale flipped in July 2025 and old records were never converted
@@ -183,21 +353,35 @@ as loaded" column.
 
 | Warning | On | Meaning |
 |---|---|---|
-| `ocr_disagreed_<field>` | both | The passes' readings differed; see `ocr_notes` for each one and which was kept |
+| `ocr_disagreed_<field>` | both | The passes' readings differed; see `ocr_notes` for each one and which was kept. With `--engine both`: dropped where the model agrees (confirmed) and where it disagrees (`engines_disagree_<field>` covers it); still shown where only Tesseract read the field, e.g. a blue-ink severity whose model reading was set aside |
 | `failed_format_<field>` | both | No reading passed the field's format check; the value is kept as read |
 | `ocr_no_majority_<field>` | both | No two readings agreed; the value is a tie-break. Treat it as unread and check the photo |
 | `read_from_value_ink_<field>` | form | The value came only from the blue-ink pass (so far only `severity`) |
+| `engines_disagree_<field>` | both | `--engine both`: Tesseract and the vision model read different values; both in `ocr_notes`. Check the photo |
+| `one_engine_only_<field>` | both | `--engine both`: only one engine read the field |
+| `engine_failed_<engine>` | both | `--engine both`: that engine failed on this image; the other's reads were used |
+| `not_recognised_by_<engine>` | both | `--engine both`: that engine didn't recognise the document; the other's reads were used |
+| `llm_read_scale_digit_severity` | form | `--engine both`: the model's severity was just the number in the label (`5` of `5 = MOST SEVERE`) and wasn't used. The only severity flag from the comparison: no `one_engine_only_severity` as well |
 | `unknown_machine` | both | Tag / machine not in `cmms_machines` (only checked when the CMMS is loaded; `relationships.py` checks again) |
 | `placeholder_manufacturer` | plate | `CUSTOM`, `GENERIC`, ... : the real maker is unknown |
 | `duty_cycle_rating_on_non_welder` | plate | A rating like `450 A @ 60%` (how welding power sources are rated) on a machine that isn't a `WELD-*` |
+| `capacity_looks_like_power_line` | plate | The capacity is electrical (`3PH`, `415V`, `50Hz`) with no capacity unit: the rest of the POWER line, put in the wrong field (CNC-01, trap list I25) |
 | `lubricant_without_grade`, `missing_lubricant`, `missing_grease_interval`, `bad_*` | plate | Ask 1 fields missing or unreadable |
 | `weight_converted_to_kg` | plate | Weight was printed in lb or t |
 | `bad_report_no`, `report_year_differs_from_date` | form | Report number unreadable, or its year isn't the incident's year |
-| `date_assumed_day_first`, `missing_date`, `bad_date` | form | As in `ingest_cmms.py` |
+| `missing_date`, `bad_date` | form | As in `ingest_cmms.py` |
 | `person_not_an_emp_code` | form | "Person involved" isn't an `EMP` code (e.g. a name): **not stored** in the clean table |
 | `root_cause_in_attachment` | form | Root cause says "see attached": the 5-Why sheet isn't in the scan or the data package |
 | `signature_missing`, `signature_unknown` | form | No ink in the signature box / box not found |
 | severity warnings | form | See above |
+
+**No `date_assumed_day_first` on forms.** `ingest_cmms.py` flags every date it read
+day-first, because the CMMS dump mixes ISO and `dd/mm/yyyy` dates. Every WSH-F02 form
+writes `dd/mm/yyyy`, so on the forms that flag fired on all 30 and made "loaded with
+warnings" meaningless. Day-first is shown by the template itself (`24/01/2024` on 917,
+`24/08/2024` on 919, `29/12/2025` on 904: a day above 12 can only be read one way), and a
+date read the wrong way round would still show in `incident_report_vs_cmms` as
+`field = 'incident_date'`, `agrees = 0`.
 
 ## Personal data (PDPA)
 
@@ -210,7 +394,8 @@ as loaded" column.
 - The OCR cache (`.cache/ingest_images/`) holds the same text as the raw table; it is
   git-ignored. Delete files from old engine tags once the new ones exist, and the whole
   cache with the rest of the data after the project.
-- `--engine llm` sends the images through the class proxy (Singapore VM) to the model.
+- `--engine llm` and `--engine both` send the images through the class proxy (Singapore VM)
+  to the model.
 
 ## Run summary
 
@@ -223,7 +408,7 @@ nameplates: loaded 1
   Loaded with warnings: duty_cycle_rating_on_non_welder=1, ocr_disagreed_asset_tag=1, ocr_disagreed_grease_interval=1, ocr_disagreed_lubricant=1, ocr_disagreed_power=1, placeholder_manufacturer=1 (total 6)
 
 incident_reports: loaded 1
-  Loaded with warnings: date_assumed_day_first=1, root_cause_in_attachment=1 (total 2)
+  Loaded with warnings: root_cause_in_attachment=1 (total 1)
   Severity scale on forms: 1_worst=1 (total 1)
 
 Machine ids: checked against cmms_machines (12 machines)
@@ -270,7 +455,7 @@ WHERE status = 'rejected';
 
 ## Tests
 
-`tests/test_images.py` (87 tests, no database, Tesseract or LLM needed): the OCR text the
+`tests/test_images.py` (148 tests, no database, Tesseract or LLM needed): the OCR text the
 sample scans actually produced, with Tesseract's mistakes, is passed in directly.
 Covers classifying, label parsing (`Loc ation`), the printed-scale label in every form
 (`1 = MOST SEVERE`, `5=WORST`, `1 = least severe`, unreadable), voting (majority, format
@@ -290,6 +475,17 @@ Blue-ink pass: it recovers a severity the page text lost (and flags it), it neve
 page readings that agree, without it the severity stays unread, `ink_majority` abstains on
 weak or split votes, and on a drawn mock of the overlapping line it returns the right digit
 or nothing, never another digit.
+
+Both engines (`--engine both`, with the model's answers passed in): agreement drops
+Tesseract's doubts, disagreement is flagged with both readings, the reading that passes its
+check wins, a lone model misreading never overrules a Tesseract majority, a value both read
+wrong is still `failed_format`, the model supplies the new form's severity, the severity label
+compared by scale, a field only one engine read, a signature disagreement left unknown, one
+engine failing, the engines seeing different document types, a name never stored, each
+engine cached separately, and a missing `OPENAI_BASE_URL` stopping the run. Replayed from
+the first real run: the blue ink beating the model on 904, 906, 913 and 975, the model's
+scale digit never used on its own (911) or on an old form, free text (982's `toolbox`,
+CNC-01's power) going to the model, and a document only one engine recognised.
 
 `test_the_real_scans_read_correctly` and `test_the_real_new_forms_give_their_severity_from_the_value_ink`
 (904 -> 2, 906 -> 3) OCR the real scans when Tesseract and `data/images/` are present, and

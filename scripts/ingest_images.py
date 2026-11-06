@@ -21,7 +21,8 @@ Pipeline (each step is a small function you can test on its own):
       -> extract           OCR. tesseract (default): three preprocessed versions of each
                            image, read separately; on incident forms the severity value is
                            also read from the blue value ink alone (severity_from_ink); the
-                           class LLM endpoint with --engine llm
+                           class LLM endpoint with --engine llm; --engine both reads
+                           with both and compares them field by field (interpret_both)
       -> classify          incident_report | nameplate | unknown
       -> parse_*_text      label -> value, as written
       -> vote              per field, the value most versions agree on, checked against the
@@ -56,6 +57,7 @@ Usage
     python scripts/ingest_images.py data/images --recreate        # first time
     python scripts/ingest_images.py data/images
     python scripts/ingest_images.py data/images --engine llm      # vision model via the class proxy
+    python scripts/ingest_images.py data/images --engine both     # both, compared field by field
 """
 from __future__ import annotations
 
@@ -85,6 +87,9 @@ DOC_TYPES = ("incident_report", "nameplate")
 TESSERACT_TAG = "tesseract-v2"     # change when preprocessing changes: invalidates the cache
                                    # v2: severity also read from the blue value ink
 DEFAULT_LLM_MODEL = "gpt-4o-mini"
+LLM_TAG = "llm-v3"                 # change when LLM_PROMPT changes: invalidates the cache
+                                   # v2: severity value vs the number in its label
+                                   # v3: power is the whole line; capacity only if labelled
 TABLES = {"nameplate": "nameplates", "incident_report": "incident_reports"}
 KEYS = {"nameplate": "asset_tag", "incident_report": "incident_id"}
 
@@ -94,13 +99,31 @@ KEYS = {"nameplate": "asset_tag", "incident_report": "incident_id"}
 @dataclass
 class Extraction:
     """What the engine read from one image, before any parsing."""
-    engine: str                       # 'tesseract-v1' | 'llm:<model>'
+    engine: str                       # 'tesseract-v2' | 'llm-v2:<model>' | 'both:...'
     texts: dict | None = None         # tesseract: preprocessing variant -> OCR text
     fields: dict | None = None        # llm: field -> value as written (+ doc_type)
     signature: int | None = None      # 1 = ink in the signature box, 0 = none, None = unsure
     error: str | None = None
     ink: dict | None = None           # tesseract: fields read from the blue value ink alone,
                                       # e.g. {"severity": "3"}; one more reading in the vote
+    parts: dict | None = None         # both: {"tesseract": Extraction, "llm": Extraction}
+
+    def __post_init__(self):
+        if self.parts:
+            self.parts = {k: v if isinstance(v, Extraction) else Extraction(**v)
+                          for k, v in self.parts.items()}
+
+
+def both_tag(model: str) -> str:
+    return f"both:{TESSERACT_TAG}+{LLM_TAG}:{model}"
+
+
+def combine(tess: Extraction, llm: Extraction, model: str) -> Extraction:
+    """One Extraction holding both engines' reads. An error only if BOTH failed; if one
+    failed, the other is used and the image is flagged engine_failed_<engine>."""
+    error = (f"tesseract: {tess.error}; llm: {llm.error}" if tess.error and llm.error
+             else None)
+    return Extraction(both_tag(model), error=error, parts={"tesseract": tess, "llm": llm})
 
 
 def read_image(path: Path):
@@ -273,26 +296,49 @@ or numbers, do not fix spelling, and use null for anything blank or unreadable. 
 
 Incident report form:
 {"doc_type": "incident_report", "report_no": "", "date": "", "location": "", "person": "",
- "description": "", "severity": "", "severity_label": "<text in brackets after Severity>",
- "lost_work_days": "", "reporting": "", "immediate_action": "", "root_cause": "",
- "signature_present": true}
+ "description": "", "severity": "", "severity_label": "", "lost_work_days": "",
+ "reporting": "", "immediate_action": "", "root_cause": "", "signature_present": true}
+On the form, labels are printed in grey/black and the values filled in are in blue.
+- severity_label: the WHOLE text in the brackets after "Severity", including its number,
+  e.g. "1 = MOST SEVERE" or "5 = MOST SEVERE, new WSH matrix".
+- severity: only the blue number filled in as the answer. It is often printed over the
+  label text. It is NOT the number inside the label: "5 = MOST SEVERE" is the scale, not
+  the value. If you cannot see a separate blue number, use null.
+- signature_present: true only if there is handwriting in the safety officer's signature box.
 Machine nameplate:
 {"doc_type": "nameplate", "manufacturer": "<large maker name at the top>", "model": "",
  "serial_no": "", "mfg_date": "", "power": "", "capacity": "", "weight": "", "lubricant": "",
  "grease_interval": "", "asset_tag": ""}
+- power: EVERYTHING after "POWER" on that line, e.g. "22 kW 3PH 415V 50Hz". Don't split it.
+- capacity: only the text after a "CAPACITY" label; null if the plate has no CAPACITY line.
+  Never put part of another line here.
 Anything else: {"doc_type": "unknown"}"""
 
 _MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
          ".webp": "image/webp", ".gif": "image/gif"}
 
 
+def llm_client():
+    """OpenAI client for the class endpoint. Setup problems raise RuntimeError, which stops
+    the run instead of rejecting (or, with --engine both, silently skipping) every image."""
+    try:
+        from dotenv import load_dotenv
+        from openai import OpenAI
+    except ImportError as e:
+        raise RuntimeError(f"--engine llm/both needs the openai and python-dotenv packages "
+                           f"(pip install openai python-dotenv): {e}") from e
+    load_dotenv()
+    missing = [k for k in ("OPENAI_BASE_URL", "OPENAI_API_KEY") if not os.environ.get(k)]
+    if missing:
+        raise RuntimeError(f"Set {' and '.join(missing)} in .env (the class LLM endpoint, "
+                           f"docs/llm-budget-proxy-setup.md); no other AI service is used.")
+    return OpenAI()
+
+
 def extract_llm(path: Path, model: str) -> Extraction:
     """Vision model through the class LLM endpoint (OpenAI-compatible): OPENAI_BASE_URL and
     OPENAI_API_KEY from .env, as in docs/llm-budget-proxy-setup.md. No other AI service."""
-    from dotenv import load_dotenv
-    from openai import OpenAI
-
-    load_dotenv()
+    client = llm_client()
     mime = _MIME.get(path.suffix.lower())
     if mime is None:  # .tif / .bmp: send as PNG
         import cv2
@@ -301,16 +347,24 @@ def extract_llm(path: Path, model: str) -> Extraction:
         data, mime = buf.tobytes(), "image/png"
     else:
         data = path.read_bytes()
-    resp = OpenAI().chat.completions.create(
-        model=model, temperature=0, response_format={"type": "json_object"},
-        messages=[{"role": "user", "content": [
-            {"type": "text", "text": LLM_PROMPT},
-            {"type": "image_url", "image_url": {
-                "url": f"data:{mime};base64,{base64.b64encode(data).decode()}"}}]}])
+    import openai
+
+    try:
+        resp = client.chat.completions.create(
+            model=model, temperature=0, response_format={"type": "json_object"},
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": LLM_PROMPT},
+                {"type": "image_url", "image_url": {
+                    "url": f"data:{mime};base64,{base64.b64encode(data).decode()}"}}]}])
+    except (openai.AuthenticationError, openai.PermissionDeniedError,
+            openai.NotFoundError) as e:
+        # Wrong key, no budget left or no such model: every image would fail the same way
+        raise RuntimeError(f"LLM endpoint refused the request ({type(e).__name__}): "
+                           f"check OPENAI_API_KEY and --llm-model {model}. {e}") from e
     raw = json.loads(resp.choices[0].message.content or "{}")
     sig = raw.pop("signature_present", None)
     fields = {k: None if v is None else str(v) for k, v in raw.items()}
-    return Extraction(f"llm:{model}", fields=fields,
+    return Extraction(f"{LLM_TAG}:{model}", fields=fields,
                       signature=None if sig is None else int(bool(sig)))
 
 
@@ -321,8 +375,12 @@ def cache_path(cache_dir: Path, sha: str, engine: str) -> Path:
 def extract(path: Path, sha: str, engine: str, model: str,
             cache_dir: Path | None) -> Extraction:
     """Read one image, from the cache when this exact image was read the same way before.
-    Errors are returned (not raised) so one bad image doesn't stop the load."""
-    tag = TESSERACT_TAG if engine == "tesseract" else f"llm:{model}"
+    Errors are returned (not raised) so one bad image doesn't stop the load.
+    engine 'both': each engine reads (and caches) on its own; they are compared in interpret."""
+    if engine == "both":
+        return combine(extract(path, sha, "tesseract", model, cache_dir),
+                       extract(path, sha, "llm", model, cache_dir), model)
+    tag = TESSERACT_TAG if engine == "tesseract" else f"{LLM_TAG}:{model}"
     cached = cache_path(cache_dir, sha, tag) if cache_dir else None
     if cached and cached.is_file():
         try:
@@ -700,7 +758,10 @@ def add_incident_warnings(df: pd.DataFrame, machine_ids: set | None = None) -> p
             and r["report_year"] != r["incident_date"].year, axis=1),
         "missing_date": df["incident_date_format"] == "missing",
         "bad_date": df["incident_date_format"].isin(["zero_date", "unparseable"]),
-        "date_assumed_day_first": df["incident_date_format"].str.startswith("dmy"),
+        # No date_assumed_day_first here (unlike ingest_cmms.py): every WSH-F02 form writes
+        # dd/mm/yyyy, so it would fire on every form. The template is shown day-first by
+        # dates like 24/08/2024, and a misread date shows in incident_report_vs_cmms
+        # (incident_date, agrees = 0).
         "missing_machine_id": df["machine_id"].isna(),
         "unknown_machine": (df["machine_id"].map(lambda m: m not in machine_ids)
                             & df["machine_id"].notna()) if machine_ids is not None else False,
@@ -740,6 +801,54 @@ def clean_nameplate_ids(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def month_of(v) -> str | None:
+    """'10/2018 a' -> '2018-10'."""
+    m = re.search(r"(\d{1,2})\s*/\s*(\d{4})", fix_digits(_text(v) or ""))
+    return f"{m.group(2)}-{int(m.group(1)):02d}" if m and 1 <= int(m.group(1)) <= 12 else None
+
+
+def weight_of(v) -> tuple[float | None, str | None]:
+    """'2,000 lb' -> (907.18, 'lb'); '3588 kg ,' -> (3588.0, 'kg'); OCR's 'ka' / 'kq' / 'k9'
+    for 'kg' too (CMP-01 read '3588 ka', 6 Nov 2026)."""
+    s = re.sub(r"(?<=\d)\s*k[aq9]\b", " kg", _text(v) or "", flags=re.I)
+    m = re.search(r"(\d[\d,]*(?:\.\d+)?)\s*(kg|lbs?|t)\b", s, re.I)
+    if not m:
+        return None, None
+    n, unit = float(m.group(1).replace(",", "")), m.group(2).lower()
+    factor = {"kg": 1.0, "t": 1000.0}.get(unit, 0.45359237)
+    return round(n * factor, 2), unit
+
+
+def hours_of(v) -> int | None:
+    """'1000 h' / '1000 hrs' / '1O00 h' -> 1000. Letter-for-digit fixes in the number only:
+    applied to the whole text they turned 'hrs' into 'hr5', so '1000 hrs' was unreadable."""
+    m = re.search(r"(\d[\dOoIl,]*)\s*(?:h|hrs?|hours?)\b", _text(v) or "", re.I)
+    if not m:
+        return None
+    n = fix_digits(m.group(1)).replace(",", "")
+    return int(n) if n.isdigit() else None
+
+
+def voltages_of(v) -> tuple[int | None, int | None]:
+    """'380-440V' -> (380, 440); a single '415V' -> (415, 415)."""
+    lo = _num(r"(\d{3})\s*[-–]\s*\d{3}\s*V", v, int)
+    hi = _num(r"\d{3}\s*[-–]\s*(\d{3})\s*V", v, int)
+    if lo is None:
+        lo = hi = _num(r"(?<![\d-])(\d{3})\s*V\b", v, int)
+    return lo, hi
+
+
+# A CAPACITY value that is really the rest of the POWER line ('3PH 415V 50Hz'): the vision
+# model split CNC-01's power line this way (6 Nov 2026, trap list I25).
+_POWER_LINE = re.compile(r"\b\d\s*PH\b|\b\d{2,3}\s*Hz\b|\b\d{3}\s*V\b", re.I)
+_CAPACITY_UNIT = re.compile(r"\b(kg|t|A|cfm|l/min|m3|bar|%|mm)\b", re.I)
+
+
+def looks_like_power_line(v) -> bool:
+    s = _text(v) or ""
+    return bool(_POWER_LINE.search(s)) and not _CAPACITY_UNIT.search(s)
+
+
 def parse_nameplate_values(df: pd.DataFrame) -> pd.DataFrame:
     """Numbers and units. Weight in lb or t is converted to kg (flagged), like the spares
     sheet's inches; the text as printed stays in the raw row."""
@@ -747,33 +856,19 @@ def parse_nameplate_values(df: pd.DataFrame) -> pd.DataFrame:
     for c in ("mfg_date", "power", "capacity", "weight", "grease_interval"):
         df[f"{c}_given"] = df[c].map(_text).notna()
 
-    def month(v):
-        m = re.search(r"(\d{1,2})\s*/\s*(\d{4})", fix_digits(_text(v) or ""))
-        return f"{m.group(2)}-{int(m.group(1)):02d}" if m and 1 <= int(m.group(1)) <= 12 else None
-    df["mfg_month"] = df["mfg_date"].map(month)
+    df["mfg_month"] = df["mfg_date"].map(month_of)
     df["power_kw"] = df["power"].map(lambda v: _num(r"(\d+(?:\.\d+)?)\s*kW", v))
     df["phases"] = df["power"].map(lambda v: _num(r"(\d)\s*PH", v, int)).astype("Int64")
-    df["voltage_min_v"] = df["power"].map(
-        lambda v: _num(r"(\d{3})\s*[-–]\s*\d{3}\s*V", v, int)).astype("Int64")
-    df["voltage_max_v"] = df["power"].map(
-        lambda v: _num(r"\d{3}\s*[-–]\s*(\d{3})\s*V", v, int)).astype("Int64")
+    volts = df["power"].map(voltages_of)
+    df["voltage_min_v"] = volts.map(lambda t: t[0]).astype("Int64")
+    df["voltage_max_v"] = volts.map(lambda t: t[1]).astype("Int64")
     df["capacity_raw"] = df["capacity"].map(_text)
     df["rated_current_a"] = df["capacity"].map(lambda v: _num(r"(\d+(?:\.\d+)?)\s*A\b", v))
     df["duty_cycle_pct"] = df["capacity"].map(lambda v: _num(r"@\s*(\d+(?:\.\d+)?)\s*%", v))
-
-    def weight(v):
-        m = re.search(r"(\d[\d,]*(?:\.\d+)?)\s*(kg|lbs?|t)\b", _text(v) or "", re.I)
-        if not m:
-            return None, None
-        n, unit = float(m.group(1).replace(",", "")), m.group(2).lower()
-        factor = {"kg": 1.0, "t": 1000.0}.get(unit, 0.45359237)
-        return round(n * factor, 2), unit
-    w = df["weight"].map(weight)
+    w = df["weight"].map(weight_of)
     df["weight_kg"] = w.map(lambda t: t[0])
     df["weight_unit"] = w.map(lambda t: t[1])
-    df["grease_interval_h"] = df["grease_interval"].map(
-        lambda v: _num(r"(\d[\d,]*)\s*(?:h|hrs?|hours?)\b", fix_digits(_text(v) or ""), int)
-    ).astype("Int64")
+    df["grease_interval_h"] = df["grease_interval"].map(hours_of).astype("Int64")
     return df
 
 
@@ -796,6 +891,7 @@ def add_nameplate_warnings(df: pd.DataFrame, machine_ids: set | None = None) -> 
         # '450 A @ 60%' is how welding power sources are rated (trap list I2, docs/trap_list.md)
         "duty_cycle_rating_on_non_welder": df["duty_cycle_pct"].notna()
         & ~df["asset_tag"].fillna("").str.startswith("WELD"),
+        "capacity_looks_like_power_line": df["capacity"].map(looks_like_power_line),
     }
     return _with_warnings(df, flags)
 
@@ -803,16 +899,20 @@ def add_nameplate_warnings(df: pd.DataFrame, machine_ids: set | None = None) -> 
 # ----------------------------------------------------------------- common ---
 
 NOTE_WARNINGS = {"disagreed": "ocr_disagreed", "failed_format": "failed_format",
-                 "read_from_value_ink": "read_from_value_ink", "no_majority": "ocr_no_majority"}
+                 "read_from_value_ink": "read_from_value_ink", "no_majority": "ocr_no_majority",
+                 "engines_disagree": "engines_disagree", "one_engine_only": "one_engine_only",
+                 "engine_failed": "engine_failed", "not_recognised": "not_recognised",
+                 "llm_read_scale_digit": "llm_read_scale_digit"}
 
 
 def _with_warnings(df: pd.DataFrame, flags: dict) -> pd.DataFrame:
     """Comma-separated warning names; OCR notes become ocr_disagreed_<field> /
-    failed_format_<field> / read_from_value_ink_<field>."""
+    failed_format_<field> / read_from_value_ink_<field> ... (not notes marked warn=False)."""
     f = pd.DataFrame({k: _bool(pd.Series(v, index=df.index)) for k, v in flags.items()},
                      index=df.index)
     ocr = df["ocr_notes"].map(lambda notes: [
-        f"{NOTE_WARNINGS.get(n['issue'], n['issue'])}_{n['field']}" for n in (notes or [])])
+        f"{NOTE_WARNINGS.get(n['issue'], n['issue'])}_{n['field']}" for n in (notes or [])
+        if n.get("warn", True)])
     df["warnings"] = [",".join([*f.columns[row].tolist(), *extra]) or None
                       for row, extra in zip(f.to_numpy(), ocr)]
     return df
@@ -949,10 +1049,212 @@ class ImageRead:
     extraction: Extraction
 
 
+def normalise_llm_fields(fields: dict, doc_type: str) -> dict:
+    """The same clean-ups the Tesseract parser applies while parsing, so both engines'
+    values are compared like for like ('IS0 VG32', '(JME): CNC-01')."""
+    f = dict(fields)
+    if doc_type == "nameplate":
+        if "lubricant" in f:
+            f["lubricant"] = clean_lubricant(f["lubricant"])
+        if "asset_tag" in f:
+            f["asset_tag"] = asset_tag_value(f["asset_tag"])
+    return f
+
+
+def _engine_key(field: str, v) -> str:
+    """What has to match for the two engines to agree. The severity label only has to give
+    the same scale: 'new W8H matrix' vs 'new WSH matrix' is not a disagreement."""
+    if field == "severity_label" and scale_from_label(v):
+        return scale_from_label(v)
+    cleaned = CLEANED_KEY.get(field, lambda _: None)(v)
+    return f"={cleaned}" if cleaned is not None else _same(v)
+
+
+# Fields compared on the value that is stored, not the text as read: '10/2018 a' and
+# '10/2018' are the same month, '3588 ka' and '3588 kg' the same weight (6 Nov 2026).
+CLEANED_KEY = {"mfg_date": month_of, "weight": lambda v: weight_of(v)[0],
+               "grease_interval": hours_of}
+
+
+def power_parts(v) -> dict:
+    """What is stored from a POWER line: kW, phases, voltage."""
+    lo, hi = voltages_of(v)
+    return {"kw": _num(r"(\d+(?:\.\d+)?)\s*kW", v), "phases": _num(r"(\d)\s*PH", v, int),
+            "volts": (lo, hi) if lo is not None else None}
+
+
+def powers_agree(a, b) -> bool:
+    """Two readings of a POWER line give the same stored values. kW and phases must match
+    (a part one reading lacks is a disagreement: CNC-01's '22 kW' alone vs the whole line).
+    A voltage one reading couldn't parse ('415y', OCR for '415V') isn't a disagreement if
+    that reading still has a 3-digit number where the voltage goes. The frequency ('SOHz'
+    vs '50Hz') isn't stored, so it doesn't count. (CNC-01, PMP-T01, 6 Nov 2026)"""
+    pa, pb = power_parts(a), power_parts(b)
+    if pa["kw"] is None or pa["kw"] != pb["kw"] or pa["phases"] != pb["phases"]:
+        return False
+    if pa["volts"] is not None and pb["volts"] is not None:
+        return pa["volts"] == pb["volts"]
+    garbled = re.compile(r"(?<!\d)\d{3}\s*[A-Za-z]")
+    return all(p["volts"] is not None or garbled.search(_text(t) or "")
+               for p, t in ((pa, a), (pb, b)))
+
+
+def engines_agree(field: str, a, b) -> bool:
+    if field == "power":
+        return powers_agree(a, b)
+    return _engine_key(field, a) == _engine_key(field, b)
+
+
+def signature_of(ex: Extraction) -> int | None:
+    """With both engines: their answer if they agree or only one has one; None (unsure,
+    flagged signature_unknown) if one sees ink and the other doesn't."""
+    if not ex.parts:
+        return ex.signature
+    sigs = {p.signature for p in ex.parts.values() if not p.error and p.signature is not None}
+    return sigs.pop() if len(sigs) == 1 else None
+
+
+def tess_support(tess: Extraction, doc_type: str, fld: str, value) -> int:
+    """How many of Tesseract's readings (page passes + blue ink) gave this value."""
+    reads = [PARSERS[doc_type](t).get(fld) for t in (tess.texts or {}).values()]
+    reads.append((tess.ink or {}).get(fld))
+    return sum(1 for r in reads if r is not None and _same(r) == _same(value))
+
+
+def scale_digit(*labels) -> str | None:
+    """The number the form's severity label prints as its scale: '5' for '5 = MOST SEVERE',
+    '1' for '1 = MOST SEVERE'; None if no label gives a scale."""
+    for label in labels:
+        scale = scale_from_label(label)
+        if scale:
+            return scale[0]
+    return None
+
+
+def choose(fld: str, tv: str, lv: str, *, ok, tess: Extraction, doc_type: str) -> tuple:
+    """Two different readings of one field -> (value kept, rule that decided). The order is
+    decision tree 2 in docs/ingest_images.md."""
+    if ok and ok(tv) != ok(lv):
+        return (tv, "only_tesseract_passes_check") if ok(tv) else (lv, "only_llm_passes_check")
+    ink = (tess.ink or {}).get(fld)
+    if ink is not None and _same(ink) == _same(tv):
+        # The blue-ink digit is itself a vote of 10 masks (>= 3 agreeing, twice any other):
+        # on the 42 scans it was never wrong, the model was wrong on 4 of the same 6 forms.
+        return tv, "tesseract_from_blue_ink"
+    if ok is None:
+        t, l = _same(tv), _same(lv)
+        if len(l) < len(t) and t.startswith(l):
+            # The model's reading is the start of Tesseract's: it cut the line short and
+            # put the rest elsewhere (CNC-01: power '22 kW', capacity '3PH 415V 50Hz';
+            # Tesseract '22 kW 3PH 415y SOHz'). The longer reading keeps what's on the line.
+            return tv, "llm_reading_cut_short"
+        # Free text (description, power, capacity, ...): OCR typos ('toalbox', '56Hz'), and
+        # no check to tell them apart. On the 42 scans the model was right every time.
+        return lv, "free_text_llm"
+    if tess_support(tess, doc_type, fld, tv) >= 2:
+        return tv, "tesseract_majority"
+    return lv, "llm_over_tesseract_minority"
+
+
+def interpret_both(ex: Extraction) -> tuple[str, dict, list, str | None]:
+    """Tesseract (three passes + blue ink, voted) and the vision model, compared per field.
+    Agree: kept, and Tesseract's own pass-to-pass doubts on that field are dropped (a second,
+    independent engine confirmed it). Disagree: `choose` (decision tree 2 in
+    docs/ingest_images.md), flagged engines_disagree_<field> with both readings and the rule
+    that decided in ocr_notes. A field only one engine read is kept and flagged
+    one_engine_only_<field>. A model severity that is just the number printed in the label
+    ('5' from '5 = MOST SEVERE') is never used on its own: flagged llm_read_scale_digit."""
+    parts = ex.parts or {}
+    tess, llm = parts.get("tesseract"), parts.get("llm")
+    reads = {}
+    for name, part in ((n, p) for n, p in (("tesseract", tess), ("llm", llm)) if p):
+        if not part.error:
+            reads[name] = interpret(part)
+    failed = [{"field": n, "issue": "engine_failed", "error": p.error}
+              for n, p in parts.items() if p.error]
+    texts = [t for _, _, _, t in reads.values() if t]
+    if llm and not llm.error and llm.fields:
+        texts.append(f"=== {llm.engine} ===\n" + json.dumps(llm.fields, ensure_ascii=False))
+    text = "\n\n".join(texts) or None
+
+    types = {n: r[0] for n, r in reads.items() if r[0] in PARSERS}
+    if not types:
+        return next((r[0] for r in reads.values()), "unknown"), {}, failed, text
+    if len(set(types.values())) > 1:      # one says form, the other nameplate: trust neither
+        note = {"field": "doc_type", "issue": "engines_disagree", "readings": types}
+        return "unknown", {}, [*failed, note], text
+    doc_type = next(iter(types.values()))
+    if len(types) == 1:                   # only one engine recognised the document
+        name = next(iter(types))
+        _, fields, notes, _ = reads[name]
+        other = "llm" if name == "tesseract" else "tesseract"
+        if other in reads:
+            notes = [*notes, {"field": "by_" + other, "issue": "not_recognised",
+                              "readings": {other: reads[other][0], name: doc_type}}]
+        return doc_type, fields, [*failed, *notes], text
+
+    t_fields, t_notes = reads["tesseract"][1], reads["tesseract"][2]
+    l_fields = dict(reads["llm"][1])
+    checks = VALIDATORS.get(doc_type, {})
+    fields, notes, agreed = {}, list(failed), set()
+    set_aside = set()        # fields whose model reading was dropped: already flagged
+    if doc_type == "incident_report":
+        digit = scale_digit(t_fields.get("severity_label"), l_fields.get("severity_label"))
+        tv, lv = _text(t_fields.get("severity")), _text(l_fields.get("severity"))
+        if digit and lv == digit and (tv is None or _same(tv) != _same(lv)):
+            notes.append({"field": "severity", "issue": "llm_read_scale_digit",
+                          "readings": {"tesseract": tv, "llm": lv}})
+            l_fields["severity"] = None             # the model's reading isn't used
+            set_aside.add("severity")
+    for fld in dict.fromkeys([*t_fields, *l_fields]):
+        tv, lv = _text(t_fields.get(fld)), _text(l_fields.get(fld))
+        if tv is None or lv is None:
+            fields[fld] = tv if lv is None else lv
+            if fields[fld] is not None and fld not in set_aside:
+                notes.append({"field": fld, "issue": "one_engine_only",
+                              "chose": fields[fld], "engine": "llm" if tv is None else "tesseract"})
+        elif engines_agree(fld, tv, lv):
+            ok = checks.get(fld)
+            # Same stored value; keep the cleaner text, the model's, unless only Tesseract's
+            # passes its check ('10/2018' over '10/2018 a', '3588 kg' over '3588 ka')
+            fields[fld] = tv if ok and ok(tv) and not ok(lv) else lv
+            agreed.add(fld)
+        else:
+            fields[fld], rule = choose(fld, tv, lv, ok=checks.get(fld), tess=tess,
+                                       doc_type=doc_type)
+            notes.append({"field": fld, "issue": "engines_disagree", "chose": fields[fld],
+                          "rule": rule, "readings": {"tesseract": tv, "llm": lv}})
+    disputed = {n["field"] for n in notes if n["issue"] == "engines_disagree"}
+    for n in t_notes:
+        fld = n["field"]
+        if n["issue"] == "failed_format":
+            continue                                   # re-checked below on the final value
+        if n["issue"] in ("disagreed", "no_majority") and fld in agreed:
+            continue                                   # confirmed by the other engine
+        if n["issue"] == "read_from_value_ink" and fields.get(fld) != n.get("chose"):
+            continue
+        if n["issue"] in ("disagreed", "no_majority") and fld in disputed:
+            # Kept in ocr_notes as context, but engines_disagree_<field> already says
+            # "check the photo": one warning per field, not three.
+            n = {**n, "warn": False}
+        notes.append(n)
+    for fld, v in fields.items():
+        ok = checks.get(fld)
+        if ok and v is not None and not ok(v):
+            notes.append({"field": fld, "issue": "failed_format", "chose": v})
+    sig = {n: p.signature for n, p in parts.items() if not p.error and p.signature is not None}
+    if len(set(sig.values())) > 1:
+        notes.append({"field": "signature", "issue": "engines_disagree", "chose": None,
+                      "readings": sig})
+    return doc_type, fields, notes, text
+
+
 def interpret(ex: Extraction) -> tuple[str, dict, list, str | None]:
     """(doc_type, fields as read, OCR notes, OCR text) from what the engine returned."""
     if ex.error:
         return "unknown", {}, [], None
+    if ex.parts:
+        return interpret_both(ex)
     if ex.texts is not None:
         joined = "\n\n".join(f"=== {k} ===\n{t}" for k, t in ex.texts.items())
         doc_type = classify(joined)
@@ -972,7 +1274,8 @@ def interpret(ex: Extraction) -> tuple[str, dict, list, str | None]:
     doc_type = ("incident_report" if raw_type.startswith("incident") else
                 "nameplate" if raw_type.startswith("nameplate") else "unknown")
     if doc_type in PARSERS:
-        fields, notes = vote({"llm": fields}, doc_type)   # format checks only
+        fields, notes = vote({"llm": normalise_llm_fields(fields, doc_type)},
+                             doc_type)                     # format checks only
         return doc_type, fields, notes, None
     return doc_type, {}, [], None
 
@@ -1006,7 +1309,7 @@ def process(reads: list[ImageRead], stats: Counter, *, source_folder: str = "",
         rows.append({"raw_id": raw_id, "run_id": run_id, "source_folder": source_folder,
                      "source_file": r.source_file, "image_sha256": r.image_sha256,
                      "doc_type": doc_type, "ocr_engine": r.extraction.engine,
-                     "fields": fields, "notes": notes, "signature": r.extraction.signature,
+                     "fields": fields, "notes": notes, "signature": signature_of(r.extraction),
                      "fields_raw": json.dumps(fields, ensure_ascii=False) if fields else None,
                      "ocr_notes": json.dumps(notes, ensure_ascii=False) if notes else None,
                      "ocr_text": text or r.extraction.error, "reject_reason": reason,
@@ -1189,11 +1492,13 @@ def main() -> None:
     ap.add_argument("--prefix", default="img_", help="table name prefix (default %(default)s)")
     ap.add_argument("--cmms-prefix", default="cmms_",
                     help="ingest_cmms.py's prefix, to check machine ids (default %(default)s)")
-    ap.add_argument("--engine", choices=["tesseract", "llm"], default="tesseract",
-                    help="tesseract (default, offline) or llm: the vision model behind "
-                         "OPENAI_BASE_URL (the class endpoint)")
+    ap.add_argument("--engine", choices=["tesseract", "llm", "both"],
+                    default=os.getenv("IMAGE_ENGINE", "tesseract"),
+                    help="tesseract (offline), llm (the vision model behind OPENAI_BASE_URL, "
+                         "the class endpoint), or both: each image read by both and compared "
+                         "field by field (default %(default)s, or IMAGE_ENGINE)")
     ap.add_argument("--llm-model", default=os.getenv("IMAGE_LLM_MODEL", DEFAULT_LLM_MODEL),
-                    help="model for --engine llm (default %(default)s)")
+                    help="model for --engine llm / both (default %(default)s)")
     ap.add_argument("--cache-dir", default=str(DEFAULT_CACHE),
                     help="OCR cache, keyed by image SHA-256 (default %(default)s)")
     ap.add_argument("--no-cache", action="store_true", help="always re-read every image")
@@ -1222,15 +1527,18 @@ def main() -> None:
     cache = None if a.no_cache else Path(a.cache_dir)
 
     print(f"Reading {len(files)} image(s) in {a.folder} with {a.engine}"
-          + (f" ({a.llm_model})" if a.engine == "llm" else ""))
+          + (f" ({a.llm_model})" if a.engine != "tesseract" else ""))
     reads = []
     try:
         for i, p in enumerate(files, 1):
             sha = file_sha256(str(p))
             ex = extract(p, sha, a.engine, a.llm_model, cache)
             reads.append(ImageRead(p.name, sha, ex))
+            failed = [f"{n} failed: {x.error}" for n, x in (ex.parts or {}).items()
+                      if x.error and not ex.error]
             print(f"  [{i}/{len(files)}] {p.name}: "
-                  + (f"ERROR {ex.error}" if ex.error else interpret(ex)[0]))
+                  + (f"ERROR {ex.error}" if ex.error else interpret(ex)[0])
+                  + (f" ({'; '.join(failed)})" if failed else ""))
     except RuntimeError as e:
         sys.exit(str(e))
     stats: Counter = Counter()

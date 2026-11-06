@@ -74,10 +74,10 @@ Every query runs with `MAX_EXECUTION_TIME` 10 s on MySQL.
 | July 2025 (C2) | Incidents whose severity can't be placed are left out of severity counts and listed under `unplaced`, with a note |
 | Incident ids not in date order (C5) | Listings are ordered by `incident_date` |
 | PDPA (C16) | No tool returns employee codes, trades or shifts; `agent_ro` can't read names anyway |
-| OCR on nameplates (I14-I21) | Each field gets `clear`, `read_by_majority`, `uncertain` (no two passes agreed: I15) or `unreadable` (failed its check: I18), from the image's warnings. Uncertain or unreadable values come with a note to say so and cite the photo |
-| Plate lines that don't fit the machine (I2, I3, I19, I20) | `KNOWN_CONCERNS` in the code attaches the trap-list finding to the field (BLAST-01's capacity and oil, crane capacities point to SOP-CRANE-02, the welders' and compressor's oil) |
+| OCR on nameplates (I14-I24) | Each field gets a confidence from the image's warnings (`field_flags`, `confidence`), least trusted first: `unreadable` (failed its check: I18), `engines_disagreed` (with `--engine both`, Tesseract and the vision model read different values; the stored one was chosen by rule, [decision tree 2](ingest_images.md#decision-tree-2-per-field-which-value-is-kept)), `uncertain` (no two Tesseract passes agreed: I15), `read_by_majority`, `read_by_one_engine` (only one engine read it), `clear` (with `--engine both`: both engines read the same value), and `checked_by_eye` (below). `unreadable`, `engines_disagreed` and `uncertain` (`NOT_RELIABLE`) come with a note to say so and cite the photo. `get_nameplate` also returns `read_by` (the image's `ocr_engine`). A power warning applies to every value parsed from the POWER line (`POWER_FIELDS`: kW, phases, min and max voltage), since `ingest_images` compares the engines on all of them |
+| Plate lines that don't fit the machine (I2, I3, I19, I20) | `KNOWN_CONCERNS` in the code attaches the trap-list finding to the field (BLAST-01's capacity and oil, crane capacities point to SOP-CRANE-02, the welders' and compressor's oil, CNC-01's 9257 kg). These ride on values read **clearly**: both engines agree on CNC-01's weight, and it is still doubtful. A capacity flagged `capacity_looks_like_power_line` (I25) counts as `unreadable` |
 | Two sources for the oil (I3) | `machine_lubrication` returns both and states the trust rule: the plate is the machine's spec when read clearly. Grades are compared only with spares listed for **that machine**; a shop-wide (`ALL`) item such as hydraulic oil gets a note that it doesn't contradict the plate (on the real data, CNC-03's plate VG68 was wrongly reported as disagreeing with the shop's VG32 hydraulic oil) |
-| Plate values checked by eye (I15) | `KNOWN_CONCERNS` carries the eye-checked value next to the OCR one (CNC-03 grease 590 → 500 h, weight 8892 → 8092 kg; CRN-02 grease 509 → 500 h, capacity 2600 → 2000 kg). The stored value isn't changed; the answer gives both. The lasting fix is a reviewed-corrections table at ingest |
+| Plate values checked by eye (I15, I18) | `EYE_CHECKED` holds what the photo says for the values checked by eye on 4 Nov 2026 (CNC-03 grease 500 h and weight 8092 kg; CRN-02 grease 500 h and capacity 2000 kg; WELD-02 and CMP-01 oil `Shell Tonna S3 M68`). Compared with the **stored** value at query time (`eye_check`): if they match, the field is `checked_by_eye`, with a note saying so; if not, the answer gives both ("stored 590 h; the photo reads 500 h"). The stored value is never changed here. So the notes stay right whichever engine loaded the plates: after `--engine both` CRN-02's 500 h is stored, and the old note "OCR stored 509 h" would have described an error that is no longer there. The lasting fix is still a reviewed-corrections table at ingest |
 | Open WO costs (C10), double entries (C9) | Costs closed vs not closed reported apart; same machine, day and type flagged |
 | Spares units (S2, S5, S7) | Sizes in mm and inches; notes on belt part numbers, units of issue and the unstated currency |
 | Machines without sensors (L5) | `no_data`, naming the 5 machines that have them |
@@ -136,7 +136,7 @@ code is `needs_clarification` or `ambiguous_machine`.
 
 ## Tests
 
-`tests/test_agent_tools.py` (83 tests, no MySQL): the tools run their real SQL on an
+`tests/test_agent_tools.py` (97 tests, no MySQL): the tools run their real SQL on an
 in-memory SQLite database whose tables have the names and columns of the granted views,
 filled with a small sample shaped like the client's data (machine names and some values are
 illustrative) and the client's three SOPs loaded through `ingest_sops.process`. Covers:
@@ -144,7 +144,10 @@ every tool's schema; machine names written six ways, ambiguous and unknown machi
 **the severity kill-shot**: four phrasings without a scale asked about on both incident
 tools, the same question on either scale giving the same incidents, the naive logged-value
 count never produced, July 2025 reported apart; listings by date with no employee data;
-form vs CMMS disagreements; OCR confidence per field, known plate problems, no photo; oil
+form vs CMMS disagreements; OCR confidence per field, known plate problems, no photo; the
+two-engine warnings (`engines_disagree_*`, `one_engine_only_*`) each tied to its field and
+never stated as fact; an eye-checked value that matches the stored one trusted with no stale
+OCR note, one that doesn't given both ways, and an unreadable oil with its photo value; oil
 from two sources that disagree, and an unreadable one; spares in both units, shop-wide
 only, below minimum once each; open costs apart and double entries; no sensors on a crane;
 weekly coverage; CNC-02 `machine_specific` against flat machines; the blasting chamber SOP

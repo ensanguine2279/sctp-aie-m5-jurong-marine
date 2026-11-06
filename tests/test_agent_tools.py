@@ -146,7 +146,16 @@ def build(conn: sqlite3.Connection) -> None:
         "BLAST-01": ({"lubricant": "Shell Tonna S3 M68", "grease_interval_h": 1000,
                       "capacity_raw": "450 A @ 60%"},
                      "duty_cycle_rating_on_non_welder,placeholder_manufacturer,ocr_disagreed_lubricant"),
+        # Loaded with --engine both (6 Nov 2026): the model's 500 h and 2000 kg won, and
+        # match the photo checked by eye.
+        "CRN-02": ({"lubricant": "ISO VG68", "grease_interval_h": 500, "capacity_raw": "2000 kg"},
+                   "engines_disagree_grease_interval,engines_disagree_capacity"),
+        "CNC-01": ({"lubricant": "ISO VG32", "grease_interval_h": 500, "power_kw": 22.0,
+                    "phases": 3, "voltage_min_v": 415, "voltage_max_v": 415,
+                    "capacity_raw": "250 mm swing", "weight_kg": 9257.0},
+                   "engines_disagree_power,one_engine_only_capacity"),
     }
+    both = {"CRN-02", "CNC-01"}
     rows, audit = [], []
     for n, (m, name, model) in enumerate(MACHINES):
         f, w = plates.get(m, ({}, None))
@@ -157,7 +166,9 @@ def build(conn: sqlite3.Connection) -> None:
                      "raw_id": 5000 + n if has else None})
         if has:
             audit.append({"raw_id": 5000 + n, "asset_tag": m, "source_file": f"nameplate_{m}.jpg",
-                          "image_sha256": "c" * 64, "warnings": w})
+                          "image_sha256": "c" * 64, "warnings": w,
+                          "ocr_engine": "both:tesseract-v2+llm-v2:gpt-4o-mini" if m in both
+                          else "tesseract-v2"})
     put("machine_nameplate", rows)
     put("img_nameplates_audit", audit)
 
@@ -399,6 +410,51 @@ def test_ocr_flags_become_a_confidence_per_field():
     assert at.confidence([]) == "clear"
 
 
+@pytest.mark.parametrize("warnings,field,level", [
+    # --engine both (ingest_images.py, 6 Nov 2026)
+    ("engines_disagree_grease_interval", "grease_interval_h", "engines_disagreed"),
+    ("engines_disagree_power", "voltage_max_v", "engines_disagreed"),
+    ("ocr_no_majority_power", "phases", "uncertain"),
+    ("engines_disagree_serial_no", "serial_no", "engines_disagreed"),
+    ("engines_disagree_mfg_date", "mfg_month", "engines_disagreed"),
+    ("one_engine_only_capacity", "capacity_raw", "read_by_one_engine"),
+    ("engines_disagree_lubricant,failed_format_lubricant", "lubricant", "unreadable"),
+    ("engines_disagree_weight,ocr_no_majority_weight", "weight_kg", "engines_disagreed"),
+    # CNC-01: the model put the rest of the power line under capacity (trap list I25)
+    ("one_engine_only_capacity,capacity_looks_like_power_line", "capacity_raw", "unreadable"),
+])
+def test_two_engine_warnings_become_a_confidence_too(warnings, field, level):
+    flags = at.field_flags(warnings)
+    assert "_other" not in flags                       # every warning tied to its field
+    assert at.confidence(flags[field]) == level
+
+
+def test_two_engine_disagreement_is_never_stated_as_fact(db):
+    r = call(db, "get_nameplate", machine="CNC-01")
+    f = r.data["fields"]
+    assert f["power_kw"]["confidence"] == "engines_disagreed"
+    # the power line's other parts were compared too: the doubt covers them all
+    assert f["phases"]["confidence"] == f["voltage_min_v"]["confidence"] == "engines_disagreed"
+    assert f["capacity_raw"]["confidence"] == "read_by_one_engine"
+    assert any("Not reliably read" in n and "power_kw" in n for n in r.notes)
+    assert any("chosen by rule" in n for n in r.notes)
+    assert r.data["read_by"].startswith("both:")
+
+
+def test_a_clear_reading_of_an_implausible_plate_value_carries_its_concern(db):
+    """CNC-01: both engines read 9257 kg; a clear reading of a doubtful plate line."""
+    w = call(db, "get_nameplate", machine="CNC-01").data["fields"]["weight_kg"]
+    assert w["value"] == 9257.0 and w["confidence"] == "clear"
+    assert "CNC-02" in w["concern"] and "I19" in w["concern"]
+
+
+def test_eye_checks_cite_the_trap_list_item_for_their_field(db):
+    r = call(db, "get_nameplate", machine="CRN-02")
+    assert "trap list I15" in r.data["fields"]["grease_interval_h"]["checked"]
+    oil = call(db, "get_nameplate", machine="WELD-02").data["fields"]["lubricant"]
+    assert "trap list I18" in oil["concern"]
+
+
 def test_a_tie_break_value_is_flagged_not_stated(db):
     """CNC-03's grease interval: three OCR readings, none agreeing (trap list I15)."""
     r = call(db, "get_nameplate", machine="CNC-03")
@@ -445,8 +501,31 @@ def test_a_value_checked_by_eye_travels_with_the_ocr_value(db):
     r = call(db, "machine_lubrication", machine="CNC-03")
     g = r.data["nameplate"]["grease_interval_h"]
     assert g["value"] == 590 and g["confidence"] == "uncertain"      # stored value untouched
-    assert "photo reads 500 h" in g["concern"]
+    assert "photo reads 500 h" in g["concern"] and "Stored 590" in g["concern"]
     assert any("photo reads 500 h" in n for n in r.notes)
+
+
+def test_a_value_that_matches_the_eye_check_is_trusted_not_flagged(db):
+    """CRN-02 after --engine both: 500 h and 2000 kg are stored, as the photo reads.
+    The old note ('OCR stored 509 h') would describe an error that is no longer there."""
+    r = call(db, "machine_lubrication", machine="CRN-02")
+    g = r.data["nameplate"]["grease_interval_h"]
+    assert g["value"] == 500 and g["confidence"] == "checked_by_eye"
+    assert "concern" not in g and "as stored" in g["checked"]
+    assert not any("not reliably read" in n for n in r.notes)
+    text = json.dumps(r.to_dict())
+    assert "509" not in text and "OCR stored" not in text
+    cap = call(db, "get_nameplate", machine="crane 2").data["fields"]["capacity_raw"]
+    assert cap["confidence"] == "checked_by_eye" and "SOP-CRANE-02" in cap["concern"]
+    assert "2600" not in cap["concern"]
+
+
+def test_an_unreadable_value_with_a_known_photo_value_gives_both(db):
+    """WELD-02: OCR read 'M58' (not a grade); the photo, checked by eye, says M68."""
+    r = call(db, "get_nameplate", machine="WELD-02")
+    oil = r.data["fields"]["lubricant"]
+    assert oil["confidence"] == "unreadable"
+    assert "Shell Tonna S3 M68" in oil["concern"] and "Inverter welders" in oil["concern"]
 
 
 def test_an_unreadable_oil_is_never_passed_off_as_read(db):
