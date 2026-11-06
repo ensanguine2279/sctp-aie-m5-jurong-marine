@@ -237,13 +237,17 @@ def new_conversation() -> list[dict]:
     return [{"role": "system", "content": SYSTEM_PROMPT}]
 
 
-def ask(db, client, messages, question, *, model=MODEL, logger=log):
+def ask(db, client, messages, question, *, model=MODEL, logger=log, raw_sources=None):
     """Append the user's question, run it to completion, return (answer, source
-    labels). `messages` is mutated in place so the caller can keep the conversation."""
+    labels). `messages` is mutated in place so the caller can keep the conversation.
+    raw_sources: a list to extend with the tools' source records (agent_ui.py shows the
+    photo behind each image source from them)."""
     messages.append({"role": "user", "content": question})
     answer, sources, tool_names = run_turn(db, client, messages, model=model, logger=logger)
     _emit(logger, "turn", question=question[:200],
           tools_called=tool_names, n_sources=len(sources))
+    if raw_sources is not None:
+        raw_sources.extend(sources)
     return answer, format_sources(sources)
 
 

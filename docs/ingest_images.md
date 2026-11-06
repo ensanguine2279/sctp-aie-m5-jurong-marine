@@ -372,6 +372,7 @@ as loaded" column.
 | `missing_date`, `bad_date` | form | As in `ingest_cmms.py` |
 | `person_not_an_emp_code` | form | "Person involved" isn't an `EMP` code (e.g. a name): **not stored** in the clean table |
 | `root_cause_in_attachment` | form | Root cause says "see attached": the 5-Why sheet isn't in the scan or the data package |
+| `form_image_not_stored` | form | The person or signature label couldn't be found, so no redacted photo was stored; the app shows none |
 | `signature_missing`, `signature_unknown` | form | No ink in the signature box / box not found |
 | severity warnings | form | See above |
 
@@ -383,6 +384,35 @@ warnings" meaningless. Day-first is shown by the template itself (`24/01/2024` o
 date read the wrong way round would still show in `incident_report_vs_cmms` as
 `field = 'incident_date'`, `agrees = 0`.
 
+## Photos for the app
+
+The chat page shows the photo behind an answer ([`agent_ui.md`](agent_ui.md#photos-under-the-answer)).
+The hosted page has no data folder, so the photos go into the database with the load:
+
+| Scan | Stored in `img_files` | |
+|---|---|---|
+| Nameplate | as it is (`variant = original`) | no personal data |
+| Incident form | **only redacted** (`variant = redacted`): the "Person involved" value and the signature box covered in grey, labelled "removed (PDPA)" | the unredacted form never goes into the database; the scan folder stays the original record |
+
+- **Finding the areas** (`redaction_boxes`): OCR finds the words "Person involved" and
+  "Signature"; the box runs from the end of the label to the right edge, taller than the
+  line: on a slightly rotated scan the value sits higher than its label, and the signature
+  is written mostly **below** its label (the first version's box, 3 lines deep, left the
+  signature's tail showing on 917, 918, 955 and 957; it now runs 9.5 lines down and 4 up).
+  Cached by image hash (`redact-v2`). `test_no_signature_ink_is_left_below_the_box_on_any_real_form`
+  checks every form in `data/images/` for blue ink under the box.
+- **Fail closed:** if either label can't be found, the form is **not stored** and is flagged
+  `form_image_not_stored`; the app then says the photo isn't available.
+- **Hash-checked:** each row has `bytes_sha256`; the app recomputes it before showing.
+- **`img_files_public`** (granted to `agent_ro`): nameplates' originals and forms' redacted
+  copies, of loaded scans only. `img_files` itself isn't granted.
+- **Check them by eye before the first load:**
+  `python scripts/ingest_images.py data/images --dry-run --photos-preview .cache/ingest_images/preview`
+  writes every redacted form there (git-ignored). `--no-photos` skips the step.
+
+Run summary lines: `Photos for the app: original=12, redacted=30` and, if any,
+`Forms with no photo (redaction not possible): labels_not_found=1`.
+
 ## Personal data (PDPA)
 
 - The forms carry an employee code and a handwritten signature. Only the code is stored;
@@ -391,6 +421,9 @@ date read the wrong way round would still show in `incident_report_vs_cmms` as
   still in `img_documents_raw` (`fields_raw`, `ocr_text`) as read, which the app user can't
   read (`agent_user.py` grants only the `*_audit` views and the linking views, never `*_raw`).
 - The audit views give the file name and hash for citations, not the OCR text.
+- The photos the app shows (`img_files_public`): incident forms only with the person and
+  the signature covered; an unredacted form never enters the database
+  ([Photos for the app](#photos-for-the-app)).
 - The OCR cache (`.cache/ingest_images/`) holds the same text as the raw table; it is
   git-ignored. Delete files from old engine tags once the new ones exist, and the whole
   cache with the rest of the data after the project.
@@ -455,7 +488,7 @@ WHERE status = 'rejected';
 
 ## Tests
 
-`tests/test_images.py` (148 tests, no database, Tesseract or LLM needed): the OCR text the
+`tests/test_images.py` (155 tests, no database, Tesseract or LLM needed): the OCR text the
 sample scans actually produced, with Tesseract's mistakes, is passed in directly.
 Covers classifying, label parsing (`Loc ation`), the printed-scale label in every form
 (`1 = MOST SEVERE`, `5=WORST`, `1 = least severe`, unreadable), voting (majority, format

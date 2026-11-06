@@ -30,7 +30,8 @@ You can run it on your laptop (below) or host it on Google Cloud Run
     entry, welding SOP, and the count of 2025 incidents at severity 4 or worse.
   - A **New conversation** button.
   - The model in use (`agent_app.MODEL`).
-- **Chat.** Each answer has a **Sources** list. It also has a **What happened** expander, which
+- **Chat.** Each answer has a **Sources** list and, when a tool cited a scan, a **Photo**
+  expander showing it (below). It also has a **What happened** expander, which
   is open for the latest answer and closed for earlier ones. The expander's table has one row
   per step:
 
@@ -40,6 +41,25 @@ You can run it on your laptop (below) or host it on Google Cloud Run
 | `tool, round N` | Tool name, the arguments the model sent, `ok` or `refused: <error_code>`, plus the seconds taken |
 | `model, round N` (failed) | The model call's error |
 | `app` | A tool asked a clarifying question that was passed to the user, or the app stopped after too many tool calls |
+
+## Photos under the answer
+
+When a tool cites a scan (a nameplate photo or an incident form), the page shows the photo
+under the answer, so "check the photo" in an answer is something the user can do there and
+then. The model never handles images or links: `agent_app.ask(..., raw_sources=[...])`
+hands back the tools' source records, and `photo_items()` fetches the photo behind each
+image source.
+
+- **From the database, not a folder.** The hosted page has no data folder; the photos are
+  in `img_files_public` (made by `ingest_images.py`), which `agent_ro` may read.
+- **Hash-checked.** `agent_tools.fetch_image` recomputes the SHA-256 of the bytes and shows
+  nothing if it doesn't match the one recorded at ingest.
+- **Incident forms only redacted.** The database holds no unredacted form: the "Person
+  involved" value and the signature box are covered, and the caption says so.
+- **No public link.** The photo is inside the password-protected page; there is no URL to
+  pass around.
+- A source whose photo isn't stored (a form that couldn't be redacted, a load with
+  `--no-photos`) gets "photo not available here" instead.
 
 ## Run it locally
 
@@ -92,6 +112,7 @@ The **What happened** table is built from these same events.
 | `trace_logger()` | Makes a fresh logger for each question (no propagation). It attaches the trace handler, the shared stderr handler and, if enabled, the shared file handler |
 | `trace_rows()` | Turns the events into the table rows |
 | `password_ok()` | Constant-time password check |
+| `photo_items()`, `show_photos()` | The photos behind an answer's image sources, fetched and hash-checked, with captions; drawn in a **Photo** expander |
 | `main()` | The Streamlit page: password gate, the cached `connect()` (one DB connection and LLM client per process, through `st.cache_resource`), sidebar, chat history and one question per run |
 
 Conversation state lives in `st.session_state`, in memory and per browser session:
@@ -258,6 +279,7 @@ the file would be lost anyway, and the same lines already go to Cloud Logging th
 | `cryptography` error at login | Both | `cryptography` is missing from `requirements-app.txt` |
 | "Set OPENAI_API_KEY" | Both | The key isn't set. On Cloud Run, either the secret isn't attached or the service account can't read it |
 | What happened table is empty | Both | `agent_app.ask()` didn't log JSON events to the logger it was given |
+| "photo not available here" under an answer | Both | The images were loaded with `--no-photos` or before photos were stored, the form couldn't be redacted (`form_image_not_stored`), or `agent_ro` lacks `img_files_public` (re-run `agent_user.py`) |
 | Page loads, then keeps reconnecting | Cloud Run | `--session-affinity` is missing, or more than one instance is running |
 | Build fails in a step named `universal_builder` (exit status 51) | Cloud Run | Cloud Run found no `Dockerfile` and tried to guess the language, which means the files aren't in the folder you deployed from. Run the `ls -la` check in section 0 |
 | Deploy fails while building | Cloud Run | To see the error, run `docker build -t jme-agent .` locally. Or run `gcloud builds list --limit=1`, then `gcloud builds log <ID> \| tail -40` |

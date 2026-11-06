@@ -1413,12 +1413,12 @@ ALLOWED_OBJECTS = {
     "machine_overview", "machine_nameplate", "machine_sops", "incident_report_vs_cmms",
     "table_relationships", "cmms_machines_audit", "cmms_work_orders_audit",
     "cmms_safety_incidents_audit", "vibration_temp_audit", "critical_spares_audit",
-    "img_nameplates_audit", "img_incident_reports_audit", "sops", "sops_audit",
+    "img_nameplates_audit", "img_incident_reports_audit", "img_files_public", "sops", "sops_audit",
     "sop_steps_audit", "sop_machines",
 }
 # Columns query_sql may not touch: severity_as_logged means opposite things before and after
 # Jul 2025 (C1); raw columns are values as written, before cleaning.
-BLOCKED_COLUMNS = {"severity_as_logged", "raw_tuple"}
+BLOCKED_COLUMNS = {"severity_as_logged", "raw_tuple", "image_bytes"}
 BLOCKED_FUNCTIONS = {"sleep", "benchmark", "load_file", "get_lock", "release_lock"}
 
 
@@ -1493,6 +1493,44 @@ def query_sql(db: Db, a: SqlArgs) -> ToolResult:
                              f"Capped at {SQL_ROW_LIMIT} rows."] if len(rows) >= SQL_ROW_LIMIT
                       else ["Answer from a custom query: show the SQL with the answer."],
                       sources=[cite("table", t) for t in tables])
+
+
+# ================================================================== photos ===
+
+def fetch_image(db: Db, image_sha256: str) -> dict | None:
+    """The photo behind an image source, for the page to show under the answer: a
+    nameplate as it is, an incident form only redacted (img_files_public). Not a tool: the
+    model never handles images or links; the page attaches them from the sources.
+
+    Returns {bytes, mime, source_file, variant, width, height}, or None if there is no
+    stored photo or its bytes don't match the SHA-256 recorded at ingest (never shown)."""
+    import hashlib
+
+    if not re.fullmatch(r"[0-9a-f]{64}", str(image_sha256 or "")):
+        return None
+    rows = db.query("SELECT image_sha256, variant, mime, bytes_sha256, width, height, "
+                    "image_bytes, source_file FROM img_files_public WHERE image_sha256 = :s",
+                    {"s": image_sha256})
+    if not rows:
+        return None
+    r = rows[0]
+    data = bytes(r["image_bytes"] or b"")
+    if hashlib.sha256(data).hexdigest() != r["bytes_sha256"]:
+        log.warning(json.dumps({"event": "image_hash_mismatch", "image_sha256": image_sha256}))
+        return None
+    return {"bytes": data, "mime": r["mime"], "source_file": r["source_file"],
+            "variant": r["variant"], "width": r["width"], "height": r["height"]}
+
+
+def image_sources(sources: list[dict]) -> list[dict]:
+    """The image sources of an answer, once each, in order: what the page shows."""
+    seen, out = set(), []
+    for s in sources or []:
+        sha = (s or {}).get("sha256")
+        if s.get("kind") == "image" and sha and sha not in seen:
+            seen.add(sha)
+            out.append(s)
+    return out
 
 
 # ===================================================================== CLI ===

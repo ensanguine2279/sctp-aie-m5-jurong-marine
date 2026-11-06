@@ -58,6 +58,8 @@ Usage
     python scripts/ingest_images.py data/images
     python scripts/ingest_images.py data/images --engine llm      # vision model via the class proxy
     python scripts/ingest_images.py data/images --engine both     # both, compared field by field
+    python scripts/ingest_images.py data/images --dry-run --photos-preview .cache/ingest_images/preview
+                                                                  # check the redacted forms
 """
 from __future__ import annotations
 
@@ -195,6 +197,159 @@ def signature_ink(bw) -> int | None:
             region = bw[max(0, y - 3 * h): y + 2 * h, x + 20: x + 20 + 40 * h]
             return int(region.size > 0 and float((region < 128).mean()) > 0.005)
     return None
+
+
+# ------------------------------------------------- photos for the app (PDPA) ---
+# The app shows the photo behind an answer (agent_ui.py), from the database: the hosted
+# page has no data folder. Nameplates are stored as they are. An incident form is stored
+# ONLY as a redacted copy, with the 'Person involved' value and the signature box covered;
+# the original never goes into the database (the scan folder stays the original record).
+# Both areas are found with OCR; if either can't be found, the form is not stored at all.
+
+REDACT_TAG = "redact-v2"     # change when redaction changes: invalidates the cached boxes
+                             # v2: signature box runs much further down (917, 918, 955, 957)
+REDACT_FILL = (225, 225, 225)
+
+
+def redaction_boxes(img) -> list[tuple[int, int, int, int]] | None:
+    """(x0, y0, x1, y1) boxes, in the image's own pixels, covering the 'Person involved'
+    value and the signature box; None if either label can't be found (then the form is
+    not stored). Generous on purpose: a signature runs above and below its line, and on a
+    slightly rotated scan the value sits higher than its label (IR-2024-900: the top of
+    'EMP001' and a signature stroke showed above boxes sized to the label). The signature
+    is written mostly BELOW its label: on 917, 918, 955 and 957 its tail showed under a box
+    3 line-heights deep, so the box now runs 9.5 down and 4 up (4.6 up cut into the
+    root-cause value above)."""
+    import cv2
+    import pytesseract
+
+    pytesseract.pytesseract.tesseract_cmd = find_tesseract()
+    up = cv2.resize(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), None, fx=2, fy=2,
+                    interpolation=cv2.INTER_CUBIC)
+    d = pytesseract.image_to_data(up, config="--psm 6", output_type=pytesseract.Output.DICT)
+    words = [(w.strip().lower(), d["left"][i], d["top"][i], d["width"][i], d["height"][i])
+             for i, w in enumerate(d["text"]) if w.strip()]
+    H, W = img.shape[:2]
+
+    def box(x_end, y, h, above, below):
+        return (max(0, int(x_end / 2) + 2), max(0, int((y - above * h) / 2)),
+                W, min(H, int((y + below * h) / 2)))
+
+    person = signature = None
+    for i, (w, x, y, wd, h) in enumerate(words):
+        nxt = words[i + 1][0] if i + 1 < len(words) else ""
+        if person is None and w.startswith("person") and nxt.startswith("involved"):
+            _, x2, y2, wd2, h2 = words[i + 1]
+            person = box(x2 + wd2, y2, max(h2, 10), 2.2, 1.8)
+        if signature is None and w.startswith("signature"):
+            signature = box(x + wd, y, max(h, 10), 4.0, 9.5)
+    if person is None or signature is None:
+        return None
+    return [person, signature]
+
+
+def redact(img, boxes):
+    """A copy with each box filled grey and labelled, so it's plain something was removed."""
+    import cv2
+
+    out = img.copy()
+    for x0, y0, x1, y1 in boxes:
+        cv2.rectangle(out, (x0, y0), (x1, y1), REDACT_FILL, -1)
+        cv2.putText(out, "removed (PDPA)", (x0 + 6, min(y1 - 6, y0 + 22)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (90, 90, 90), 1, cv2.LINE_AA)
+    return out
+
+
+def encode_jpeg(img, quality: int = 85) -> bytes:
+    import cv2
+
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not ok:
+        raise ValueError("could not encode the image")
+    return buf.tobytes()
+
+
+def cached_boxes(path: Path, sha: str, cache_dir: Path | None):
+    """redaction_boxes, cached like the OCR reads. Returns (boxes or None, reason)."""
+    cached = cache_path(cache_dir, sha, REDACT_TAG) if cache_dir else None
+    if cached and cached.is_file():
+        try:
+            got = json.loads(cached.read_text(encoding="utf-8"))
+            return (None if got["boxes"] is None else [tuple(b) for b in got["boxes"]]), \
+                got.get("reason")
+        except (ValueError, KeyError, TypeError):
+            pass
+    try:
+        boxes = redaction_boxes(read_image(path))
+        reason = None if boxes else "labels_not_found"
+    except RuntimeError:
+        return None, "no_tesseract"               # not cached: install it and re-run
+    except Exception as e:  # noqa: BLE001 - the form is just not stored
+        return None, f"error: {type(e).__name__}"
+    if cached:
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        cached.write_text(json.dumps({"boxes": boxes, "reason": reason}), encoding="utf-8")
+    return boxes, reason
+
+
+FILE_COLUMNS = ["image_sha256", "variant", "mime", "bytes_sha256", "width", "height",
+                "image_bytes"]
+_EXT_MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+             ".webp": "image/webp"}
+
+
+def image_files(folder: Path, docs: pd.DataFrame, stats: Counter,
+                cache_dir: Path | None = None, boxes_fn=None,
+                preview_dir: Path | None = None) -> tuple[pd.DataFrame, dict]:
+    """Rows for {prefix}files: every loaded nameplate as it is, every loaded form redacted.
+    Returns (rows, {raw_id: reason}) for forms that were NOT stored. preview_dir: also
+    write each redacted form there, to check by eye before loading."""
+    import hashlib
+
+    boxes_fn = boxes_fn or cached_boxes
+    rows, skipped = [], {}
+    loaded = docs[(docs["status"] == "loaded") & docs["doc_type"].isin(DOC_TYPES)]
+    for r in loaded.itertuples():
+        path = folder / r.source_file
+        try:
+            if r.doc_type == "nameplate":
+                data = path.read_bytes()
+                mime = _EXT_MIME.get(path.suffix.lower())
+                img = read_image(path)
+                if mime is None:                      # .tif / .bmp: browsers can't show them
+                    data, mime = encode_jpeg(img), "image/jpeg"
+                variant = "original"
+            else:
+                boxes, reason = boxes_fn(path, r.image_sha256, cache_dir)
+                if not boxes:
+                    skipped[r.raw_id] = reason or "labels_not_found"
+                    stats[f"files:not_stored:{skipped[r.raw_id]}"] += 1
+                    continue
+                img = redact(read_image(path), boxes)
+                data, mime, variant = encode_jpeg(img), "image/jpeg", "redacted"
+        except Exception as e:  # noqa: BLE001 - one unreadable file doesn't stop the load
+            skipped[r.raw_id] = f"error: {type(e).__name__}"
+            stats[f"files:not_stored:{skipped[r.raw_id]}"] += 1
+            continue
+        if preview_dir is not None and variant == "redacted":
+            preview_dir.mkdir(parents=True, exist_ok=True)
+            (preview_dir / f"{Path(r.source_file).stem}_redacted.jpg").write_bytes(data)
+        rows.append({"image_sha256": r.image_sha256, "variant": variant, "mime": mime,
+                     "bytes_sha256": hashlib.sha256(data).hexdigest(),
+                     "width": int(img.shape[1]), "height": int(img.shape[0]),
+                     "image_bytes": data})
+        stats[f"files:stored:{variant}"] += 1
+    return pd.DataFrame(rows, columns=FILE_COLUMNS), skipped
+
+
+def flag_unstored(docs: pd.DataFrame, skipped: dict) -> pd.DataFrame:
+    """Add form_image_not_stored to the warnings of forms with no redacted copy."""
+    docs = docs.copy()
+    for rid, _ in skipped.items():
+        i = docs.index[docs["raw_id"] == rid]
+        old = docs.loc[i, "warnings"].iloc[0] if len(i) else None
+        docs.loc[i, "warnings"] = ",".join(x for x in [old, "form_image_not_stored"] if x)
+    return docs
 
 
 # --------------------------------------------------- severity from the value ink ---
@@ -1037,6 +1192,30 @@ def ddl(prefix: str) -> list[str]:
     JOIN {raw} r ON r.raw_id = c.raw_id
     LEFT JOIN ingest_runs u ON u.run_id = r.run_id
     """]
+    files = f"{prefix}files"
+    out += [f"""
+    CREATE TABLE IF NOT EXISTS {files} (
+        image_sha256  CHAR(64)    NOT NULL COMMENT 'the scan, byte for byte (= {raw}.image_sha256)',
+        variant       VARCHAR(10) NOT NULL COMMENT 'original (nameplates) | redacted (forms)',
+        mime          VARCHAR(20) NOT NULL,
+        bytes_sha256  CHAR(64)    NOT NULL COMMENT 'of image_bytes: the app checks it before showing',
+        width         INT         NOT NULL,
+        height        INT         NOT NULL,
+        image_bytes   MEDIUMBLOB  NOT NULL,
+        PRIMARY KEY (image_sha256, variant)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      COMMENT 'photos the app may show; incident forms only redacted (PDPA)'
+    """, f"""
+    CREATE OR REPLACE VIEW {files}_public AS
+    SELECT f.image_sha256, f.variant, f.mime, f.bytes_sha256, f.width, f.height,
+           f.image_bytes, r.source_file, r.doc_type
+    FROM {files} f
+    JOIN (SELECT image_sha256, MIN(source_file) AS source_file, MIN(doc_type) AS doc_type
+          FROM {raw} WHERE status = 'loaded' GROUP BY image_sha256) r
+      ON r.image_sha256 = f.image_sha256
+    WHERE (r.doc_type = 'nameplate' AND f.variant = 'original')
+       OR (r.doc_type = 'incident_report' AND f.variant = 'redacted')
+    """]
     return out
 
 
@@ -1389,6 +1568,8 @@ def create_tables(engine, prefix: str, recreate: bool) -> None:
     with engine.begin() as conn:  # DDL commits implicitly in MySQL
         conn.execute(text(RUNS_DDL))
         if recreate:
+            conn.execute(text(f"DROP VIEW IF EXISTS {prefix}files_public"))
+            conn.execute(text(f"DROP TABLE IF EXISTS {prefix}files"))
             for t in TABLES.values():
                 conn.execute(text(f"DROP VIEW IF EXISTS {prefix}{t}_audit"))
                 conn.execute(text(f"DROP TABLE IF EXISTS {prefix}{t}"))
@@ -1413,8 +1594,10 @@ def table_exists(conn, table: str) -> bool:
 
 
 def load(engine, prefix: str, reads: list[ImageRead], folder: str, stats: Counter,
-         run_id: int, cmms_prefix: str = "cmms_", **options) -> dict:
-    """Replace this folder's rows in ONE transaction; other folders are kept."""
+         run_id: int, cmms_prefix: str = "cmms_", files_fn=None, **options) -> dict:
+    """Replace this folder's rows in ONE transaction; other folders are kept.
+    files_fn(docs) -> (rows for {prefix}files, {raw_id: reason not stored}), or None to
+    store no photos."""
     from sqlalchemy import text
 
     raw = f"{prefix}documents_raw"
@@ -1433,13 +1616,28 @@ def load(engine, prefix: str, reads: list[ImageRead], folder: str, stats: Counte
         tables = process(reads, stats, source_folder=folder, run_id=run_id, first_raw_id=first,
                          seen=seen, seen_images=seen_images, machine_ids=machine_ids, **options)
         docs = tables["documents"]
+        files = None
+        if files_fn is not None:
+            files, skipped = files_fn(docs)
+            docs = tables["documents"] = flag_unstored(docs, skipped)
         if len(docs):
             conn.execute(_insert(raw, RAW_COLUMNS), to_records(docs))
         for d in DOC_TYPES:
             if len(tables[d]):
                 conn.execute(_insert(prefix + TABLES[d], CLEAN_COLUMNS[d]), to_records(tables[d]))
+        if files is not None:
+            store = f"{prefix}files"
+            shas = sorted(set(files["image_sha256"]))
+            for sha in shas:
+                conn.execute(text(f"DELETE FROM {store} WHERE image_sha256 = :s"), {"s": sha})
+            if len(files):
+                conn.execute(_insert(store, FILE_COLUMNS), to_records(files))
+            # photos of scans no longer loaded from any folder
+            conn.execute(text(f"DELETE FROM {store} WHERE image_sha256 NOT IN "
+                              f"(SELECT image_sha256 FROM {raw} WHERE status = 'loaded')"))
         print(f"  {raw}: {len(docs)} rows; " + ", ".join(
-            f"{prefix}{TABLES[d]}: {len(tables[d])}" for d in DOC_TYPES))
+            f"{prefix}{TABLES[d]}: {len(tables[d])}" for d in DOC_TYPES)
+            + (f"; {prefix}files: {len(files)}" if files is not None else ""))
     return tables
 
 
@@ -1460,6 +1658,10 @@ def print_report(stats: Counter, cmms_prefix: str = "cmms_") -> None:
     print(f"OCR engine: {_items(stats, 'engine:')}")
     if rej := _items(stats, "rejected:"):
         print(f"Rejected rows: {rej}")
+    if stored := _items(stats, "files:stored:"):
+        print(f"Photos for the app: {stored}")
+    if not_stored := _items(stats, "files:not_stored:"):
+        print(f"Forms with no photo (redaction not possible): {not_stored}")
     for t in TABLES.values():
         print(f"\n{t}: loaded {stats[f'{t}:loaded']}")
         if w := _items(stats, f"{t}:warn:"):
@@ -1502,6 +1704,12 @@ def main() -> None:
     ap.add_argument("--cache-dir", default=str(DEFAULT_CACHE),
                     help="OCR cache, keyed by image SHA-256 (default %(default)s)")
     ap.add_argument("--no-cache", action="store_true", help="always re-read every image")
+    ap.add_argument("--photos-preview", metavar="DIR",
+                    help="also write every redacted form here, to check by eye; inside "
+                         ".cache/ingest_images/ it is git-ignored")
+    ap.add_argument("--no-photos", action="store_true",
+                    help="don't store the photos for the app (nameplates as they are, "
+                         "incident forms redacted)")
     ap.add_argument("--severity-cutover", type=date.fromisoformat, default=SEVERITY_CUTOVER,
                     help="for the date-rule comparison; same as ingest_cmms.py "
                          "(default %(default)s)")
@@ -1517,8 +1725,8 @@ def main() -> None:
     folder = Path(a.folder)
     if not folder.is_dir():
         sys.exit(f"Folder not found: {a.folder}")
-    for t in [*TABLES.values(), "documents_raw"]:
-        safe_identifier(f"{a.prefix}{t}_audit")
+    for t in [*TABLES.values(), "documents_raw", "files"]:
+        safe_identifier(f"{a.prefix}{t}_public")
     safe_identifier(f"{a.cmms_prefix}machines")
     files = folder_files(folder, IMAGE_EXTS)
     if not files:
@@ -1543,8 +1751,16 @@ def main() -> None:
         sys.exit(str(e))
     stats: Counter = Counter()
 
+    preview = Path(a.photos_preview) if a.photos_preview else None
+
+    def files_fn(docs):
+        return image_files(folder, docs, stats, cache, preview_dir=preview)
+
     if a.dry_run:
         tables = process(reads, stats, source_folder=folder.name, **options)
+        if not a.no_photos:          # prepared and counted, not stored
+            _, skipped = files_fn(tables["documents"])
+            tables["documents"] = flag_unstored(tables["documents"], skipped)
         with pd.option_context("display.width", 200, "display.max_columns", 20):
             for d in DOC_TYPES:
                 if len(tables[d]):
@@ -1562,7 +1778,8 @@ def main() -> None:
                            sha256=folder_sha256(folder, IMAGE_EXTS))
         try:
             tables = load(engine, a.prefix, reads, folder.name, stats, run_id,
-                          a.cmms_prefix, **options)
+                          a.cmms_prefix, files_fn=None if a.no_photos else files_fn,
+                          **options)
         except BaseException as e:
             finish_run(engine, run_id, ok=False, rows_read=stats["rows_read"] or None,
                        error=f"{type(e).__name__}: {e}")

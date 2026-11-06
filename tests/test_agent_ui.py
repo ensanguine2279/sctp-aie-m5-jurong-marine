@@ -61,3 +61,45 @@ def test_logging_to_the_platform_without_a_file(monkeypatch, capsys):
     assert handler.events[0]["event"] == "turn"                      # still feeds the table
     assert '"event": "turn"' in capsys.readouterr().err               # and goes to stderr
     assert ui._file_handler is None                                   # no file was opened
+
+
+# ---------------------------------------------------------------- photos ---
+
+PLATE_SRC = {"kind": "image", "object": "img_nameplates_audit", "file": "nameplate_CRN-02.jpg",
+             "sha256": "a" * 64, "what": "CRN-02 nameplate photo", "label": "..."}
+FORM_SRC = {"kind": "image", "object": "img_incident_reports_audit", "file": "IR-2025-914.jpg",
+            "sha256": "b" * 64, "what": "Scanned form IR-2025-914", "label": "..."}
+FILE_SRC = {"kind": "file", "file": "jurongmarine_cmms.sql", "sha256": "c" * 64, "label": "..."}
+
+
+def fake_fetch(db, sha):
+    return {"a" * 64: {"bytes": b"plate", "mime": "image/jpeg", "variant": "original",
+                       "source_file": "nameplate_CRN-02.jpg"},
+            "b" * 64: {"bytes": b"form", "mime": "image/jpeg", "variant": "redacted",
+                       "source_file": "IR-2025-914.jpg"}}.get(sha)
+
+
+def test_each_scanned_source_gets_its_photo_once_and_files_get_none():
+    items = ui.photo_items(None, [PLATE_SRC, FILE_SRC, PLATE_SRC, FORM_SRC], fetch=fake_fetch)
+    assert [i["file"] for i in items] == ["nameplate_CRN-02.jpg", "IR-2025-914.jpg"]
+    assert items[0]["caption"] == "CRN-02 nameplate photo: nameplate_CRN-02.jpg"
+    assert items[1]["caption"].endswith("(person and signature removed)")
+
+
+def test_a_photo_that_cant_be_shown_says_so_instead():
+    missing = dict(PLATE_SRC, sha256="e" * 64, file="nameplate_X.jpg")
+    items = ui.photo_items(None, [missing], fetch=fake_fetch)
+    assert items == [{"note": "CRN-02 nameplate photo: nameplate_X.jpg - photo not available here."}]
+
+
+def test_ask_hands_back_the_raw_sources_for_the_photos(monkeypatch):
+    call = FakeToolCall("c1", "get_nameplate", '{"machine": "CRN-02"}')
+    monkeypatch.setattr(app, "complete", scripted(
+        FakeResponse(FakeMessage(content=None, tool_calls=[call])),
+        FakeResponse(FakeMessage(content="500 h."))))
+    monkeypatch.setattr(app.at, "run_tool", lambda db, name, args: FakeToolResult(
+        sources=[PLATE_SRC]))
+    raw = []
+    answer, labels = app.ask(None, client=None, messages=app.new_conversation(),
+                             question="grease interval of crane 2?", raw_sources=raw)
+    assert raw == [PLATE_SRC] and labels == ["..."]

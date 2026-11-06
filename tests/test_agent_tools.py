@@ -171,6 +171,15 @@ def build(conn: sqlite3.Connection) -> None:
                           else "tesseract-v2"})
     put("machine_nameplate", rows)
     put("img_nameplates_audit", audit)
+    import hashlib
+    good, bad = b"\xff\xd8 a nameplate photo", b"\xff\xd8 changed after ingest"
+    put("img_files_public", [
+        {"image_sha256": "c" * 64, "variant": "original", "mime": "image/jpeg",
+         "bytes_sha256": hashlib.sha256(good).hexdigest(), "width": 800, "height": 600,
+         "image_bytes": good, "source_file": "nameplate_CNC-02.jpg", "doc_type": "nameplate"},
+        {"image_sha256": "d" * 64, "variant": "redacted", "mime": "image/jpeg",
+         "bytes_sha256": hashlib.sha256(good).hexdigest(), "width": 800, "height": 600,
+         "image_bytes": bad, "source_file": "IR-2025-914.jpg", "doc_type": "incident_report"}])
 
     spares = [  # part, description, qty, min, size_mm, lead (min, max, local), listed_for, row
         ("BRG-6310", "Bearing 6310 (spindle)", 2, 4, None, (14, 21, 0), ["CNC-02"], 5),
@@ -762,3 +771,34 @@ def test_the_app_never_connects_as_the_owner(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_DB_USERNAME", "agent_ro")
     with pytest.raises(ValueError, match="AGENT_DB_PASSWORD"):
         at.connect(str(env))
+
+
+# ---------------------------------------------------------------- photos ---
+
+def test_the_photo_behind_a_source_is_fetched_and_hash_checked(db):
+    img = at.fetch_image(db, "c" * 64)
+    assert img["bytes"].startswith(b"\xff\xd8") and img["mime"] == "image/jpeg"
+    assert img["source_file"] == "nameplate_CNC-02.jpg" and img["variant"] == "original"
+
+
+def test_a_photo_whose_bytes_changed_is_never_shown(db):
+    assert at.fetch_image(db, "d" * 64) is None             # bytes don't match their hash
+
+
+@pytest.mark.parametrize("sha", ["e" * 64, "not-a-hash", None, "C" * 64])
+def test_no_photo_or_a_bad_hash_gives_nothing(db, sha):
+    assert at.fetch_image(db, sha) is None
+
+
+def test_an_answers_photos_come_from_its_image_sources_once_each(db):
+    r = call(db, "machine_lubrication", machine="CNC-02")
+    srcs = at.image_sources(r.sources + r.sources)
+    assert [s["file"] for s in srcs] == ["nameplate_CNC-02.jpg"]
+    assert at.fetch_image(db, srcs[0]["sha256"]) is not None
+
+
+def test_query_sql_never_returns_the_photo_bytes():
+    pytest.importorskip("sqlglot")
+    with pytest.raises(at.ToolError) as e:
+        at.check_sql("SELECT image_bytes FROM img_files_public")
+    assert e.value.code == "not_allowed"

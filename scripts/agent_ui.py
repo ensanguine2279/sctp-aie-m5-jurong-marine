@@ -2,7 +2,9 @@
 """A chat front end for the agent, for the demo: person -> app -> LLM -> tools -> back.
 
 A thin Streamlit page over `agent_app.py`; it adds no logic of its own. Under every
-answer it shows the sources the tools cited, and an expander with what happened on the
+answer it shows the sources the tools cited, the photo behind each scanned source (from
+the database, hash-checked; incident forms only with the person and signature removed),
+and an expander with what happened on the
 way: each model call (with its time) and each tool call (with the arguments the model
 sent, whether the tool refused, and how long it took). That expander is the live view of
 the path a question takes.
@@ -83,6 +85,40 @@ def trace_logger(log_to_file: bool = False) -> tuple[logging.Logger, TraceHandle
         if LOG_FILE and LOG_FILE.lower() != "off":
             lg.addHandler(_shared_file_handler())
     return lg, handler
+
+
+def photo_items(db, raw_sources: list[dict], fetch=None) -> list[dict]:
+    """The photos to show under an answer: one per image source, fetched from the
+    database and hash-checked (agent_tools.fetch_image). Forms come only redacted. A source
+    whose photo isn't stored, or fails the check, gets a note instead of a picture.
+    The model never produces these: they come from the tools' sources."""
+    import agent_tools as at
+
+    fetch = fetch or at.fetch_image
+    items = []
+    for s in at.image_sources(raw_sources):
+        img = fetch(db, s["sha256"])
+        what = s.get("what") or "Scan"
+        if img is None:
+            items.append({"note": f"{what}: {s.get('file')} - photo not available here."})
+            continue
+        caption = f"{what}: {img['source_file']}"
+        if img["variant"] == "redacted":
+            caption += " (person and signature removed)"
+        items.append({"bytes": img["bytes"], "mime": img["mime"], "caption": caption,
+                      "file": img["source_file"]})
+    return items
+
+
+def show_photos(st, items: list[dict]) -> None:
+    if not items:
+        return
+    with st.expander(f"Photo{'s' if len(items) > 1 else ''} ({len(items)})", expanded=True):
+        for it in items:
+            if "bytes" in it:
+                st.image(it["bytes"], caption=it["caption"])
+            else:
+                st.caption(it["note"])
 
 
 def password_ok(typed: str, expected: str) -> bool:
@@ -168,6 +204,7 @@ def main() -> None:
             st.write(m["text"])
             if m.get("sources"):
                 st.markdown("**Sources**\n" + "\n".join(f"- {s}" for s in m["sources"]))
+            show_photos(st, m.get("photos") or [])
             if m.get("trace"):
                 with st.expander("What happened"):
                     st.table(m["trace"])
@@ -181,18 +218,21 @@ def main() -> None:
         st.write(question)
     with st.chat_message("assistant"):
         lg, handler = trace_logger(log_to_file=True)
+        raw: list[dict] = []
         with st.spinner("Asking the model and checking the data..."):
             answer, sources = app.ask(db, client, st.session_state.messages, question,
-                                      logger=lg)
+                                      logger=lg, raw_sources=raw)
+            photos = photo_items(db, raw)
         rows = trace_rows(handler.events)
         st.write(answer)
         if sources:
             st.markdown("**Sources**\n" + "\n".join(f"- {s}" for s in sources))
+        show_photos(st, photos)
         if rows:
             with st.expander("What happened", expanded=True):
                 st.table(rows)
     st.session_state.shown.append({"role": "assistant", "text": answer,
-                                   "sources": sources, "trace": rows})
+                                   "sources": sources, "photos": photos, "trace": rows})
 
 
 if __name__ == "__main__":
