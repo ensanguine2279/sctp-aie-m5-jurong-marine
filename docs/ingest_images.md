@@ -66,7 +66,7 @@ engine has already read.
 | `classify` | `incident_report` (title, `WSH-F02`, `Report No`), `nameplate` (`SERIAL`, `ASSET TAG`, `MFG DATE`), or `unknown` |
 | `parse_*_text` | Label -> value, tolerant of OCR splitting a word (`Loc ation/machine`). On nameplates the maker is the bold capitals line above `MODEL`, never a label line (`plate_maker`), and oil names are cleaned **before** the vote (`clean_lubricant`: `IS0`/`1S0`/`[S0`/`SO` -> `ISO`, `vVG` -> `VG`, `Tonna S3 N68` -> `M68`, trailing `;` dropped) so the three readings of a plate can agree |
 | `vote` | Per field, up to **four readings** are voted: the three page versions plus, for severity on a form, the blue-ink reading (below) |
-| `clean_*` | Ids (`IR-2024-9OO` -> `IR-2024-900`, `EMPOO1` -> `EMP001`; letters->digits only where digits belong, so `BLAST` stays `BLAST`), numbers and units (weight in lb or t -> kg, flagged), dates (same day-first parser as `ingest_cmms.py`), severity (below) |
+| `clean_*` | Ids (`IR-2024-9OO` -> `IR-2024-900`, `EMPOO1` -> `EMP001`; letters->digits only where digits belong, so `BLAST` stays `BLAST`; in a serial's 2-letter prefix a zero after the first letter is the letter O, `K04778956` -> `KO4778956`, trap list I21), numbers and units (weight in lb or t -> kg, flagged), dates (same day-first parser as `ingest_cmms.py`), severity (below) |
 | `split_rejects` | Image rejected: `unreadable_image`, `unknown_document_type`, `duplicate_image` (same bytes as another image), `missing_key` (no readable tag or report no), `duplicate_key` / `duplicate_key_conflict` (a second image for the same machine or incident; conflict = its values differ, so review it) |
 | `add_*_warnings` | Loaded, but flagged (table below) |
 | `load` | One transaction; a failed load changes nothing |
@@ -373,6 +373,7 @@ as loaded" column.
 | `missing_date`, `bad_date` | form | As in `ingest_cmms.py` |
 | `person_not_an_emp_code` | form | "Person involved" isn't an `EMP` code (e.g. a name): **not stored** in the clean table |
 | `root_cause_in_attachment` | form | Root cause says "see attached": the 5-Why sheet isn't in the scan or the data package |
+| `checked_by_eye_<field>` | both | The value was read off the scan by a person (`REVIEWED`), not by OCR |
 | `form_image_not_stored` | form | The person or signature label couldn't be found, so no redacted photo was stored; the app shows none |
 | `signature_missing`, `signature_unknown` | form | No blue ink in the signature area / label not found, or (with `--engine both`) the engines disagree. The area runs from the end of the "Signature" label to the right edge, 1 line above to 9.5 below: a signature is written mostly below its label (`signature_ink`, I23) |
 | severity warnings | form | See above |
@@ -384,6 +385,22 @@ warnings" meaningless. Day-first is shown by the template itself (`24/01/2024` o
 `24/08/2024` on 919, `29/12/2025` on 904: a day above 12 can only be read one way), and a
 date read the wrong way round would still show in `incident_report_vs_cmms` as
 `field = 'incident_date'`, `agrees = 0`.
+
+## Values read by a person
+
+Where neither engine can read a value, a person can read it off the scan and record it in
+`REVIEWED` in `ingest_images.py`: (document type, report no or asset tag, field) -> (value,
+date, how). `apply_reviewed` puts it in after the engines' vote, so it is stored, compared
+with the CMMS and cited like any other value, but:
+
+- `fields_raw` keeps what OCR read; the reviewed value is never passed off as an OCR reading;
+- `ocr_notes` gets `{"issue": "checked_by_eye", "chose": ..., "was": <OCR>, "checked": <date>, "how": ...}`;
+- the form is flagged `checked_by_eye_<field>`, and `get_incident` tells the app to say the
+  value was read by a person.
+
+In use (7 Nov 2026) for the three severities on the new forms that neither engine could read
+(trap list I12): 911 = 2, 922 = 4, 955 = 1, read from the scans enlarged. All agree with the
+CMMS.
 
 ## Photos for the app
 
@@ -489,7 +506,7 @@ WHERE status = 'rejected';
 
 ## Tests
 
-`tests/test_images.py` (155 tests, no database, Tesseract or LLM needed): the OCR text the
+`tests/test_images.py` (175 tests here; more with the scans in data/images/, one check per form, no database, Tesseract or LLM needed): the OCR text the
 sample scans actually produced, with Tesseract's mistakes, is passed in directly.
 Covers classifying, label parsing (`Loc ation`), the printed-scale label in every form
 (`1 = MOST SEVERE`, `5=WORST`, `1 = least severe`, unreadable), voting (majority, format

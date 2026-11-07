@@ -110,13 +110,45 @@ def photo_items(db, raw_sources: list[dict], fetch=None) -> list[dict]:
     return items
 
 
+def show_notes(st, notes: list[str]) -> None:
+    """The tools' caveats, under every answer, in a closed expander: one click away even
+    when the model leaves them out (7 Nov 2026: incident 911's 'read off the scan by a
+    person' was dropped once). Closed because the answer usually says them already, in
+    plainer words; the tools' wording is written for the model and names the trap-list
+    item, which is what an auditor wants to see."""
+    if notes:
+        with st.expander(f"Caveats from the data ({len(notes)}), as the tools gave them"):
+            st.markdown("\n".join(f"- {n}" for n in notes))
+
+
+def img_html(item: dict) -> str:
+    """The photo as an <img> with the bytes inside it (a data URL) and its caption.
+
+    Not st.image: that keeps the bytes in the server's memory and gives the browser a
+    /media/... link to fetch separately. On Cloud Run that second request can miss (another
+    or restarted container, media released after a rerun, a tab from before a redeploy)
+    and the photo shows broken; seen on the live page, 7 Nov 2026. A data URL travels with
+    the page."""
+    import base64
+    import html
+
+    mime = item.get("mime") or "image/jpeg"
+    if mime not in ("image/jpeg", "image/png", "image/webp"):
+        mime = "image/jpeg"
+    data = base64.b64encode(item["bytes"]).decode("ascii")
+    cap = html.escape(item.get("caption") or "")
+    return (f'<figure style="margin:0 0 1rem 0"><img src="data:{mime};base64,{data}" '
+            f'alt="{cap}" style="max-width:100%;height:auto;border:1px solid #ddd"/>'
+            f'<figcaption style="font-size:0.85rem;color:#666">{cap}</figcaption></figure>')
+
+
 def show_photos(st, items: list[dict]) -> None:
     if not items:
         return
     with st.expander(f"Photo{'s' if len(items) > 1 else ''} ({len(items)})", expanded=True):
         for it in items:
             if "bytes" in it:
-                st.image(it["bytes"], caption=it["caption"])
+                st.markdown(img_html(it), unsafe_allow_html=True)
             else:
                 st.caption(it["note"])
 
@@ -204,6 +236,7 @@ def main() -> None:
             st.write(m["text"])
             if m.get("sources"):
                 st.markdown("**Sources**\n" + "\n".join(f"- {s}" for s in m["sources"]))
+            show_notes(st, m.get("notes") or [])
             show_photos(st, m.get("photos") or [])
             if m.get("trace"):
                 with st.expander("What happened"):
@@ -219,20 +252,24 @@ def main() -> None:
     with st.chat_message("assistant"):
         lg, handler = trace_logger(log_to_file=True)
         raw: list[dict] = []
+        tool_notes: list[str] = []
         with st.spinner("Asking the model and checking the data..."):
             answer, sources = app.ask(db, client, st.session_state.messages, question,
-                                      logger=lg, raw_sources=raw)
+                                      logger=lg, raw_sources=raw, notes=tool_notes)
             photos = photo_items(db, raw)
+            notes = app.format_notes(tool_notes)
         rows = trace_rows(handler.events)
         st.write(answer)
         if sources:
             st.markdown("**Sources**\n" + "\n".join(f"- {s}" for s in sources))
+        show_notes(st, notes)
         show_photos(st, photos)
         if rows:
             with st.expander("What happened", expanded=True):
                 st.table(rows)
     st.session_state.shown.append({"role": "assistant", "text": answer,
-                                   "sources": sources, "photos": photos, "trace": rows})
+                                   "sources": sources, "notes": notes, "photos": photos,
+                                   "trace": rows})
 
 
 if __name__ == "__main__":

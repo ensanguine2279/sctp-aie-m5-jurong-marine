@@ -636,6 +636,22 @@ def norm_id(value, prefix_len: int) -> str | None:
     return v[:prefix_len] + fix_digits(v[prefix_len:])
 
 
+def norm_serial(value) -> str | None:
+    """A plate serial: 2 letters, then digits. norm_id fixes letters read for digits in the
+    digits; this also fixes the reverse in the prefix, but only a zero right after the
+    first letter, read as the letter O: 'K04778956' -> 'KO4778956'. A zero first could be
+    a D or an O (CNC-03's '0M4958733' is DM...), so it isn't guessed.
+
+    Checked by eye, 7 Nov 2026: CRN-01's plate says KO4778956 and LTH-01's CO5612371; this
+    font dots its zeros and the serials' second character has no dot. Before this, the
+    check rejected the right reading ('K04778956', 2 of 3 passes and the model) and kept
+    the only one that passed it, 'KO04778956', which has an extra 0 (trap list I21)."""
+    s = norm_id(value, 2)
+    if s and len(s) > 2 and s[0].isalpha() and s[1] == "0":
+        s = s[0] + "O" + s[2:]
+    return s
+
+
 def classify(text: str) -> str:
     t = text.upper()
     if "INCIDENT REPORT" in t or "WSH-F02" in t or re.search(r"REPORT\s*N[O0]", t):
@@ -780,7 +796,7 @@ VALIDATORS = {
     },
     "nameplate": {
         "asset_tag": lambda v: bool(re.fullmatch(TAG, v.strip().upper())),
-        "serial_no": lambda v: bool(re.fullmatch(r"[A-Z]{2}\d{6,}", norm_id(v, 2) or "")),
+        "serial_no": lambda v: bool(re.fullmatch(r"[A-Z]{2}\d{6,}", norm_serial(v) or "")),
         "mfg_date": plausible_mfg_date,
         "lubricant": has_viscosity_grade,
         "grease_interval": lambda v: bool(re.fullmatch(r"\d[\d,]*\s*(h|hrs?|hours?)", v.strip(),
@@ -973,7 +989,7 @@ def clean_nameplate_ids(df: pd.DataFrame) -> pd.DataFrame:
         return machine_tag(re.match(r"\s*([A-Za-z]{2,6})\s*-?\s*([A-Za-z]??)([0-9OoIlSs]{1,3})\b",
                                     _text(v) or ""))
     df["asset_tag"] = df["asset_tag"].map(tag)
-    df["serial_no"] = df["serial_no"].map(lambda v: norm_id(v, 2))
+    df["serial_no"] = df["serial_no"].map(norm_serial)
     for c in ("manufacturer", "model", "lubricant"):
         df[c] = df[c].map(_text)
     df["lubricant"] = df["lubricant"].map(clean_lubricant)
@@ -1081,7 +1097,8 @@ NOTE_WARNINGS = {"disagreed": "ocr_disagreed", "failed_format": "failed_format",
                  "read_from_value_ink": "read_from_value_ink", "no_majority": "ocr_no_majority",
                  "engines_disagree": "engines_disagree", "one_engine_only": "one_engine_only",
                  "engine_failed": "engine_failed", "not_recognised": "not_recognised",
-                 "llm_read_scale_digit": "llm_read_scale_digit"}
+                 "llm_read_scale_digit": "llm_read_scale_digit",
+                 "checked_by_eye": "checked_by_eye"}
 
 
 def _with_warnings(df: pd.DataFrame, flags: dict) -> pd.DataFrame:
@@ -1452,6 +1469,48 @@ def interpret_both(ex: Extraction) -> tuple[str, dict, list, str | None]:
     return doc_type, fields, notes, text
 
 
+# Values a person read off the scan where OCR couldn't, applied after the engines' vote.
+# The stored value comes from here; fields_raw keeps what OCR read, and the note in
+# ocr_notes says who/when, so a reviewed value is never mistaken for an OCR reading.
+# (doc_type, report no or asset tag, field) -> (value as written, checked, how)
+REVIEWED = {
+    # I12: the new form prints the severity over its own label; both engines fail. Read
+    # from the scans enlarged, 7 Nov 2026; all three agree with the CMMS (2, 4, 1).
+    ("incident_report", "IR-2025-911", "severity"): ("2", "7 Nov 2026", "enlarged scan"),
+    ("incident_report", "IR-2026-922", "severity"): ("4", "7 Nov 2026", "enlarged scan"),
+    ("incident_report", "IR-2026-955", "severity"): ("1", "7 Nov 2026", "enlarged scan"),
+}
+_REVIEW_KEY = {"incident_report": ("report_no", lambda v: norm_id(v, 2)),
+               "nameplate": ("asset_tag", lambda v: machine_tag(re.match(
+                   r"\s*([A-Za-z]{2,6})\s*-?\s*([A-Za-z]??)([0-9OoIlSs]{1,3})\b", _text(v) or "")))}
+
+
+def apply_reviewed(doc_type: str, fields: dict, notes: list,
+                   reviewed: dict | None = None) -> tuple[dict, list]:
+    """Put in the values a person read off the scan (REVIEWED), where they differ from what
+    OCR gave. Each one replaces the OCR value, drops that field's failed_format note (the
+    value is no longer OCR's) and adds a checked_by_eye note: flagged
+    checked_by_eye_<field>."""
+    reviewed = REVIEWED if reviewed is None else reviewed
+    if doc_type not in _REVIEW_KEY or not fields:
+        return fields, notes
+    key_field, norm = _REVIEW_KEY[doc_type]
+    key = norm(fields.get(key_field))
+    todo = {f: v for (d, k, f), v in reviewed.items() if d == doc_type and k == key}
+    if not todo:
+        return fields, notes
+    fields, notes = dict(fields), list(notes)
+    for fld, (value, when, how) in todo.items():
+        old = _text(fields.get(fld))
+        if old is not None and _same(old) == _same(value):
+            continue                                       # OCR already reads it
+        fields[fld] = value
+        notes = [n for n in notes if not (n["field"] == fld and n["issue"] == "failed_format")]
+        notes.append({"field": fld, "issue": "checked_by_eye", "chose": value, "was": old,
+                      "checked": when, "how": how})
+    return fields, notes
+
+
 def interpret(ex: Extraction) -> tuple[str, dict, list, str | None]:
     """(doc_type, fields as read, OCR notes, OCR text) from what the engine returned."""
     if ex.error:
@@ -1499,6 +1558,8 @@ def process(reads: list[ImageRead], stats: Counter, *, source_folder: str = "",
     rows = []
     for i, r in enumerate(reads):
         doc_type, fields, notes, text = interpret(r.extraction)
+        as_read = fields                                  # fields_raw keeps the OCR values
+        fields, notes = apply_reviewed(doc_type, fields, notes)
         raw_id = first_raw_id + i
         reason, dup = None, None
         if r.extraction.error:
@@ -1513,7 +1574,7 @@ def process(reads: list[ImageRead], stats: Counter, *, source_folder: str = "",
                      "source_file": r.source_file, "image_sha256": r.image_sha256,
                      "doc_type": doc_type, "ocr_engine": r.extraction.engine,
                      "fields": fields, "notes": notes, "signature": signature_of(r.extraction),
-                     "fields_raw": json.dumps(fields, ensure_ascii=False) if fields else None,
+                     "fields_raw": json.dumps(as_read, ensure_ascii=False) if as_read else None,
                      "ocr_notes": json.dumps(notes, ensure_ascii=False) if notes else None,
                      "ocr_text": text or r.extraction.error, "reject_reason": reason,
                      "duplicate_of_raw_id": dup, "warnings": None})

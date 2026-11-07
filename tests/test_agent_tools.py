@@ -126,7 +126,11 @@ def build(conn: sqlite3.Connection) -> None:
         {"incident_id": 914, "report_no": "IR-2025-914", "source_file": "IR-2025-914.jpg",
          "image_sha256": "b" * 64, "severity_scale": "1_worst", "immediate_action": "first aid",
          "root_cause": "see attached", "signature_present": 1, "warnings": "ocr_disagreed_location",
-         "emp_code": "EMP029"}])
+         "emp_code": "EMP029"},
+        {"incident_id": 904, "report_no": "IR-2025-904", "source_file": "IR-2025-904.jpg",
+         "image_sha256": "f" * 64, "severity_scale": "5_worst", "immediate_action": "first aid",
+         "root_cause": "N/A near miss", "signature_present": 1,
+         "warnings": "llm_read_scale_digit_severity,checked_by_eye_severity", "emp_code": "EMP009"}])
     put("incident_report_vs_cmms", [
         {"incident_id": 914, "report_no": "IR-2025-914", "field": f, "form_value": fv,
          "logged_value": lv, "agrees": ag}
@@ -802,3 +806,47 @@ def test_query_sql_never_returns_the_photo_bytes():
     with pytest.raises(at.ToolError) as e:
         at.check_sql("SELECT image_bytes FROM img_files_public")
     assert e.value.code == "not_allowed"
+
+
+
+@pytest.mark.parametrize("mid,value,level,date", [
+    ("CRN-01", "KO4778956", "checked_by_eye", "7 Nov 2026"),   # after the I21 fix
+    ("CRN-01", "KO04778956", None, "7 Nov 2026"),              # an older load: both given
+    ("LTH-01", "CO5612371", "checked_by_eye", "7 Nov 2026"),
+    ("CNC-03", "DM4958733", "checked_by_eye", "4 Nov 2026"),
+])
+def test_serials_checked_by_eye(mid, value, level, date):
+    checked, note = at.eye_check(mid, "serial_no", value)
+    assert checked == level
+    assert "trap list I21" in note and date in note
+    if level is None:
+        assert "photo reads KO4778956" in note
+
+
+
+def test_a_form_value_read_by_a_person_is_said_so(db):
+    r = call(db, "get_incident", incident_id=904)
+    assert any("severity couldn't be read by OCR" in n and "by a person" in n for n in r.notes)
+    assert not any("by a person" in n for n in call(db, "get_incident", incident_id=914).notes)
+
+
+@pytest.mark.parametrize("desc,mid,flagged", [
+    ("weld flash burn", "CMP-01", True),          # 911: a welding injury on the air compressor
+    ("weld flash burn", "WELD-01", False),
+    ("near miss: sling snapped during lift", "CNC-02", True),       # 957
+    ("near miss: sling snapped during lift", "CRN-01", False),
+    ("finger caught in chuck (glove)", "CNC-02", False),
+    ("finger caught in chuck (glove)", "CRN-01", True),             # 923
+    ("heat stress - confined space", "WELD-02", False),             # not a clear case: left
+    ("slip on hydraulic oil", "CNC-03", False),
+])
+def test_descriptions_that_dont_fit_the_machine(desc, mid, flagged):
+    note = at.description_misfit(desc, mid)
+    assert (note is not None) is flagged
+    if flagged:
+        assert mid in note and "trap list C6" in note
+
+
+def test_get_incident_flags_a_description_that_doesnt_fit(db):
+    assert any("trap list C6" in n for n in call(db, "get_incident", incident_id=914).notes)
+    assert not any("trap list C6" in n for n in call(db, "get_incident", incident_id=906).notes)
