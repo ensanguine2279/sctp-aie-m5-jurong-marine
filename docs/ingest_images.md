@@ -145,7 +145,8 @@ Result on the 9 new-scale forms: 6 read, **0 wrong**. 904, 913, 939, 953 and 975
 with the CMMS; 906 reads 3 (its CMMS row is `ambiguous`, July 2025). The reader abstained
 on 911, 922 and 955, which stay NULL. Query: [trap list I12](trap_list.md).
 
-The cache file name carries the engine tag (`tesseract-v2` since the blue-ink pass was
+The cache file name carries the engine tag (`tesseract-v3` since the signature check
+changed on 7 Nov 2026; `tesseract-v2` when the blue-ink pass was
 added). Change `TESSERACT_TAG` whenever preprocessing changes, so old cached reads are
 ignored; old-tag files can then be deleted.
 
@@ -288,7 +289,7 @@ it (its passes disagreeing, no majority) stay in `ocr_notes` as context, marked
 warnings: `engines_disagree_<field>` already says to check the photo. CRN-02's grease
 interval carries one warning, not three.
 
-`ocr_engine` is `both:tesseract-v2+llm-v3:<model>`; `ocr_text` holds Tesseract's three
+`ocr_engine` is `both:tesseract-v3+llm-v3:<model>`; `ocr_text` holds Tesseract's three
 pages and the model's answer as JSON.
 
 ```sql
@@ -373,7 +374,7 @@ as loaded" column.
 | `person_not_an_emp_code` | form | "Person involved" isn't an `EMP` code (e.g. a name): **not stored** in the clean table |
 | `root_cause_in_attachment` | form | Root cause says "see attached": the 5-Why sheet isn't in the scan or the data package |
 | `form_image_not_stored` | form | The person or signature label couldn't be found, so no redacted photo was stored; the app shows none |
-| `signature_missing`, `signature_unknown` | form | No ink in the signature box / box not found |
+| `signature_missing`, `signature_unknown` | form | No blue ink in the signature area / label not found, or (with `--engine both`) the engines disagree. The area runs from the end of the "Signature" label to the right edge, 1 line above to 9.5 below: a signature is written mostly below its label (`signature_ink`, I23) |
 | severity warnings | form | See above |
 
 **No `date_assumed_day_first` on forms.** `ingest_cmms.py` flags every date it read

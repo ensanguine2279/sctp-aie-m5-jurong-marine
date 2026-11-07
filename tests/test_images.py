@@ -478,7 +478,7 @@ def test_engines_agreeing_confirm_what_tesseract_was_unsure_of():
         ("BLAST-01", 1000, "Shell Tonna S3 M68")
     w = warnings_of(out)
     assert not [x for x in w if x.startswith(("ocr_disagreed", "engines_disagree"))]
-    assert out["documents"].iloc[0]["ocr_engine"] == "both:tesseract-v2+llm-v3:gpt-4o-mini"
+    assert out["documents"].iloc[0]["ocr_engine"] == "both:tesseract-v3+llm-v3:gpt-4o-mini"
 
 
 def test_engines_disagreeing_are_flagged_with_both_readings():
@@ -1079,3 +1079,40 @@ def test_no_signature_ink_is_left_below_the_box_on_any_real_form(form):
     boxes = ii.redaction_boxes(img)
     assert boxes is not None, "labels not found: this form would not be stored"
     assert _ink_left_below(ii.redact(img, boxes), boxes) < 20
+
+
+
+# ------------------------------------------------------------- signatures ---
+
+def test_only_blue_ink_counts_as_a_signature():
+    import numpy as np
+    paper = np.full((60, 200, 3), 235, np.uint8)
+    assert ii.blue_ink(paper) == 0
+    stain = paper.copy(); stain[10:40, 20:60] = (170, 200, 215)            # beige coffee ring
+    grey = paper.copy(); grey[20:24, 10:190] = (95, 98, 100)                # grey label print
+    assert ii.blue_ink(stain) == 0 and ii.blue_ink(grey) == 0
+    ink = paper.copy(); ink[30:33, 20:120] = (125, 60, 40)                  # navy pen stroke
+    assert ii.blue_ink(ink) >= ii.SIGNATURE_MIN_INK
+
+
+SIGNED_BY_EYE = ["IR-2024-917", "IR-2025-918", "IR-2024-936", "IR-2026-955"]   # 7 Nov 2026
+
+
+@pytest.mark.skipif(shutil.which("tesseract") is None, reason="needs Tesseract")
+@pytest.mark.parametrize("name", SIGNED_BY_EYE)
+def test_forms_checked_by_eye_as_signed_read_as_signed(name):
+    """I23: Tesseract read these four as unsigned; the model said signed; checked by eye,
+    all four are signed. The signature is mostly below its label."""
+    path = SCANS / f"{name}.jpg"
+    if not path.is_file():
+        pytest.skip(f"{path.name} not in data/images/")
+    img = ii.read_image(path)
+    assert ii.signature_ink(ii.preprocess_variants(img)["otsu"], img) == 1
+
+
+@pytest.mark.skipif(shutil.which("tesseract") is None or not FORMS,
+                    reason="needs Tesseract and the scanned forms in data/images/")
+@pytest.mark.parametrize("form", FORMS, ids=lambda p: p.stem)
+def test_the_signature_label_is_found_on_every_real_form(form):
+    img = ii.read_image(form)
+    assert ii.signature_ink(ii.preprocess_variants(img)["otsu"], img) in (0, 1)

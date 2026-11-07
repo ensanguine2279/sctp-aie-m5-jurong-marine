@@ -86,8 +86,9 @@ DEFAULT_FOLDER = "data/images"
 DEFAULT_CACHE = ROOT / ".cache" / "ingest_images"
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp")
 DOC_TYPES = ("incident_report", "nameplate")
-TESSERACT_TAG = "tesseract-v2"     # change when preprocessing changes: invalidates the cache
+TESSERACT_TAG = "tesseract-v3"     # change when preprocessing changes: invalidates the cache
                                    # v2: severity also read from the blue value ink
+                                   # v3: signature looked for as blue ink, below the label too
 DEFAULT_LLM_MODEL = "gpt-4o-mini"
 LLM_TAG = "llm-v3"                 # change when LLM_PROMPT changes: invalidates the cache
                                    # v2: severity value vs the number in its label
@@ -101,7 +102,7 @@ KEYS = {"nameplate": "asset_tag", "incident_report": "incident_id"}
 @dataclass
 class Extraction:
     """What the engine read from one image, before any parsing."""
-    engine: str                       # 'tesseract-v2' | 'llm-v2:<model>' | 'both:...'
+    engine: str                       # 'tesseract-v3' | 'llm-v3:<model>' | 'both:...'
     texts: dict | None = None         # tesseract: preprocessing variant -> OCR text
     fields: dict | None = None        # llm: field -> value as written (+ doc_type)
     signature: int | None = None      # 1 = ink in the signature box, 0 = none, None = unsure
@@ -184,9 +185,29 @@ def find_tesseract() -> str:
                        "tesseract, Linux: apt install tesseract-ocr) or set TESSERACT_CMD.")
 
 
-def signature_ink(bw) -> int | None:
-    """1 if there is ink right of the 'signature' label, 0 if blank, None if the label
-    can't be found. Says nothing about WHO signed."""
+SIGNATURE_MIN_INK = 30     # blue pixels in the signature area that count as signed. Form
+                           # 900's small signature has 94; blank paper and stains have 0
+
+
+def blue_ink(region) -> int:
+    """Pixels of blue (value) ink: blue well above red, not near white. Grey print, paper
+    and the beige stains on the scans don't count."""
+    if region is None or region.size == 0:
+        return 0
+    b, g, r = (region[..., i].astype(int) for i in range(3))
+    return int(((b - r > 40) & (b + g + r < 600)).sum())
+
+
+def signature_ink(bw, img=None) -> int | None:
+    """1 if the signature area holds blue ink, 0 if it doesn't, None if the 'Signature'
+    label can't be found. Says nothing about WHO signed.
+
+    bw: the 2x preprocessed page, to find the label; img: the colour scan, to look for ink.
+    The area runs from the end of the label to the right edge, from 1 line above it to 9.5
+    below, because a signature is written mostly BELOW its label (the same finding as the
+    redaction box). Until 7 Nov 2026 only a band level with the label was checked, in black
+    and white: forms 917, 918, 936 and 955 were read as unsigned, and all four are signed
+    (checked by eye). Without `img` (old callers) the old black-and-white check is used."""
     import pytesseract
 
     data = pytesseract.image_to_data(bw, config="--psm 6", output_type=pytesseract.Output.DICT)
@@ -194,8 +215,11 @@ def signature_ink(bw) -> int | None:
         if word.lower().startswith("signature"):
             x, y = data["left"][i] + data["width"][i], data["top"][i]
             h = max(data["height"][i], 10)
-            region = bw[max(0, y - 3 * h): y + 2 * h, x + 20: x + 20 + 40 * h]
-            return int(region.size > 0 and float((region < 128).mean()) > 0.005)
+            if img is None:
+                region = bw[max(0, y - 3 * h): y + 2 * h, x + 20: x + 20 + 40 * h]
+                return int(region.size > 0 and float((region < 128).mean()) > 0.005)
+            region = img[max(0, int((y - h) / 2)): int((y + 9.5 * h) / 2), int(x / 2) + 5:]
+            return int(blue_ink(region) >= SIGNATURE_MIN_INK)
     return None
 
 
@@ -441,7 +465,7 @@ def extract_tesseract(path: Path) -> Extraction:
     if classify("\n".join(texts.values())) != "incident_report":
         return Extraction(TESSERACT_TAG, texts=texts)
     severity = severity_from_ink(img)
-    return Extraction(TESSERACT_TAG, texts=texts, signature=signature_ink(variants["otsu"]),
+    return Extraction(TESSERACT_TAG, texts=texts, signature=signature_ink(variants["otsu"], img),
                       ink={"severity": severity} if severity else None)
 
 
