@@ -1192,3 +1192,39 @@ def test_the_three_reviewed_severities_match_the_cmms():
     """The CMMS logs 911 = 2, 922 = 4, 955 = 1 (all after July 2025: 5 = worst)."""
     got = {k[1]: v[0] for k, v in ii.REVIEWED.items() if k[2] == "severity"}
     assert got == {"IR-2025-911": "2", "IR-2026-922": "4", "IR-2026-955": "1"}
+
+
+
+# ------------------------------------------------------- which engine runs ---
+
+@pytest.fixture
+def no_engine_env(monkeypatch):
+    monkeypatch.delenv("IMAGE_ENGINE", raising=False)
+
+
+def test_engine_from_the_command_line_wins(no_engine_env, tmp_path, monkeypatch):
+    env = tmp_path / ".env"
+    env.write_text("IMAGE_ENGINE=both\n", encoding="utf-8")
+    assert ii.resolve_engine("tesseract", str(env)) == ("tesseract", "--engine")
+
+
+def test_engine_set_in_the_env_file_is_used(no_engine_env, tmp_path, monkeypatch):
+    """7 Nov 2026: IMAGE_ENGINE=both in .env was read before .env was loaded, so ignored."""
+    env = tmp_path / ".env"
+    env.write_text("IMAGE_ENGINE=both\n", encoding="utf-8")
+    assert ii.resolve_engine(None, str(env)) == ("both", "IMAGE_ENGINE")
+    monkeypatch.delenv("IMAGE_ENGINE", raising=False)
+
+
+def test_no_engine_anywhere_means_tesseract(no_engine_env, tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("", encoding="utf-8")
+    assert ii.resolve_engine(None, str(env)) == ("tesseract", "default")
+
+
+def test_a_misspelt_engine_stops_the_run(no_engine_env, tmp_path, monkeypatch):
+    env = tmp_path / ".env"
+    env.write_text("IMAGE_ENGINE=Both-engines\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="IMAGE_ENGINE"):
+        ii.resolve_engine(None, str(env))
+    monkeypatch.delenv("IMAGE_ENGINE", raising=False)

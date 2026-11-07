@@ -10,11 +10,13 @@ you can paste into the data quality report.
 | `scripts/ingest_logs.py` | Sensor log CSV (`vibration_temp_*.csv`) | [`ingest_logs.md`](docs/ingest_logs.md) |
 | `scripts/ingest_spares.py` | Critical spares sheet (`critical_spares.xlsx`) | [`ingest_spares.md`](docs/ingest_spares.md) |
 | `scripts/ingest_cmms.py` | CMMS SQL dump (`jurongmarine_cmms.sql`) | [`ingest_cmms.md`](docs/ingest_cmms.md) |
-| `scripts/ingest_images.py` | Scanned nameplates and incident report forms (`data/images/`) | [`ingest_images.md`](docs/ingest_images.md) |
+| `scripts/ingest_images.py` | Scanned nameplates and incident report forms (`data/images/`): read by Tesseract, the class vision model, or both; photos stored for the app (forms redacted) | [`ingest_images.md`](docs/ingest_images.md) |
 | `scripts/ingest_sops.py` | SOP documents (`data/sops/`): steps with line numbers, machine links, keyword search | [`ingest_sops.md`](docs/ingest_sops.md) |
 | `scripts/relationships.py` | The loaded tables: links the sources (CMMS, sensors, spares, scans, SOPs) | [`relationships.md`](docs/relationships.md), [ER diagram](docs/er_diagram.md) |
 | `scripts/agent_user.py` | Creates the app's read-only database user (PDPA) | [`agent_user.md`](docs/agent_user.md) |
 | `scripts/pipeline.py` | Runs all of the above in order (the SOPs after the CMMS), writes a Markdown report | [`pipeline.md`](docs/pipeline.md) |
+| `scripts/agent_tools.py` | Not a load: the fixed tools the app's LLM calls, as the read-only user, with citations | [`agent_tools.md`](docs/agent_tools.md) |
+| `scripts/agent_app.py`, `scripts/agent_ui.py` | The chat agent (function-calling loop) and its Streamlit page, with sources, photos and caveats under each answer | [`agent_app.md`](docs/agent_app.md), [`agent_ui.md`](docs/agent_ui.md) |
 | `scripts/audit_sensor_csv.py` | Profiles a sensor CSV without loading it: formats, units, ids, gaps, duplicates, outliers, with line numbers. Run it alone, or first in the pipeline with `pipeline.py --audit` | [`trap_list.md`](docs/trap_list.md#sensor-log-vibration_temp_2026h1csv) |
 
 Every data-quality problem found so far, with evidence, is in
@@ -37,7 +39,8 @@ python scripts/ingest_spares.py data/tabular/critical_spares.xlsx --recreate    
 python scripts/ingest_cmms.py   data/sql/jurongmarine_cmms.sql --dry-run
 python scripts/ingest_cmms.py   data/sql/jurongmarine_cmms.sql --recreate        # first load
 python scripts/ingest_images.py data/images --dry-run                            # needs Tesseract, see below
-python scripts/ingest_images.py data/images --recreate                           # first load
+python scripts/ingest_images.py data/images --dry-run --photos-preview .cache/ingest_images/preview   # look at the redacted forms
+python scripts/ingest_images.py data/images --recreate                           # first load (engine: see below)
 python scripts/ingest_sops.py   data/sops --dry-run
 python scripts/ingest_sops.py   data/sops --recreate                             # first load (after the CMMS)
 
@@ -48,12 +51,24 @@ python scripts/agent_user.py                                   # the app's read-
 **The images need Tesseract** (free, offline OCR), installed once: Windows from
 [UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki) (default folder), WSL/Ubuntu
 `sudo apt install tesseract-ocr`, macOS `brew install tesseract`. The Python side is
-`pytesseract` and `opencv-python-headless` (add them to `requirements.txt`). `--engine llm`
-uses the class LLM endpoint's vision model instead
-([`ingest_images.md`](docs/ingest_images.md#setup-tesseract)). Each scan is read four ways
-and the fields voted; on the new incident forms the severity number is also read from its
-blue ink alone ([four-pass voting](docs/ingest_images.md#four-pass-voting),
-[colour separation](docs/ingest_images.md#colour-separation-severity-from-the-blue-value-ink)).
+`pytesseract` and `opencv-python-headless`; the vision model needs `openai`, and `.env` is
+read with `python-dotenv` (all four belong in `requirements.txt`)
+([setup](docs/ingest_images.md#setup-tesseract)).
+
+**Which engine reads the scans** (`--engine`, else `IMAGE_ENGINE` in `.env`, else `tesseract`):
+
+| Engine | What it does | When |
+|---|---|---|
+| `tesseract` | Three preprocessings of each scan, fields voted; on the new forms the severity also read from its blue ink alone ([voting](docs/ingest_images.md#four-pass-voting), [colour separation](docs/ingest_images.md#colour-separation-severity-from-the-blue-value-ink)) | No network; the default |
+| `llm` | The class LLM endpoint's vision model (`OPENAI_BASE_URL` / `OPENAI_API_KEY`), nothing else | For comparison only |
+| `both` | Both read every scan; per field, a [decision tree](docs/ingest_images.md#decision-tree-2-per-field-which-value-is-kept) keeps one value and flags `engines_disagree_*` where they differ | **What we load** (`IMAGE_ENGINE=both` in `.env`): it fixed every misread checked by eye on the plates (I15, I18) |
+
+Values neither engine can read can be read off the scan by a person and recorded in the
+script ([Values read by a person](docs/ingest_images.md#values-read-by-a-person); flagged
+`checked_by_eye_*`). The load also stores the photos the chat page shows: nameplates as
+they are, incident forms **only redacted** (person and signature covered; a form whose labels
+can't be found isn't stored). Look at the redacted forms with `--photos-preview` before the
+first load ([Photos for the app](docs/ingest_images.md#photos-for-the-app)).
 
 Or run the loads and `relationships.py` in one go, with a report of the results in
 `reports/` ([`pipeline.md`](docs/pipeline.md)):
@@ -61,6 +76,7 @@ Or run the loads and `relationships.py` in one go, with a report of the results 
 ```bash
 python scripts/pipeline.py --dry-run     # check everything first
 python scripts/pipeline.py --recreate    # first load; later loads without --recreate
+python scripts/pipeline.py --image-engine both   # engine for the scans (default: IMAGE_ENGINE in .env)
 ```
 
 Use `--recreate` on the first load and after any schema change; afterwards run
@@ -166,9 +182,11 @@ The [ER diagram](docs/er_diagram.md) shows the cleaned tables and how they link;
 | `cmms_<table>_raw` | For `machines`, `employees`, `work_orders`, `safety_incidents`: every INSERT tuple exactly as in the dump (text), with `source_line`, `tuple_no`, `raw_tuple`, `status`, `reject_reason`, `duplicate_of_raw_id`, `warnings`. The dump's `work_orders.status` is stored as `status_src` | [`ingest_cmms`](docs/ingest_cmms.md) |
 | `cmms_<table>` | Cleaned rows only; `raw_id` links each to its raw row. Incidents carry `severity_as_logged`, `severity_scale` and `severity_5_worst` | [`ingest_cmms`](docs/ingest_cmms.md) |
 | `cmms_<table>_audit` (view) | Clean + raw + run joined: use this for citations | [`ingest_cmms`](docs/ingest_cmms.md) |
-| `img_documents_raw` | One row per image: file name, its SHA-256, document type, OCR engine, each field as read (JSON), where the OCR readings disagreed, the OCR text, `status`, `reject_reason`, `warnings` | [`ingest_images`](docs/ingest_images.md) |
+| `img_documents_raw` | One row per image: file name, its SHA-256, document type, OCR engine(s), each field as read (JSON), where the readings or the two engines disagreed and which value was kept, the OCR text, `status`, `reject_reason`, `warnings` | [`ingest_images`](docs/ingest_images.md) |
 | `img_nameplates` | One per machine (`asset_tag` = `machine_id`): serial, power, weight, **lubricant**, **grease interval**, ... | [`ingest_images`](docs/ingest_images.md) |
 | `img_incident_reports` | One per incident (`IR-2024-900` -> `incident_id` 900): immediate action, root cause, signature, severity on the **scale printed on the form** | [`ingest_images`](docs/ingest_images.md) |
+| `img_files` | The photos for the app, in the database (the hosted page has no data folder): nameplates as they are, incident forms only redacted; `bytes_sha256` to check them | [`ingest_images`](docs/ingest_images.md#photos-for-the-app) |
+| `img_files_public` (view) | The photos the app may show: nameplates' originals and forms' redacted copies, of loaded scans only | [`ingest_images`](docs/ingest_images.md#photos-for-the-app) |
 | `img_nameplates_audit`, `img_incident_reports_audit` (views) | Clean + image file + its SHA-256 + run: use these for citations | [`ingest_images`](docs/ingest_images.md) |
 | `sop_documents_raw` | One row per file in the SOP folder: file name, SHA-256, text as read, `status`, `reject_reason`, `warnings` | [`ingest_sops`](docs/ingest_sops.md) |
 | `sops`, `sop_steps`, `sop_machines` | One row per SOP revision (`is_current`; `search_text` is what the app searches), per step with its line number, per machine it names | [`ingest_sops`](docs/ingest_sops.md) |
@@ -250,7 +268,7 @@ user that can only `SELECT` from an allow-list:
 
 | The app user can read | It can't |
 |---|---|
-| the linking views (`machine_overview`, `machine_spares`, `work_order_detail`, `incident_detail`, `work_order_sensor_window`, `machine_nameplate`, `machine_sops`, `incident_report_vs_cmms`), `table_relationships`, the `*_audit` views for citations (machines, work orders, incidents, sensor readings, spares, nameplates, incident forms, SOPs and their steps), and for the SOPs also `sops` (its `FULLTEXT` index is on the table) and `sop_machines` | `cmms_employees`, `cmms_employees_raw`, `cmms_employees_audit`, any `*_raw` table (including `img_documents_raw`, which keeps OCR text as read, and `sop_documents_raw`, which keeps the GM's email), any write, any schema change |
+| the linking views (`machine_overview`, `machine_spares`, `work_order_detail`, `incident_detail`, `work_order_sensor_window`, `machine_nameplate`, `machine_sops`, `incident_report_vs_cmms`), `table_relationships`, the `*_audit` views for citations (machines, work orders, incidents, sensor readings, spares, nameplates, incident forms, SOPs and their steps), for the SOPs also `sops` (its `FULLTEXT` index is on the table) and `sop_machines`, and `img_files_public` (the photos: incident forms redacted) | `cmms_employees`, `cmms_employees_raw`, `cmms_employees_audit`, any `*_raw` table (including `img_documents_raw`, which keeps OCR text as read, and `sop_documents_raw`, which keeps the GM's email), `img_files` (the photo table itself), any write, any schema change |
 
 Views run with their creator's rights (MySQL's default), so the app user reads
 `work_order_detail` without any access to the tables underneath. Before granting, the
@@ -272,7 +290,8 @@ python scripts/agent_user.py --check     # only the check (exit 1 if anything is
 
 The check connects **as the app user** and must show every allowed view working and
 every probe refused: employee names, the employees table and its audit view, raw rows
-(employees and the SOP folder), a write, a `CREATE TABLE`. Run it after the first full
+(employees, the raw OCR of the scans and the SOP folder), the photo table itself, a write,
+a `CREATE TABLE`. Run it after the first full
 load: objects that don't exist yet are skipped, not granted. Run it again after adding a
 view to the allow-list (`allowed_objects` in the script). A refused object is reported as
 "not created yet" or "exists but not granted", using the admin account to tell which.
@@ -304,7 +323,9 @@ against the real database too
 **`scripts/agent_app.py`** is what a person actually talks to: a plain function-calling
 loop (no framework) that wires an LLM to the tools above, shows the sources a tool
 cited under every answer, and degrades honestly rather than inventing a value when a
-tool or the LLM call fails. Details, what it deliberately doesn't do yet (guardrails,
+tool or the LLM call fails. Every note a tool returns (an OCR value the engines disagreed on,
+a severity read by eye, a description that doesn't fit the machine) is a caveat the answer
+must carry. Details, what it deliberately doesn't do yet (guardrails,
 cross-restart state, evals), and its tests: [`agent_app.md`](docs/agent_app.md).
 
 ```bash
@@ -312,7 +333,11 @@ python scripts/agent_app.py "is CNC-02 running differently now?"
 streamlit run scripts/agent_ui.py          # the same, as a chat page for the demo
 ```
 
-To host the page (Google Cloud Run, Aiven for the data): [`agent_ui.md`](docs/agent_ui.md#deploying-on-google-cloud-run).
+The page ([`agent_ui.md`](docs/agent_ui.md)) shows under each answer the sources, the
+photos behind it (nameplates, redacted incident forms, from `img_files_public`) and the
+tools' caveats in a closed expander. To host it (Google Cloud Run, Aiven for the data):
+[Deploying on Google Cloud Run](docs/agent_ui.md#deploying-on-google-cloud-run). After a
+redeploy, hard-refresh the page (Ctrl+Shift+R) before testing.
 
 ## Lineage: traceability and reproducibility
 
@@ -455,12 +480,14 @@ Compare by `source_file` + `source_line` / `source_row` and by the counts.
 loaded from *other* files, which a dry run can't see. The counts match exactly for the
 first file of a source; for later files, the difference is the `duplicate_*` rejects.
 
-**OCR is the exception:** another Tesseract version can read a bad photo differently.
-Each image's OCR result is cached by its SHA-256 and the engine tag
-(`.cache/ingest_images/<hash>_tesseract-v2.json`) and `img_documents_raw` keeps what was
-read, so a re-run on the same machine gives the same result; across machines, compare
-`fields_raw` and `ocr_notes`. Changing the image preparation means a new engine tag, so
-old cached reads are ignored.
+**OCR is the exception:** another Tesseract version can read a bad photo differently, and
+the vision model's answers vary from run to run even at `temperature = 0` (trap list I24).
+Each image's reading is cached by its SHA-256 and the engine tag
+(`.cache/ingest_images/<hash>_tesseract-v3.json`, `<hash>_llm-v3-gpt-4o-mini.json`), and
+`img_documents_raw` keeps what was read, so a re-run on the same machine with the cache gives
+the same result; across machines, compare `fields_raw` and `ocr_notes`. Changing the image
+preparation or the model's prompt means a new tag, so old cached reads are ignored.
+`ingest_runs` and the run summary record the engine (`both:tesseract-v3+llm-v3:gpt-4o-mini`).
 
 ## Data concerns and open questions
 
@@ -517,7 +544,9 @@ FROM cmms_work_orders GROUP BY 1, 2, 3 HAVING n > 1 ORDER BY wo_date;
 | Slash dates are day first (`05/02/2026` = 5 Feb) | [`ingest_cmms.md`](docs/ingest_cmms.md), [`ingest_images.md`](docs/ingest_images.md) | The client's dump has none; every date is `YYYY-MM-DD`. The scanned forms do use them, and form IR-2024-900's `01/07/2024` matches the CMMS's `2024-07-01` (I8) |
 | A form's printed severity scale is right for that form, even where it contradicts the date rule (flagged, not overruled; the CMMS value is not changed) | [`ingest_images.md`](docs/ingest_images.md#severity-the-scale-printed-on-the-form) | `form_scale_contradicts_date_rule` warnings (none on the 30 forms) |
 | When OCR readings of a field disagree, the majority reading that passes the field's format check is right; ties go to the plain grey reading, and a field where no two readings agree is flagged `ocr_no_majority_*` | [`ingest_images.md`](docs/ingest_images.md#four-pass-voting) | `ocr_disagreed_*` warnings; each reading in `ocr_notes` |
-| A severity read only from the blue value ink is right when at least 3 of 10 colour masks agree and no other digit comes close; otherwise it's left unread | [`ingest_images.md`](docs/ingest_images.md#colour-separation-severity-from-the-blue-value-ink) | `read_from_value_ink_severity` warnings; 6 of 9 new forms read, all matching the CMMS where it has a value (I12) |
+| With `--engine both`, where the engines disagree: the only value passing the field's check wins, then a severity from the blue ink, then the model on free text, then a Tesseract majority, else the model | [`ingest_images.md`](docs/ingest_images.md#decision-tree-2-per-field-which-value-is-kept) | `engines_disagree_*` warnings; the rule used (`chose`) in `ocr_notes` |
+| A value read off the scan by a person is right; it is stored as read, the OCR reading kept beside it | [`ingest_images.md`](docs/ingest_images.md#values-read-by-a-person) | `checked_by_eye_*` warnings (the severities of forms 911, 922, 955) |
+| A severity read only from the blue value ink is right when at least 3 of 10 colour masks agree and no other digit comes close; otherwise it's left unread | [`ingest_images.md`](docs/ingest_images.md#colour-separation-severity-from-the-blue-value-ink) | `read_from_value_ink_severity` warnings; 6 of 9 new forms read, the other 3 read by eye; all match the CMMS where it has a value (I12) |
 | Lead-time months are 30 days; `local` has no lead time in days | [`ingest_spares.md`](docs/ingest_spares.md) | `lead_time_unparsed` warnings (none in rev 11; no lead time uses months) |
 | Only sizes written with a unit are converted; bearing numbers (`6205`) aren't decoded | [`ingest_spares.md`](docs/ingest_spares.md) | `no_explicit_size` count (5 in rev 11) |
 | Part numbers aren't read for size (`BELT-5V-850` is 85.0 in, not 850 mm) | [`ingest_spares.md`](docs/ingest_spares.md) | agent instructions |
@@ -531,7 +560,7 @@ FROM cmms_work_orders GROUP BY 1, 2, 3 HAVING n > 1 ORDER BY wo_date;
 
 | Item | How |
 |---|---|
-| All 30 incident forms and all 12 nameplates are loaded and compared with the CMMS; 9 scans also checked by eye. The SOPs are reviewed (D1–D10), loaded by `ingest_sops.py`, readable by the app user, checked by `relationships.py` and run by `pipeline.py`. Three new forms (911, 922, 955) still have no severity read. Nameplate OCR fixes (I14–I17) are in and confirmed on a reload. Still read wrong and flagged: CRN-02 and CNC-03 grease intervals (509, 590; plates say 500), WELD-02's oil (`M58`; plate says M68). 7 plates not yet checked by eye | `SELECT * FROM machine_nameplate`, then the audit queries in [`ingest_images.md`](docs/ingest_images.md#audit-queries); add findings to [`trap_list.md`](docs/trap_list.md#images-images-incident-forms-and-nameplates). Try `--engine llm` on scans that are rejected or full of `ocr_disagreed_*` |
+| All 30 incident forms and all 12 nameplates are loaded with `--engine both` and compared with the CMMS. Every new-scale severity is now known (6 from the blue ink, 911/922/955 by eye: I12); all 4 forms Tesseract thought unsigned are signed (I23); the plate misreads found by eye (CRN-02 and CNC-03 grease intervals and weights, WELD-02's oil, the CNC-01 power line) are read right by the model (I15, I18, I25). Left: 13 warnings on the plates and 32 on the forms, mostly `engines_disagree_*` the app reports as caveats; plate lines that look copied between machines (I19, client Q15–Q16) | `SELECT * FROM machine_nameplate`, then the audit queries in [`ingest_images.md`](docs/ingest_images.md#audit-queries); add findings to [`trap_list.md`](docs/trap_list.md#images-images-incident-forms-and-nameplates); a value read by eye goes into `REVIEWED` |
 | Whether `emp_code` with trade and shift identifies a person in a 32-person shop (PDPA) | team decision: if so, drop `emp_code` from `incident_detail` / `work_order_detail` |
 | Names also appear in the spares sheet title (`storeman: Halim`) | stored only in `critical_spares_raw.source_title`, which the app user can't read; keep it that way |
 | Views, grants and run logging have only been tested without a database | run `relationships.py` and `agent_user.py --check` on the real database |
@@ -669,6 +698,10 @@ pytest -k "mysql or plural or synonym or entry"     # the SOP search: MySQL vs s
 pytest tests/test_agent_tools.py                    # the agent's tools (SQLite stand-in, no MySQL)
 pytest -k "severity and (incident or count)"        # the severity kill-shot, on the tools layer
 pytest tests/test_agent_app.py                      # the agent's loop (chat call + tools both stubbed)
+pytest tests/test_agent_ui.py                       # the chat page's helpers: trace, photos, caveats
+pytest tests/test_pipeline.py                       # the pipeline and its report
+pytest -k "both or engine"                          # the two-engine decision tree
+pytest -k "redact or photo"                         # the photos: redaction, fail closed, the public view
 pytest tests/test_logs.py::test_temperature_units   # one specific test
 pytest -x                                           # stop at the first failure
 pytest --lf                                         # re-run only the tests that failed last time
@@ -681,19 +714,19 @@ With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
 
 | File | Covers | Tests |
 |---|---|---|
-| `tests/test_agent_tools.py` | [`agent_tools.py`](docs/agent_tools.md): every tool's schema; machine names written six ways, ambiguous and unknown machines; **the severity kill-shot**: four phrasings without a scale asked about on both incident tools, the same question on either scale giving the same incidents, the naive logged-value count never produced, July 2025 reported apart; listings by date with no employee data; form vs CMMS disagreements; OCR confidence per field, known plate problems, no photo; oil from two sources that disagree (shop-wide vs the machine's own), and an unreadable one; spares in both units, shop-wide only, below minimum once each; open costs apart and double entries; no sensors on a crane; weekly coverage; CNC-02 `machine_specific` against flat machines; the blasting chamber SOP quoted whole, nothing for welding; `query_sql` refusing writes, two statements, employees, `SELECT *`, the logged severity, `SLEEP` and `UNION`, and capping rows; a dead database giving `tool_failed`; bad, extra and JSON-string arguments; the app refusing the owner account | 83 |
-| `tests/test_agent_app.py` | [`agent_app.py`](docs/agent_app.md): the loop's own logic, with `agent_tools.run_tool` and the chat call stubbed — a plain answer needing no tool, a tool call round-tripping into the next model call, several tool calls in one round all running and all cited, a tool's clarification question returned to the user with no further model call (the severity-scale guess), a severity scale the user never named stripped so the tool asks (the model's guess), a failed chat call degrading to a plain message instead of raising, too many tool-call rounds stopping with an honest message instead of looping forever, the assistant-message shape matching the API with and without tool calls, source-label deduplication, a new conversation starting with only the system prompt, and `ask()` appending the question, returning formatted sources and logging one turn summary | 18 |
-| `tests/test_agent_ui.py` | [`agent_ui.py`](docs/agent_ui.md): the trace table behind the demo page: one row per model call and tool call in order, with the arguments the model sent, a refusal and a failed chat call shown (Streamlit not needed), the page password check, and logging to stderr with no file | 4 |
+| `tests/test_agent_tools.py` | [`agent_tools.py`](docs/agent_tools.md): every tool's schema; machine names written six ways, ambiguous and unknown machines; **the severity kill-shot**: four phrasings without a scale asked about on both incident tools, the same question on either scale giving the same incidents, the naive logged-value count never produced, July 2025 reported apart; listings by date with no employee data; form vs CMMS disagreements; OCR confidence per field, known plate problems, no photo; oil from two sources that disagree (shop-wide vs the machine's own), and an unreadable one; spares in both units, shop-wide only, below minimum once each; open costs apart and double entries; no sensors on a crane; weekly coverage; CNC-02 `machine_specific` against flat machines; the blasting chamber SOP quoted whole, nothing for welding; `query_sql` refusing writes, two statements, employees, `SELECT *`, the logged severity, `SLEEP` and `UNION`, and capping rows; a dead database giving `tool_failed`; bad, extra and JSON-string arguments; the app refusing the owner account; OCR confidence ranked (unreadable, engines disagreed, uncertain, majority, one engine, clear) with power warnings applying to kW, phases and voltage, values checked by eye; the photo behind a nameplate or form fetched and hash-checked, `query_sql` never returning `image_bytes`; descriptions that don't fit the machine (C6) | 119 |
+| `tests/test_agent_app.py` | [`agent_app.py`](docs/agent_app.md): the loop's own logic, with `agent_tools.run_tool` and the chat call stubbed — a plain answer needing no tool, a tool call round-tripping into the next model call, several tool calls in one round all running and all cited, a tool's clarification question returned to the user with no further model call (the severity-scale guess), a severity scale the user never named stripped so the tool asks (the model's guess), a failed chat call degrading to a plain message instead of raising, too many tool-call rounds stopping with an honest message instead of looping forever, the assistant-message shape matching the API with and without tool calls, source-label deduplication, a new conversation starting with only the system prompt, and `ask()` appending the question, returning formatted sources and logging one turn summary; raw sources and tool notes passed out of the turn, notes formatted once, the system prompt telling the model to carry every note as a caveat | 21 |
+| `tests/test_agent_ui.py` | [`agent_ui.py`](docs/agent_ui.md): the trace table behind the demo page: one row per model call and tool call in order, with the arguments the model sent, a refusal and a failed chat call shown (Streamlit not needed), the page password check, logging to stderr with no file; the photos under an answer (one per image, from the tools' sources, as data URLs so a redeploy can't break them) and the caveats listed once in a closed expander | 10 |
 | `tests/test_logs.py` | [`ingest_logs.py`](docs/ingest_logs.md): ISO/epoch timestamps (incl. the 8-hour bug), timezones, °C/°F, unknown units, every CSV line kept in raw with its line number, clean rows linked to raw, reject reasons, duplicates within the file and against rows already loaded, Windows (CRLF) line endings read exactly like LF | 10 |
 | `tests/test_spares.py` | [`ingest_spares.py`](docs/ingest_spares.md): costs (`$38/spool`), lead times (`2-3 weeks (Germany)`, `local`), metric/imperial sizes, machine lists; on a messy sheet: raw rows and row numbers, `raw_id`, duplicate/missing part numbers, warnings for unreadable values | 18 |
 | `tests/test_cmms.py` | [`ingest_cmms.py`](docs/ingest_cmms.md): dump parsing (`;` and quotes inside strings, comments, multi-row INSERTs with line and tuple numbers, column lists, malformed tuples); ids, numbers (`S$1,050`), day-first dates; the severity flip (old scale inverted, July 2025 left unconverted, a confirmed cutover, out-of-range values never guessed); on a messy dump: duplicates and conflicting duplicates, orphan machines/employees flagged not dropped, raw text kept, `work_orders.status` not clashing with the load status; employee names masked to their last 4 characters in everything printed | 27 |
-| `tests/test_images.py` | [`ingest_images.py`](docs/ingest_images.md): the sample scans' real OCR text (mistakes included); label parsing, the printed severity scale, [four-pass voting](docs/ingest_images.md#four-pass-voting) (majority, format checks, ties, the only reading shaped like a machine id, a misread digit not accepted as a letter), asset-tag and location parsing, id fixes (`BLAST` stays `BLAST`); the 12-plate audit (oil-name misreadings undone before the vote, `ocr_no_majority_*` when no two readings agree, impossible manufacture dates rejected, a label line never taken as the maker), forms that contradict the date rule or settle July 2025, an unreadable scale never guessed, a name never stored as `emp_code`, welding ratings, lb -> kg, every reject reason, the LLM engine, the cache, the folder hash, audit views without OCR text; the [blue-ink severity reader](docs/ingest_images.md#colour-separation-severity-from-the-blue-value-ink) (recovers a lost severity and flags it, never outvotes page readings that agree, abstains on weak or split votes, never returns a wrong digit on a mock of the overlapping line); reads the real scans, incl. forms 904 and 906, if Tesseract is installed | 87 |
+| `tests/test_images.py` | [`ingest_images.py`](docs/ingest_images.md): the sample scans' real OCR text (mistakes included); label parsing, the printed severity scale, [four-pass voting](docs/ingest_images.md#four-pass-voting) (majority, format checks, ties, the only reading shaped like a machine id, a misread digit not accepted as a letter), asset-tag and location parsing, id fixes (`BLAST` stays `BLAST`); the 12-plate audit (oil-name misreadings undone before the vote, `ocr_no_majority_*` when no two readings agree, impossible manufacture dates rejected, a label line never taken as the maker), forms that contradict the date rule or settle July 2025, an unreadable scale never guessed, a name never stored as `emp_code`, welding ratings, lb -> kg, every reject reason, the LLM engine, the cache, the folder hash, audit views without OCR text; the [blue-ink severity reader](docs/ingest_images.md#colour-separation-severity-from-the-blue-value-ink) (recovers a lost severity and flags it, never outvotes page readings that agree, abstains on weak or split votes, never returns a wrong digit on a mock of the overlapping line); reads the real scans, incl. forms 904 and 906, if Tesseract is installed; **two engines**: both decision trees (one engine failing, agreement on the cleaned value, the scale-digit guard, blue ink beating the model, free text to the model, a model reading cut short, the Tesseract majority, power compared on kW/phases/volts), `IMAGE_ENGINE` read after `.env`; values read by a person (`REVIEWED`, `fields_raw` untouched); serials (`KO04778956` → `KO4778956`), signatures from the blue ink below the label; **photos**: redaction boxes, failing closed, JPEG encoding, the public view, and on every real form no signature ink left outside the box | 237 |
 | `tests/test_sops.py` | [`ingest_sops.py`](docs/ingest_sops.md): the client's SOPs as delivered; header, UTF-8 where cp1252 garbles the title, BOM/CRLF, the GM's email rejected and never printed, duplicate files and revisions, only the highest revision current, steps with line numbers, references to missing documents, personal data flagged, machine links by id, CMMS name and alias; search for real questions and paraphrases (`SYNONYMS`, the `ENTRY_VERBS`/`SPACE_WORDS` entry rule), nothing for welding, "enter a work order" never found as confined-space entry; MySQL's side kept in step: the `FULLTEXT` stop words, the index rebuild order, a primary key on the stopword table, `search_text` and plurals, MySQL-style matching never missing an SOP `search_sops` finds, an old `sops` table stopping the load; the whole SOP quoted with its citation | 63 |
 | `tests/test_relationships.py` | [`relationships.py`](docs/relationships.md): orphan/NULL/`ALL` counting, keys compared like MySQL (case, spaces), when a foreign key is added or skipped, table prefixes, no view exposes `emp_name`, incidents (and the form comparison) only offer `severity_5_worst`, the form comparison on one collation with July left open, machines without a nameplate kept, the ER diagram, the run fingerprint, successful and failed runs recorded in `ingest_runs`; the SOP links (the client's 7 all matching the CMMS, an unknown machine kept as an orphan with the FK off, `sop_doc` enforced by `ingest_sops.py`'s composite key and never given a second FK, earlier revisions ambiguous but never orphans) and `machine_sops` (machines without an SOP kept, current revisions only) | 58 |
-| `tests/test_pipeline.py` | [`pipeline.py`](docs/pipeline.md): step order and flags (images after the CMMS), foreign keys dropped first and re-added last (never in a dry run), sample rows with names kept out of the report, counts from every script's summary, the images folder hashed like the load, a failure stopping the rest, `--keep-going`, Ctrl+C, the report's tables, `--save-log`, `--audit`; the SOP step (after the CMMS and before the linking, its folder hashed like the load, one summary line per SOP with the step table and the rejected email's name kept out) | 40 |
-| `tests/test_agent_user.py` | [`agent_user.py`](docs/agent_user.md): the allow-list never includes employees or raw tables (nor the raw OCR, nor the raw SOP files), the scans' and SOPs' objects granted, objects with `emp_name` refused, missing objects skipped, a refused object told apart as "not created yet" or "exists but not granted", `SELECT`-only grants after a full reset, password never written into SQL or output, bad user/host/database names rejected, MySQL error codes read correctly, errors never include the password, failed steps named with MySQL's message, no statement needing rights over every database, the access check reads no rows; settings with Windows line endings (from the shell or a CRLF `.env`) read without the trailing `\r`, and no settings leak in from your shell or `.env` | 28 |
+| `tests/test_pipeline.py` | [`pipeline.py`](docs/pipeline.md): step order and flags (images after the CMMS), foreign keys dropped first and re-added last (never in a dry run), sample rows with names kept out of the report, counts from every script's summary, the images folder hashed like the load, a failure stopping the rest, `--keep-going`, Ctrl+C, the report's tables, `--save-log`, `--audit`; the SOP step (after the CMMS and before the linking, its folder hashed like the load, one summary line per SOP with the step table and the rejected email's name kept out); the image engine (`--image-engine`, else `IMAGE_ENGINE` from `.env`) passed on and shown in the report header, the photo lines in the summary | 44 |
+| `tests/test_agent_user.py` | [`agent_user.py`](docs/agent_user.md): the allow-list never includes employees or raw tables (nor the raw OCR, nor the raw SOP files), the scans' and SOPs' objects granted, objects with `emp_name` refused, missing objects skipped, a refused object told apart as "not created yet" or "exists but not granted", `SELECT`-only grants after a full reset, password never written into SQL or output, bad user/host/database names rejected, MySQL error codes read correctly, errors never include the password, failed steps named with MySQL's message, no statement needing rights over every database, the access check reads no rows; settings with Windows line endings (from the shell or a CRLF `.env`) read without the trailing `\r`, and no settings leak in from your shell or `.env`; the public photo view granted, the photo table itself probed and refused | 29 |
 | `tests/test_shared.py` | `db_config.py`, `lineage.py`: password never printed, passwords with special characters, values of a failed query kept out of error messages, table-name check, file SHA-256, a run recorded without a file, values passed to MySQL are plain Python types, `getenv` and `load_db_config` strip a trailing `\r` (CRLF `.env`) | 9 |
-| **Total** | | **445** |
+| **Total** | | **645** |
 
 **Not covered:** anything that needs MySQL, i.e. creating tables, views and users,
 the inserts, the one-transaction rollback and the `ingest_runs` record. After
@@ -705,22 +738,14 @@ tools, the real-database verification pass in
 
 ### Reading the output
 
+One line per test file, a dot per test, then the total (shortened here):
+
 ```
-tests/test_agent_app.py ..............                                          [  3%]
-tests/test_agent_tools.py ...................................................... [ 22%]
-.........................                                                        [ 24%]
-tests/test_agent_user.py ............................                            [ 30%]
-tests/test_cmms.py ...........................                                   [ 36%]
-tests/test_images.py ............................................................[ 53%]
-...........................                                                      [ 53%]
-tests/test_logs.py ..........                                                    [ 55%]
-tests/test_pipeline.py ........................................                  [ 64%]
-tests/test_relationships.py ..........................................................[ 77%]
-tests/test_shared.py .........                                                   [ 79%]
-tests/test_sops.py ...................................................................[ 94%]
-..........
-tests/test_spares.py ..................                                         [100%]
-========== 445 passed in 12.8s ==========
+tests/test_agent_app.py .....................                                    [  3%]
+tests/test_agent_tools.py ...................................................... [ 11%]
+...
+tests/test_spares.py ..................                                          [100%]
+========== 645 passed in 25.1s ==========
 ```
 
 | Mark | Meaning |
@@ -728,7 +753,7 @@ tests/test_spares.py ..................                                         
 | `.` | passed |
 | `F` | failed: an `assert` was false. pytest prints the values on both sides |
 | `E` | error: the test couldn't run (e.g. an import failed) |
-| `s` | skipped: the tests that build a SQLAlchemy engine or URL skip if SQLAlchemy isn't installed; installing `requirements-dev.txt` fixes it. `test_the_real_scans_read_correctly` and `test_the_real_new_forms_give_their_severity_from_the_value_ink` skip without Tesseract or the scans, `test_the_real_sop_folder` without `data/sops/` |
+| `s` | skipped: the tests that build a SQLAlchemy engine or URL skip if SQLAlchemy isn't installed; installing `requirements-dev.txt` fixes it. the tests on the real scans (`test_the_real_scans_read_correctly`, the blue-ink severities, the redaction and signature checks on every form) skip without Tesseract or `data/images/`, `test_the_real_sop_folder` without `data/sops/` |
 
 ### When it doesn't work
 
@@ -736,15 +761,15 @@ tests/test_spares.py ..................                                         
 |---|---|---|
 | `collected 0 items` | pytest isn't running from the repo root, or `tests/` is missing | `cd` to the folder with `pytest.ini`; check `ls tests` |
 | `ModuleNotFoundError: No module named 'ingest_logs'` (or `db_config`, `relationships`, `agent_tools`) | `pytest.ini` not found, or the scripts aren't in `scripts/` | Run from the repo root; check `pythonpath = scripts` matches the folder name |
-| `ModuleNotFoundError: No module named 'pandas'` (or `openpyxl`, `cv2`, `pydantic`, `sqlglot`, ...) | Virtual environment not active, or requirements not installed | Activate `.venv`, then `pip install -r requirements-dev.txt` |
+| `ModuleNotFoundError: No module named 'pandas'` (or `openpyxl`, `cv2`, `openai`, `dotenv`, `pydantic`, `sqlglot`, ...) | Virtual environment not active, or requirements not installed | Activate `.venv`, then `pip install -r requirements-dev.txt` |
 | `pytest: command not found` | pytest not installed in the active environment | `pip install -r requirements-dev.txt`, or use `python -m pytest` |
 | `Invalid user name: 'agent_ro\r'` (or another value ending in `\r`) | `.env` has Windows line endings and was loaded with `source .env`, so every value in your shell ends in `\r` | Update to the current scripts (they strip it), and fix the file: `sed -i 's/\r$//' .env`, then open a new shell |
 
 ### Adding a test
 
-- Put it in the file for the script it tests (`test_logs.py`, `test_spares.py`, `test_cmms.py`, `test_images.py`, `test_sops.py`, `test_relationships.py`, `test_agent_tools.py`, `test_agent_app.py`), or `test_shared.py` for `db_config.py` / `lineage.py`.
+- Put it in the file for the script it tests (`test_logs.py`, `test_spares.py`, `test_cmms.py`, `test_images.py`, `test_sops.py`, `test_relationships.py`, `test_agent_tools.py`, `test_agent_app.py`, `test_agent_ui.py`, `test_agent_user.py`, `test_pipeline.py`), or `test_shared.py` for `db_config.py` / `lineage.py`.
 - Name the function `test_...`, otherwise pytest won't find it.
-- Test the cleaning functions directly with a small `DataFrame` (see `test_temperature_units`), or a whole file through `process()` / `prepare()` using the `tmp_path` fixture (see the `lineage_run` and `messy_sheet` fixtures). For the CMMS script, pass a dump as a string to `parse_dump()` and then `process()` (see `test_pipeline_end_to_end`). For the scans, pass OCR text as an `Extraction` to `process()` (see `test_incident_form_end_to_end`); copy the text from `img_documents_raw.ocr_text` when a real scan misreads. For `relationships.py`, pass key counts to `check_relationship()` (see `test_check_counts_matched_null_and_orphans`). For an SOP question that finds the wrong SOP or none, add it to the search tests in `test_sops.py`, with a `SYNONYMS` entry (or an `ENTRY_VERBS`/`SPACE_WORDS` case) if it's a paraphrase. For a tool that answers wrong on a real call, add that exact question and arguments to `test_agent_tools.py` using the SQLite fixture, with a comment pointing at the real-data check that found it. For a loop bug (a tool call not round-tripping right, a bad degrade-on-failure path), add it to `test_agent_app.py` with the chat call and `agent_tools.run_tool` both stubbed — no database or real LLM call needed.
+- Test the cleaning functions directly with a small `DataFrame` (see `test_temperature_units`), or a whole file through `process()` / `prepare()` using the `tmp_path` fixture (see the `lineage_run` and `messy_sheet` fixtures). For the CMMS script, pass a dump as a string to `parse_dump()` and then `process()` (see `test_pipeline_end_to_end`). For the scans, pass OCR text as an `Extraction` to `process()` (see `test_incident_form_end_to_end`); copy the text from `img_documents_raw.ocr_text` when a real scan misreads; for a two-engine case, give both readings to `interpret_both` (the model's from `fields_raw` / `ocr_notes`). For `relationships.py`, pass key counts to `check_relationship()` (see `test_check_counts_matched_null_and_orphans`). For an SOP question that finds the wrong SOP or none, add it to the search tests in `test_sops.py`, with a `SYNONYMS` entry (or an `ENTRY_VERBS`/`SPACE_WORDS` case) if it's a paraphrase. For a tool that answers wrong on a real call, add that exact question and arguments to `test_agent_tools.py` using the SQLite fixture, with a comment pointing at the real-data check that found it. For a loop bug (a tool call not round-tripping right, a bad degrade-on-failure path), add it to `test_agent_app.py` with the chat call and `agent_tools.run_tool` both stubbed — no database or real LLM call needed.
 - When you find a new problem in the client's data, add a test with that exact value **before** fixing the code. It fails first, then passes with the fix, and it keeps the problem from coming back. The harness checklist asks for this pattern in your git history.
 
 ## Rules worth knowing
@@ -773,11 +798,13 @@ where form and CMMS disagree ([`ingest_images.md`](docs/ingest_images.md)). The 
 number must come with the scale it's on, or the tool asks rather than assumes
 ([`agent_tools.md`](docs/agent_tools.md)).
 
-**Scans:** cite the image file (`img_*_audit.source_file`), and treat a value flagged
-`ocr_disagreed_*` as read from a poor photo. A severity flagged
-`read_from_value_ink_severity` was read from the blue ink alone, because the printed label
-covered it. A machine with `has_nameplate = 0` has no nameplate photo: say so rather than
-answer from model memory.
+**Scans:** cite the image file (`img_*_audit.source_file`) and show the photo
+(`img_files_public`: incident forms only redacted). Treat a value flagged
+`engines_disagree_*`, `ocr_disagreed_*` or `ocr_no_majority_*` as read from a poor photo and
+say so. A severity flagged `read_from_value_ink_severity` was read from the blue ink alone,
+because the printed label covered it; one flagged `checked_by_eye_*` was read by a person.
+A machine with `has_nameplate = 0` has no nameplate photo: say so rather than answer from
+model memory.
 
 **SOPs:** find the SOP with `MATCH (search_text) AGAINST (search_terms(question))`, decide
 with `search_sops` (no match = "no SOP in the data covers this"), and quote the whole SOP
@@ -789,7 +816,7 @@ is the one path the app uses to answer this; see [The agent's tools](#the-agents
 views select it; they give `emp_code`, trade and shift only. The app connects as the
 read-only user from `agent_user.py`, which the database stops from reading names, so
 this holds whatever the model is asked. Scanned forms keep only `EMP` codes and whether
-the form was signed. See
+the form was signed, and their photos are stored only redacted. See
 [Database access for the app](#database-access-for-the-app-pdpa) and
 [`relationships.md`](docs/relationships.md#views).
 

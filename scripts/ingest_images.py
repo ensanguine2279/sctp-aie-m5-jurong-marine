@@ -1771,6 +1771,27 @@ def for_display(doc_type: str, df: pd.DataFrame) -> pd.DataFrame:
     return df[cols]
 
 
+ENGINES = ("tesseract", "llm", "both")
+
+
+def resolve_engine(cli: str | None, env_file: str | None = None) -> tuple[str, str]:
+    """(engine, where it came from): --engine, else IMAGE_ENGINE from the shell or .env (or
+    --env-file), else tesseract. .env is loaded first: reading IMAGE_ENGINE before it, as
+    this script did until 7 Nov 2026, ignored IMAGE_ENGINE=both in .env, and a pipeline run
+    quietly went back to Tesseract-only values."""
+    if cli:
+        return cli, "--engine"
+    from dotenv import load_dotenv
+
+    load_dotenv(env_file) if env_file else load_dotenv()
+    value = (os.getenv("IMAGE_ENGINE") or "").strip().lower()
+    if not value:
+        return "tesseract", "default"
+    if value not in ENGINES:
+        raise ValueError(f"IMAGE_ENGINE={value!r}: use one of {', '.join(ENGINES)}")
+    return value, "IMAGE_ENGINE"
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1779,13 +1800,14 @@ def main() -> None:
     ap.add_argument("--prefix", default="img_", help="table name prefix (default %(default)s)")
     ap.add_argument("--cmms-prefix", default="cmms_",
                     help="ingest_cmms.py's prefix, to check machine ids (default %(default)s)")
-    ap.add_argument("--engine", choices=["tesseract", "llm", "both"],
-                    default=os.getenv("IMAGE_ENGINE", "tesseract"),
+    ap.add_argument("--engine", choices=ENGINES,
                     help="tesseract (offline), llm (the vision model behind OPENAI_BASE_URL, "
                          "the class endpoint), or both: each image read by both and compared "
-                         "field by field (default %(default)s, or IMAGE_ENGINE)")
-    ap.add_argument("--llm-model", default=os.getenv("IMAGE_LLM_MODEL", DEFAULT_LLM_MODEL),
-                    help="model for --engine llm / both (default %(default)s)")
+                         "field by field (default: IMAGE_ENGINE from the shell or .env, "
+                         "else tesseract)")
+    ap.add_argument("--llm-model",
+                    help=f"model for --engine llm / both (default: IMAGE_LLM_MODEL, else "
+                         f"{DEFAULT_LLM_MODEL})")
     ap.add_argument("--cache-dir", default=str(DEFAULT_CACHE),
                     help="OCR cache, keyed by image SHA-256 (default %(default)s)")
     ap.add_argument("--no-cache", action="store_true", help="always re-read every image")
@@ -1806,6 +1828,11 @@ def main() -> None:
                     help="drop and recreate the tables (first run, or after a schema change)")
     add_common_args(ap)
     a = ap.parse_args()
+    try:
+        a.engine, engine_from = resolve_engine(a.engine, a.env_file)
+    except ValueError as e:
+        sys.exit(str(e))
+    a.llm_model = a.llm_model or os.getenv("IMAGE_LLM_MODEL") or DEFAULT_LLM_MODEL
 
     folder = Path(a.folder)
     if not folder.is_dir():
@@ -1820,7 +1847,7 @@ def main() -> None:
     cache = None if a.no_cache else Path(a.cache_dir)
 
     print(f"Reading {len(files)} image(s) in {a.folder} with {a.engine}"
-          + (f" ({a.llm_model})" if a.engine != "tesseract" else ""))
+          + (f" ({a.llm_model})" if a.engine != "tesseract" else "") + f" [{engine_from}]")
     reads = []
     try:
         for i, p in enumerate(files, 1):

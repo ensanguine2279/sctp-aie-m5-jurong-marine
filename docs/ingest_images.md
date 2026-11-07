@@ -19,7 +19,12 @@ python scripts/ingest_images.py data/images --engine llm   # vision model via th
 python scripts/ingest_images.py data/images --engine both  # both, compared field by field
 ```
 
-`IMAGE_ENGINE=both` in `.env` makes `both` the default, so `pipeline.py` uses it too.
+`IMAGE_ENGINE=both` in `.env` makes `both` the default, so `pipeline.py` uses it too
+(`--image-engine` there overrides it). The script loads `.env` (or `--env-file`) **before**
+choosing (`resolve_engine`) and says where the choice came from in its first line
+(`[--engine]`, `[IMAGE_ENGINE]` or `[default]`). Until 7 Nov 2026 it read `IMAGE_ENGINE`
+before loading `.env`, so the setting only worked if also exported in the shell. A misspelt
+value stops the run.
 
 With uv (personal repo): `uv run python scripts/ingest_images.py data/images --dry-run`.
 `pipeline.py` runs it as step 4, after the CMMS load (so it can check machine ids) and before
@@ -506,7 +511,7 @@ WHERE status = 'rejected';
 
 ## Tests
 
-`tests/test_images.py` (175 tests here; more with the scans in data/images/, one check per form, no database, Tesseract or LLM needed): the OCR text the
+`tests/test_images.py` (179 tests here; more with the scans in data/images/, one check per form, no database, Tesseract or LLM needed): the OCR text the
 sample scans actually produced, with Tesseract's mistakes, is passed in directly.
 Covers classifying, label parsing (`Loc ation`), the printed-scale label in every form
 (`1 = MOST SEVERE`, `5=WORST`, `1 = least severe`, unreadable), voting (majority, format
