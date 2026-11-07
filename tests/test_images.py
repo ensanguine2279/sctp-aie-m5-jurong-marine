@@ -478,7 +478,7 @@ def test_engines_agreeing_confirm_what_tesseract_was_unsure_of():
         ("BLAST-01", 1000, "Shell Tonna S3 M68")
     w = warnings_of(out)
     assert not [x for x in w if x.startswith(("ocr_disagreed", "engines_disagree"))]
-    assert out["documents"].iloc[0]["ocr_engine"] == "both:tesseract-v2+llm-v3:gpt-4o-mini"
+    assert out["documents"].iloc[0]["ocr_engine"] == "both:tesseract-v3+llm-v3:gpt-4o-mini"
 
 
 def test_engines_disagreeing_are_flagged_with_both_readings():
@@ -1079,3 +1079,116 @@ def test_no_signature_ink_is_left_below_the_box_on_any_real_form(form):
     boxes = ii.redaction_boxes(img)
     assert boxes is not None, "labels not found: this form would not be stored"
     assert _ink_left_below(ii.redact(img, boxes), boxes) < 20
+
+
+
+# ------------------------------------------------------------- signatures ---
+
+def test_only_blue_ink_counts_as_a_signature():
+    import numpy as np
+    paper = np.full((60, 200, 3), 235, np.uint8)
+    assert ii.blue_ink(paper) == 0
+    stain = paper.copy(); stain[10:40, 20:60] = (170, 200, 215)            # beige coffee ring
+    grey = paper.copy(); grey[20:24, 10:190] = (95, 98, 100)                # grey label print
+    assert ii.blue_ink(stain) == 0 and ii.blue_ink(grey) == 0
+    ink = paper.copy(); ink[30:33, 20:120] = (125, 60, 40)                  # navy pen stroke
+    assert ii.blue_ink(ink) >= ii.SIGNATURE_MIN_INK
+
+
+SIGNED_BY_EYE = ["IR-2024-917", "IR-2025-918", "IR-2024-936", "IR-2026-955"]   # 7 Nov 2026
+
+
+@pytest.mark.skipif(shutil.which("tesseract") is None, reason="needs Tesseract")
+@pytest.mark.parametrize("name", SIGNED_BY_EYE)
+def test_forms_checked_by_eye_as_signed_read_as_signed(name):
+    """I23: Tesseract read these four as unsigned; the model said signed; checked by eye,
+    all four are signed. The signature is mostly below its label."""
+    path = SCANS / f"{name}.jpg"
+    if not path.is_file():
+        pytest.skip(f"{path.name} not in data/images/")
+    img = ii.read_image(path)
+    assert ii.signature_ink(ii.preprocess_variants(img)["otsu"], img) == 1
+
+
+@pytest.mark.skipif(shutil.which("tesseract") is None or not FORMS,
+                    reason="needs Tesseract and the scanned forms in data/images/")
+@pytest.mark.parametrize("form", FORMS, ids=lambda p: p.stem)
+def test_the_signature_label_is_found_on_every_real_form(form):
+    img = ii.read_image(form)
+    assert ii.signature_ink(ii.preprocess_variants(img)["otsu"], img) in (0, 1)
+
+
+
+# ------------------------------------------------------------------ serials ---
+
+@pytest.mark.parametrize("read,clean", [
+    ("K04778956", "KO4778956"),        # CRN-01: the O read as zero (checked by eye)
+    ("C05612371", "CO5612371"),        # LTH-01
+    ("KO04778956", "KO04778956"),      # the extra 0 isn't removed: it loses the vote instead
+    ("0M4958733", "0M4958733"),        # CNC-03: a zero first could be D or O; not guessed
+    ("MA6955187", "MA6955187"), ("ma 6955187", "MA6955187"), ("MA69551O7", "MA6955107"),
+])
+def test_serial_prefix_reads_a_zero_after_the_first_letter_as_o(read, clean):
+    assert ii.norm_serial(read) == clean
+
+
+def test_the_majority_serial_reading_wins_once_its_letter_is_understood():
+    """CRN-01 (7 Nov 2026): gray and otsu read K04778956, adaptive KO04778956, the model
+    K04778956. KO04778956 was kept: the only reading the check accepted."""
+    tess = plate({"SERIAL NO": "K04778956"}, {"SERIAL NO": "K04778956"},
+                 {"SERIAL NO": "KO04778956"})
+    out, _ = run(both(tess, PLATE_LLM | {"serial_no": "K04778956"}))
+    assert out["nameplate"].iloc[0]["serial_no"] == "KO4778956"
+    assert "engines_disagree_serial_no" not in warnings_of(out)
+
+
+def test_a_serial_misread_at_the_first_letter_still_goes_to_the_reading_that_passes():
+    """CNC-03: Tesseract 0M4958733 twice; the model DM4958733 (the plate's value)."""
+    tess = plate({"SERIAL NO": "0M4958733"}, {"SERIAL NO": "0M4958733"},
+                 {"SERIAL NO": "DN4958733"})
+    out, _ = run(both(tess, PLATE_LLM | {"serial_no": "DM4958733"}))
+    assert out["nameplate"].iloc[0]["serial_no"] == "DM4958733"
+
+
+
+# ------------------------------------------------- values read by a person ---
+
+def test_a_severity_read_by_eye_fills_what_neither_engine_could():
+    """I12: 911's severity, read off the enlarged scan (7 Nov 2026): 2, as the CMMS."""
+    tess = Extraction(ii.TESSERACT_TAG, signature=1, texts={
+        "gray": NEW_FORM.replace("IR-2025-904", "IR-2025-911")})
+    llm = FORM_LLM | {"report_no": "IR-2025-911", "date": "08/10/2025", "severity": "5",
+                      "severity_label": "5 = MOST SEVERE, new WSH matrix"}
+    out, _ = run(both(tess, llm, llm_sig=1))
+    r, doc = out["incident_report"].iloc[0], out["documents"].iloc[0]
+    assert (r["incident_id"], r["severity_scale"], r["severity_5_worst"]) == (911, "5_worst", 2)
+    w = warnings_of(out)
+    assert "checked_by_eye_severity" in w
+    assert "bad_severity" not in w and "failed_format_severity" not in w
+    assert "llm_read_scale_digit_severity" in w                     # still on record
+    assert json.loads(doc["fields_raw"])["severity"] != "2"         # raw keeps what OCR read
+    note = next(n for n in json.loads(doc["ocr_notes"]) if n["issue"] == "checked_by_eye")
+    assert (note["chose"], note["checked"]) == ("2", "7 Nov 2026")
+
+
+def test_a_reviewed_value_applies_only_to_its_own_form():
+    reviewed = {("incident_report", "IR-2025-911", "severity"): ("2", "today", "test")}
+    fields, notes = ii.apply_reviewed("incident_report",
+                                      {"report_no": "IR-2025-904", "severity": "3"}, [], reviewed)
+    assert fields["severity"] == "3" and notes == []
+    fields, notes = ii.apply_reviewed("incident_report",
+                                      {"report_no": "IR-2025-9I1", "severity": None}, [], reviewed)
+    assert fields["severity"] == "2"                                # 9I1 -> 911: same form
+
+
+def test_a_reviewed_value_ocr_already_reads_adds_nothing():
+    reviewed = {("incident_report", "IR-2025-911", "severity"): ("2", "today", "test")}
+    fields, notes = ii.apply_reviewed("incident_report",
+                                      {"report_no": "IR-2025-911", "severity": "2"}, [], reviewed)
+    assert notes == []
+
+
+def test_the_three_reviewed_severities_match_the_cmms():
+    """The CMMS logs 911 = 2, 922 = 4, 955 = 1 (all after July 2025: 5 = worst)."""
+    got = {k[1]: v[0] for k, v in ii.REVIEWED.items() if k[2] == "severity"}
+    assert got == {"IR-2025-911": "2", "IR-2026-922": "4", "IR-2026-955": "1"}

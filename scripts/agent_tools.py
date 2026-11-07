@@ -458,16 +458,20 @@ _FIELD_PREFIXES = ("engines_disagree_", "one_engine_only_", "ocr_no_majority_",
 # Plate values checked by eye against the photo (trap list I15, I18, I21). Not a
 # correction: the stored value is never changed here. If it matches, the field is
 # 'checked_by_eye'; if it doesn't (an older load, a re-read), the answer gives both.
-# (machine, field) -> (the photo's value, how to say it)
+# (machine, field) -> (the photo's value, how to say it, date checked)
 EYE_CHECKED = {
-    ("CNC-03", "grease_interval_h"): (500, "500 h"),
-    ("CNC-03", "weight_kg"): (8092, "8092 kg"),
-    ("CRN-02", "grease_interval_h"): (500, "500 h"),
-    ("CRN-02", "capacity_raw"): ("2000 kg", "2000 kg"),
-    ("WELD-02", "lubricant"): ("Shell Tonna S3 M68", "Shell Tonna S3 M68"),
-    ("CMP-01", "lubricant"): ("Shell Tonna S3 M68", "Shell Tonna S3 M68"),
+    ("CNC-03", "grease_interval_h"): (500, "500 h", "4 Nov 2026"),
+    ("CNC-03", "weight_kg"): (8092, "8092 kg", "4 Nov 2026"),
+    ("CRN-02", "grease_interval_h"): (500, "500 h", "4 Nov 2026"),
+    ("CRN-02", "capacity_raw"): ("2000 kg", "2000 kg", "4 Nov 2026"),
+    ("WELD-02", "lubricant"): ("Shell Tonna S3 M68", "Shell Tonna S3 M68", "4 Nov 2026"),
+    ("CMP-01", "lubricant"): ("Shell Tonna S3 M68", "Shell Tonna S3 M68", "4 Nov 2026"),
+    # This font dots its zeros; the serials' second character has no dot (trap list I21)
+    ("CRN-01", "serial_no"): ("KO4778956", "KO4778956", "7 Nov 2026"),
+    ("LTH-01", "serial_no"): ("CO5612371", "CO5612371", "7 Nov 2026"),
+    ("CNC-03", "serial_no"): ("DM4958733", "DM4958733", "4 Nov 2026"),
 }
-EYE_CHECK_DATE = "4 Nov 2026"
+_EYE_ITEM = {"lubricant": "I18", "serial_no": "I21"}            # else I15
 # Trap-list findings about plate values that a clear OCR reading doesn't settle. Kept in
 # code, not in the prompt, so every answer that touches these fields carries them.
 KNOWN_CONCERNS = {
@@ -556,12 +560,12 @@ def eye_check(mid: str, f: str, value) -> tuple[str | None, str | None]:
     """(new confidence or None, note or None) for a value checked by eye against the photo."""
     if (mid, f) not in EYE_CHECKED:
         return None, None
-    photo, said = EYE_CHECKED[(mid, f)]
-    item = "I18" if f == "lubricant" else "I15"
+    photo, said, when = EYE_CHECKED[(mid, f)]
+    item = _EYE_ITEM.get(f, "I15")
     if _same_value(value, photo):
-        return "checked_by_eye", (f"Checked by eye against the photo ({EYE_CHECK_DATE}): it "
+        return "checked_by_eye", (f"Checked by eye against the photo ({when}): it "
                                   f"reads {said}, as stored (trap list {item}).")
-    return None, (f"Stored {value}; checked by eye ({EYE_CHECK_DATE}), the photo reads {said}. "
+    return None, (f"Stored {value}; checked by eye ({when}), the photo reads {said}. "
                   f"Give {said} as the photo's value and say how it was checked (trap list {item}).")
 
 
@@ -1011,6 +1015,12 @@ def get_incident(db: Db, a: IncidentArgs) -> ToolResult:
         unread = [c["field"] for c in compare if c["agrees"] is None and c["form_value"] is None]
         if unread:
             notes.append(f"Not readable on the scan: {', '.join(unread)}.")
+        by_eye = [w[len("checked_by_eye_"):] for w in str(f.get("warnings") or "").split(",")
+                  if w.startswith("checked_by_eye_")]
+        if by_eye:
+            notes.append(f"On the scanned form, {', '.join(by_eye)} couldn't be read by OCR and "
+                         f"was read off the scan by a person (trap list I12). Say so when you "
+                         f"give it.")
         if f["root_cause"] and "attach" in str(f["root_cause"]).lower():
             notes.append("The root cause is in a 5-Why attachment that isn't in the data "
                          "(trap list I7).")
