@@ -974,6 +974,27 @@ def list_incidents(db: Db, a: ListIncidentArgs) -> ToolResult:
                                         "source_line", "line", what="CMMS incidents"))
 
 
+# Words in an incident description and the machines they can happen on. A description on any
+# other machine is flagged (trap list C6: descriptions look drawn independently of the
+# machine; I6: the paper form repeats it). Short on purpose: only clear cases.
+DESCRIPTION_FITS = {
+    "weld": ("WELD-",),                      # weld flash burn, weld porosity
+    "crane": ("CRN-",), "sling": ("CRN-",),
+    "chuck": ("CNC-", "LTH-", "MILL-"),       # finger caught in chuck
+}
+
+
+def description_misfit(description, machine_id) -> str | None:
+    """A note if the description names work that this machine doesn't do, else None."""
+    d, m = str(description or "").lower(), str(machine_id or "").upper()
+    for word, fits in DESCRIPTION_FITS.items():
+        if word in d and m and not m.startswith(fits):
+            return (f"The description ('{description}') doesn't fit {m}: the CMMS descriptions "
+                    f"often don't match their machine (trap list C6). Quote it as logged; "
+                    f"don't reason from it.")
+    return None
+
+
 class IncidentArgs(Args):
     incident_id: int = Field(..., ge=1, description="CMMS incident id, e.g. 914 (form IR-2025-914).")
 
@@ -993,6 +1014,8 @@ def get_incident(db: Db, a: IncidentArgs) -> ToolResult:
                     locator=f"line {r['source_line']}", sha256=r.get("file_sha256"),
                     what=f"CMMS incident {a.incident_id}")]
     notes = []
+    if misfit := description_misfit(r["description"], r["machine_id"]):
+        notes.append(misfit)
     form = db.query("SELECT report_no, source_file, image_sha256, severity_scale, "
                     "immediate_action, root_cause, signature_present, warnings "
                     "FROM img_incident_reports_audit WHERE incident_id = :id", {"id": a.incident_id})

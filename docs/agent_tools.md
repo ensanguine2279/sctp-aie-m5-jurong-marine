@@ -73,6 +73,7 @@ Every query runs with `MAX_EXECUTION_TIME` 10 s on MySQL.
 | **Severity scales (C1, the auditor's test)** | Incident tools filter and group on `severity_5_worst` only. A user's severity number must come with `severity_scale` (`5_is_worst` or `1_is_worst`), converted in code (6 − n); without it the tool returns `needs_clarification`. Tested: "sev 1, old scale" and "sev 5, current scale" give the same incidents across the July 2025 switch, and a naive "logged ≥ 4" count is never produced |
 | July 2025 (C2) | Incidents whose severity can't be placed are left out of severity counts and listed under `unplaced`, with a note |
 | Incident ids not in date order (C5) | Listings are ordered by `incident_date` |
+| Descriptions that don't fit the machine (C6, I6) | `get_incident` notes when a description names work the machine doesn't do (`DESCRIPTION_FITS`: weld on a non-welder, crane or sling on a non-crane, chuck on a non-lathe/mill), e.g. 911's "weld flash burn" on the air compressor. Short on purpose: only clear cases |
 | A form value read by a person (I12) | `get_incident` notes when the scanned form carries `checked_by_eye_<field>`, so the answer says the value was read off the scan by a person |
 | PDPA (C16) | No tool returns employee codes, trades or shifts; `agent_ro` can't read names anyway |
 | OCR on nameplates (I14-I24) | Each field gets a confidence from the image's warnings (`field_flags`, `confidence`), least trusted first: `unreadable` (failed its check: I18), `engines_disagreed` (with `--engine both`, Tesseract and the vision model read different values; the stored one was chosen by rule, [decision tree 2](ingest_images.md#decision-tree-2-per-field-which-value-is-kept)), `uncertain` (no two Tesseract passes agreed: I15), `read_by_majority`, `read_by_one_engine` (only one engine read it), `clear` (with `--engine both`: both engines read the same value), and `checked_by_eye` (below). `unreadable`, `engines_disagreed` and `uncertain` (`NOT_RELIABLE`) come with a note to say so and cite the photo. `get_nameplate` also returns `read_by` (the image's `ocr_engine`). A power warning applies to every value parsed from the POWER line (`POWER_FIELDS`: kW, phases, min and max voltage), since `ingest_images` compares the engines on all of them |
@@ -145,7 +146,7 @@ code is `needs_clarification` or `ambiguous_machine`.
 
 ## Tests
 
-`tests/test_agent_tools.py` (110 tests, no MySQL): the tools run their real SQL on an
+`tests/test_agent_tools.py` (119 tests, no MySQL): the tools run their real SQL on an
 in-memory SQLite database whose tables have the names and columns of the granted views,
 filled with a small sample shaped like the client's data (machine names and some values are
 illustrative) and the client's three SOPs loaded through `ingest_sops.process`. Covers:

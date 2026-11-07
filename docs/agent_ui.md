@@ -30,8 +30,8 @@ You can run it on your laptop (below) or host it on Google Cloud Run
     entry, welding SOP, and the count of 2025 incidents at severity 4 or worse.
   - A **New conversation** button.
   - The model in use (`agent_app.MODEL`).
-- **Chat.** Each answer has a **Sources** list and, when a tool cited a scan, a **Photo**
-  expander showing it (below). It also has a **What happened** expander, which
+- **Chat.** Each answer has a **Sources** list, a closed **Caveats from the data** expander
+  (the tools' notes, below) and, when a tool cited a scan, a **Photo** expander showing it. It also has a **What happened** expander, which
   is open for the latest answer and closed for earlier ones. The expander's table has one row
   per step:
 
@@ -41,6 +41,19 @@ You can run it on your laptop (below) or host it on Google Cloud Run
 | `tool, round N` | Tool name, the arguments the model sent, `ok` or `refused: <error_code>`, plus the seconds taken |
 | `model, round N` (failed) | The model call's error |
 | `app` | A tool asked a clarifying question that was passed to the user, or the app stopped after too many tool calls |
+
+## Notes from the data
+
+Every tool result carries `notes`: caveats the answer must keep (a value read off a scan by
+a person, an OCR value not reliably read, a description that doesn't fit its machine, a
+severity converted between scales). The system prompt tells the model to carry each one, but
+on 7 Nov 2026 the live page answered incident 911 without its note that the form's severity
+was read by a person. So the page also shows the tools' notes itself, once each, under every
+answer (`agent_app.ask(..., notes=[...])`, `format_notes`, `show_notes`), in a **closed**
+expander, "Caveats from the data (N), as the tools gave them". Closed, because with the
+prompt rule the answer usually says them already in plainer words, and showing both
+repeated them; the tools' wording is written for the model and names the trap-list item,
+which is what an auditor wants. One click away whether or not the model said them.
 
 ## Photos under the answer
 
@@ -56,8 +69,12 @@ image source.
   nothing if it doesn't match the one recorded at ingest.
 - **Incident forms only redacted.** The database holds no unredacted form: the "Person
   involved" value and the signature box are covered, and the caption says so.
-- **No public link.** The photo is inside the password-protected page; there is no URL to
-  pass around.
+- **No public link, not even an internal one.** The photo is drawn with its bytes inside the
+  page (a `data:` URL, `img_html`), not with `st.image`. `st.image` keeps the bytes in the
+  server's memory and has the browser fetch them from a `/media/...` link in a second
+  request; on Cloud Run that request can miss (another or restarted container, media
+  released after a rerun, a tab from before a redeploy) and the photo shows **broken**. That
+  happened on the live page on 7 Nov 2026 (CNC-03's nameplate).
 - A source whose photo isn't stored (a form that couldn't be redacted, a load with
   `--no-photos`) gets "photo not available here" instead.
 
@@ -112,7 +129,8 @@ The **What happened** table is built from these same events.
 | `trace_logger()` | Makes a fresh logger for each question (no propagation). It attaches the trace handler, the shared stderr handler and, if enabled, the shared file handler |
 | `trace_rows()` | Turns the events into the table rows |
 | `password_ok()` | Constant-time password check |
-| `photo_items()`, `show_photos()` | The photos behind an answer's image sources, fetched and hash-checked, with captions; drawn in a **Photo** expander |
+| `show_notes()` | The tools' caveats under the answer, from `agent_app.ask(..., notes=...)` |
+| `photo_items()`, `show_photos()`, `img_html()` | The photos behind an answer's image sources, fetched and hash-checked, with captions; drawn in a **Photo** expander as `<img>` tags with the bytes inside (caption HTML-escaped) |
 | `main()` | The Streamlit page: password gate, the cached `connect()` (one DB connection and LLM client per process, through `st.cache_resource`), sidebar, chat history and one question per run |
 
 Conversation state lives in `st.session_state`, in memory and per browser session:
@@ -279,6 +297,7 @@ the file would be lost anyway, and the same lines already go to Cloud Logging th
 | `cryptography` error at login | Both | `cryptography` is missing from `requirements-app.txt` |
 | "Set OPENAI_API_KEY" | Both | The key isn't set. On Cloud Run, either the secret isn't attached or the service account can't read it |
 | What happened table is empty | Both | `agent_app.ask()` didn't log JSON events to the logger it was given |
+| A **broken** image icon under an answer | Cloud Run | An older page that used `st.image`: the browser's second request for `/media/...` missed. Deploy the current `agent_ui.py`, then hard-refresh |
 | "photo not available here" under an answer | Both | The images were loaded with `--no-photos` or before photos were stored, the form couldn't be redacted (`form_image_not_stored`), or `agent_ro` lacks `img_files_public` (re-run `agent_user.py`) |
 | Page loads, then keeps reconnecting | Cloud Run | `--session-affinity` is missing, or more than one instance is running |
 | Build fails in a step named `universal_builder` (exit status 51) | Cloud Run | Cloud Run found no `Dockerfile` and tried to guess the language, which means the files aren't in the folder you deployed from. Run the `ls -la` check in section 0 |

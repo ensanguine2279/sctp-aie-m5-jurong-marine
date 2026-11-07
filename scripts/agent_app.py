@@ -71,6 +71,9 @@ Never give a confident answer anyway.
 say no SOP in the data covers this - never adapt a different SOP to fit.
 - Use query_sql only when no other tool fits the question, and only to read; never to \
 guess what the data "should" say.
+- Every note in a tool result is a caveat your answer must carry: say each one in your own \
+words (e.g. that a value was read off a scan by a person, or wasn't reliably read). Never drop \
+a note to keep the answer short.
 - Keep answers short and direct. Do not describe which tool you used unless asked.
 """
 
@@ -153,6 +156,11 @@ def _assistant_message(msg) -> dict:
     return out
 
 
+def format_notes(notes: list[str]) -> list[str]:
+    """Each tool note once, in the order first seen."""
+    return list(dict.fromkeys(n for n in notes if n))
+
+
 def format_sources(sources: list[dict]) -> list[str]:
     """Every source's label, once each, in the order first seen."""
     seen, labels = set(), []
@@ -165,7 +173,7 @@ def format_sources(sources: list[dict]) -> list[str]:
 
 
 def run_turn(db, client, messages, *, model=MODEL, max_rounds=MAX_TOOL_ROUNDS,
-             complete_fn=None, logger=log):
+             complete_fn=None, logger=log, notes_out=None):
     """Run one user turn to completion: call the model, run any tools it picks, feed
     the results back, repeat until it answers in plain text or `max_rounds` is hit.
     Returns (answer_text, sources, tool_names_called). Mutates `messages` in place, so
@@ -221,6 +229,8 @@ def run_turn(db, client, messages, *, model=MODEL, max_rounds=MAX_TOOL_ROUNDS,
             if clarify is None and isinstance(err, dict) and err.get("code") in CLARIFY_CODES:
                 clarify = err.get("message") or "Could you clarify your question?"
             sources.extend(result.sources)
+            if notes_out is not None:
+                notes_out.extend(getattr(result, "notes", None) or [])
             messages.append({"role": "tool", "tool_call_id": call.id,
                               "content": result.for_model()})
         if clarify:
@@ -237,13 +247,16 @@ def new_conversation() -> list[dict]:
     return [{"role": "system", "content": SYSTEM_PROMPT}]
 
 
-def ask(db, client, messages, question, *, model=MODEL, logger=log, raw_sources=None):
+def ask(db, client, messages, question, *, model=MODEL, logger=log, raw_sources=None,
+        notes=None):
     """Append the user's question, run it to completion, return (answer, source
     labels). `messages` is mutated in place so the caller can keep the conversation.
     raw_sources: a list to extend with the tools' source records (agent_ui.py shows the
-    photo behind each image source from them)."""
+    photo behind each image source from them). notes: a list to extend with the tools'
+    notes, the caveats the page shows under the answer whether or not the model said them."""
     messages.append({"role": "user", "content": question})
-    answer, sources, tool_names = run_turn(db, client, messages, model=model, logger=logger)
+    answer, sources, tool_names = run_turn(db, client, messages, model=model, logger=logger,
+                                           notes_out=notes)
     _emit(logger, "turn", question=question[:200],
           tools_called=tool_names, n_sources=len(sources))
     if raw_sources is not None:

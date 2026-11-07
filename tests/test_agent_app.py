@@ -316,3 +316,38 @@ def test_run_turn_strips_a_guessed_scale_so_the_tool_asks(monkeypatch):
     assert answer == "Which scale?"
     assert "severity_scale" not in seen["args"] and "scale_quote" not in seen["args"]
     assert seen["args"]["at_least_as_severe_as"] == 4
+
+
+# ------------------------------------------------- the tools' notes (caveats) ---
+
+def test_the_tools_notes_are_handed_back_so_the_page_can_show_them(monkeypatch):
+    """7 Nov 2026: get_incident's note on 911 ('read off the scan by a person') reached the
+    model, which left it out of the answer. The page now shows the notes itself."""
+    call = FakeToolCall("c1", "get_incident", '{"incident_id": 911}')
+    monkeypatch.setattr(app, "complete", scripted(
+        FakeResponse(FakeMessage(content=None, tool_calls=[call])),
+        FakeResponse(FakeMessage(content="Severity 2."))))
+    result = FakeToolResult(sources=[{"label": "CMMS incident 911"}])
+    result.notes = ["On the scanned form, severity was read off the scan by a person.",
+                    "On the scanned form, severity was read off the scan by a person."]
+    monkeypatch.setattr(app.at, "run_tool", lambda db, name, args: result)
+    notes = []
+    answer, _ = app.ask(None, client=None, messages=app.new_conversation(), question="911?",
+                        notes=notes)
+    assert answer == "Severity 2." and len(notes) == 2
+    assert app.format_notes(notes) == [notes[0]]                     # once each
+
+
+def test_results_without_notes_are_fine(monkeypatch):
+    call = FakeToolCall("c1", "list_machines", "{}")
+    monkeypatch.setattr(app, "complete", scripted(
+        FakeResponse(FakeMessage(content=None, tool_calls=[call])),
+        FakeResponse(FakeMessage(content="12."))))
+    monkeypatch.setattr(app.at, "run_tool", lambda db, name, args: FakeToolResult())
+    notes = []
+    app.ask(None, client=None, messages=app.new_conversation(), question="q", notes=notes)
+    assert notes == []
+
+
+def test_the_system_prompt_says_every_note_must_be_carried():
+    assert "Every note in a tool result is a caveat" in app.SYSTEM_PROMPT

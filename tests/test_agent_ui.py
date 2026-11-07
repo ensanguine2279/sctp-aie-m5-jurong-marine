@@ -103,3 +103,41 @@ def test_ask_hands_back_the_raw_sources_for_the_photos(monkeypatch):
     answer, labels = app.ask(None, client=None, messages=app.new_conversation(),
                              question="grease interval of crane 2?", raw_sources=raw)
     assert raw == [PLATE_SRC] and labels == ["..."]
+
+
+
+def test_a_photo_is_drawn_with_its_bytes_inside_the_page():
+    """No /media/ link to lose on Cloud Run: the image travels in the page (7 Nov 2026)."""
+    import base64
+    tag = ui.img_html({"bytes": b"\xff\xd8jpeg", "mime": "image/jpeg",
+                       "caption": "CNC-03 nameplate photo: nameplate_CNC-03.jpg"})
+    assert f'src="data:image/jpeg;base64,{base64.b64encode(b"\xff\xd8jpeg").decode()}"' in tag
+    assert "/media/" not in tag and "nameplate_CNC-03.jpg</figcaption>" in tag
+
+
+def test_a_caption_cant_inject_html():
+    tag = ui.img_html({"bytes": b"x", "mime": "text/html", "caption": '<script>x</script>"'})
+    assert "<script>" not in tag and "&lt;script&gt;" in tag
+    assert "data:image/jpeg;base64," in tag              # an odd type is never passed through
+
+
+def test_the_tools_notes_are_shown_under_the_answer_in_a_closed_expander():
+    import contextlib
+
+    class St:
+        def __init__(self):
+            self.md, self.expanders = [], []
+
+        def markdown(self, text, **kw):
+            self.md.append(text)
+
+        def expander(self, label, expanded=False):
+            self.expanders.append((label, expanded))
+            return contextlib.nullcontext()
+    st = St()
+    ui.show_notes(st, ["read off the scan by a person", "trap list C6"])
+    assert st.expanders == [("Caveats from the data (2), as the tools gave them", False)]
+    assert st.md == ["- read off the scan by a person\n- trap list C6"]
+    st2 = St()
+    ui.show_notes(st2, [])
+    assert st2.md == [] and st2.expanders == []

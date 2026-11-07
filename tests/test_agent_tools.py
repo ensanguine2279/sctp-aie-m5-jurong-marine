@@ -828,3 +828,25 @@ def test_a_form_value_read_by_a_person_is_said_so(db):
     r = call(db, "get_incident", incident_id=904)
     assert any("severity couldn't be read by OCR" in n and "by a person" in n for n in r.notes)
     assert not any("by a person" in n for n in call(db, "get_incident", incident_id=914).notes)
+
+
+@pytest.mark.parametrize("desc,mid,flagged", [
+    ("weld flash burn", "CMP-01", True),          # 911: a welding injury on the air compressor
+    ("weld flash burn", "WELD-01", False),
+    ("near miss: sling snapped during lift", "CNC-02", True),       # 957
+    ("near miss: sling snapped during lift", "CRN-01", False),
+    ("finger caught in chuck (glove)", "CNC-02", False),
+    ("finger caught in chuck (glove)", "CRN-01", True),             # 923
+    ("heat stress - confined space", "WELD-02", False),             # not a clear case: left
+    ("slip on hydraulic oil", "CNC-03", False),
+])
+def test_descriptions_that_dont_fit_the_machine(desc, mid, flagged):
+    note = at.description_misfit(desc, mid)
+    assert (note is not None) is flagged
+    if flagged:
+        assert mid in note and "trap list C6" in note
+
+
+def test_get_incident_flags_a_description_that_doesnt_fit(db):
+    assert any("trap list C6" in n for n in call(db, "get_incident", incident_id=914).notes)
+    assert not any("trap list C6" in n for n in call(db, "get_incident", incident_id=906).notes)
