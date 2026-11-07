@@ -51,8 +51,10 @@ source_file doc_type reject_reason duplicate_of_raw_id
 
 Rows read: 3   loaded: 2   rejected: 1
 Document types: incident_report=1, nameplate=1, unknown=1 (total 3)
-OCR engine: tesseract-v1=3 (total 3)
+OCR engine: both:tesseract-v3+llm-v3:gpt-4o-mini=3 (total 3)
 Rejected rows: unknown_document_type=1 (total 1)
+Photos for the app: original=1, redacted=1 (total 2)
+Forms with no photo (redaction not possible): labels_not_found=1 (total 1)
 
 nameplates: loaded 1
   Loaded with warnings: placeholder_manufacturer=1 (total 1)
@@ -577,3 +579,41 @@ def test_main_with_audit_reports_its_findings(tmp_path, monkeypatch):
     assert "| 1 | Sensor CSV audit | `audit_sensor_csv.py` | ok | 19.2s | – | 106,384 | – | – |" \
         in md
     assert "[Sampling / gaps] per machine (minutes):" in md and "--audit" in md
+
+
+
+# ----------------------------------------------- images: engine and photos ---
+
+def test_the_image_engine_is_passed_to_the_images_step_only():
+    plan = pl.build_plan(inputs=INPUTS, image_engine="both", dry_run=True)
+    images = next(p for p in plan if p.step.key == "images")
+    assert images.args == [INPUTS["images"], "--engine", "both", "--dry-run"]
+    assert all("--engine" not in p.args for p in plan if p.step.key != "images")
+    default = next(p for p in pl.build_plan(inputs=INPUTS) if p.step.key == "images")
+    assert "--engine" not in default.args          # the script decides from IMAGE_ENGINE
+
+
+def test_the_photo_lines_reach_the_report():
+    s = pl.summary_lines(IMAGES_DRY)
+    assert "Photos for the app: original=1, redacted=1 (total 2)" in s
+    assert "Forms with no photo (redaction not possible): labels_not_found=1 (total 1)" in s
+
+
+def test_the_report_header_says_which_engine_read_the_scans(tmp_path, monkeypatch):
+    monkeypatch.setattr(pl, "git_dirty", lambda: False)
+    run = fake_runner({"ingest_images.py": Outcome(0, IMAGES_DRY, [], 1.0)})
+    report = tmp_path / "r.md"
+    assert pl.main(["--dry-run", "--only", "images", "--image-engine", "both",
+                    "--report", str(report)], runner=run) == 0
+    assert run.calls[0][3:5] == ["--engine", "both"]
+    md = report.read_text(encoding="utf-8")
+    assert "| Image engine | both:tesseract-v3+llm-v3:gpt-4o-mini=3 (total 3) |" in md
+    assert "--image-engine both" in md                                # in Options
+    assert "Photos for the app: original=1, redacted=1 (total 2)" in md
+
+
+def test_no_engine_row_without_an_images_step(tmp_path, monkeypatch):
+    monkeypatch.setattr(pl, "git_dirty", lambda: False)
+    report = tmp_path / "r.md"
+    pl.main(["--dry-run", "--only", "cmms", "--report", str(report)], runner=fake_runner({}))
+    assert "Image engine" not in report.read_text(encoding="utf-8")

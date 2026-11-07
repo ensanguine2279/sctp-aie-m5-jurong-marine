@@ -41,6 +41,7 @@ Usage
     python scripts/pipeline.py --only cmms,relationships          # some steps only
     python scripts/pipeline.py --only sops,relationships          # reload the SOPs
     python scripts/pipeline.py --save-log                         # keep the full on-screen log too
+    python scripts/pipeline.py --image-engine both                # read the scans with both engines
     python scripts/pipeline.py --dry-run --audit                  # new sensor file: profile it first
     python scripts/pipeline.py --logs data/logs/vibration_temp_sample.csv --dry-run
 """
@@ -144,8 +145,11 @@ def parse_only(value: str | None) -> list[str] | None:
 def build_plan(*, inputs: dict[str, str], dry_run: bool = False, recreate: bool = False,
                foreign_keys: bool = False, mermaid: str | None = None,
                agent: str | None = None, env_file: str | None = None,
-               only: list[str] | None = None, audit: bool = False) -> list[Planned]:
+               only: list[str] | None = None, audit: bool = False,
+               image_engine: str | None = None) -> list[Planned]:
     """The commands to run, in order. `only` limits the steps (always in pipeline order).
+    `image_engine` is passed to ingest_images.py as --engine; without it the script uses
+    IMAGE_ENGINE from .env (or tesseract).
 
     `audit` profiles the sensor CSV first, before anything is written: it reads the file
     only, so it takes no --dry-run or --env-file."""
@@ -162,8 +166,9 @@ def build_plan(*, inputs: dict[str, str], dry_run: bool = False, recreate: bool 
         # A reload deletes rows the foreign keys protect, so they go first and come back last.
         plan.append(Planned(DROP_FKS, ["--drop-foreign-keys", *common]))
     for k in loads:
+        engine = ["--engine", image_engine] if k == "images" and image_engine else []
         plan.append(Planned(BY_KEY[k], [inputs[k], *(["--recreate"] if recreate else []),
-                                        *common], inputs[k]))
+                                        *engine, *common], inputs[k]))
     if "relationships" in keys:
         args = (["--foreign-keys"] if foreign_keys and not dry_run else []) + common
         plan.append(Planned(BY_KEY["relationships"],
@@ -244,7 +249,8 @@ _COLON_PREFIXES = ("Rows read:", "Statements in dump:", "Tables with no spec", "
                    "Temperature units:", "Rejected rows:", "Loaded with gaps:",
                    "Loaded with warnings:", "Severity:", "orphan keys:",
                    "parent key not unique:", "not checked:", "Document types:", "OCR engine:",
-                   "Severity scale on forms:", "Machine ids:",
+                   "Severity scale on forms:", "Machine ids:", "Photos for the app:",
+                   "Forms with no photo (redaction not possible):",
                    # ingest_sops.py
                    "Rejected files:", "Machine links by kind:",
                    "Steps referring to documents not in the data:", "Machine names:")
@@ -453,6 +459,17 @@ def _size(n: int | None) -> str:
     return str(n)
 
 
+def image_engine_line(results: list[Result]) -> str | None:
+    """What the images step read with, from its own 'OCR engine:' line, so the report says
+    which values were stored (Tesseract alone, the model, or both compared)."""
+    for r in results:
+        if r.planned.step.key == "images":
+            for line in r.summary:
+                if line.startswith("OCR engine:"):
+                    return line.split(":", 1)[1].strip()
+    return None
+
+
 def render_report(meta: dict, results: list[Result], inputs: list[InputFile],
                   runs: dict | None = None, links=None) -> str:
     runs = runs or {}
@@ -473,6 +490,8 @@ def render_report(meta: dict, results: list[Result], inputs: list[InputFile],
          f"| Options | {_cell(' '.join(meta.get('options') or []) or None)} |",
          f"| Database | {_cell(meta.get('database'))} |",
          f"| Code | {code} |"]
+    if engine := image_engine_line(results):
+        L.append(f"| Image engine | {_cell(engine)} |")
     if meta.get("log"):
         name, link = meta["log"]
         L.append(f"| Full log | [`{name}`]({link}): everything shown on screen, employee "
@@ -574,6 +593,9 @@ def main(argv: list[str] | None = None, runner=run_command) -> int:
     ap.add_argument("--mermaid", metavar="PATH", default="docs/er_diagram.md",
                     help="ER diagram written by relationships.py (default %(default)s)")
     ap.add_argument("--no-mermaid", action="store_true", help="don't rewrite the ER diagram")
+    ap.add_argument("--image-engine", choices=["tesseract", "llm", "both"],
+                    help="passed to ingest_images.py as --engine (default: IMAGE_ENGINE in "
+                         ".env, else tesseract)")
     ap.add_argument("--agent", choices=["check", "setup"],
                     help="also run agent_user.py: --check only, or full setup + check")
     ap.add_argument("--audit", action="store_true",
@@ -601,7 +623,8 @@ def main(argv: list[str] | None = None, runner=run_command) -> int:
                                          else a.mermaid)
     plan = build_plan(inputs=inputs, dry_run=a.dry_run, recreate=a.recreate,
                       foreign_keys=a.foreign_keys, mermaid=mermaid, agent=a.agent,
-                      env_file=env_file, only=only, audit=a.audit)
+                      env_file=env_file, only=only, audit=a.audit,
+                      image_engine=a.image_engine)
 
     started = datetime.now().astimezone()
     stamp = f"{started:%Y%m%d-%H%M%S}" + ("_dry-run" if a.dry_run else "")
@@ -609,6 +632,7 @@ def main(argv: list[str] | None = None, runner=run_command) -> int:
     options = [o for o, on in [("--dry-run", a.dry_run), ("--recreate", a.recreate),
                                ("--foreign-keys", a.foreign_keys), ("--keep-going", a.keep_going),
                                ("--audit", a.audit), (f"--agent {a.agent}", a.agent),
+                               (f"--image-engine {a.image_engine}", a.image_engine),
                                (f"--only {a.only}", a.only)] if on]
     if a.dry_run:
         database = "not used (dry run)"

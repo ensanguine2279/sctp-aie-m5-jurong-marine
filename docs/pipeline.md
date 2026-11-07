@@ -12,7 +12,14 @@ python scripts/pipeline.py --foreign-keys --agent check   # with foreign keys, t
 python scripts/pipeline.py --only sops,relationships      # reload the SOPs and re-link
 python scripts/pipeline.py --save-log                     # also keep the full on-screen log
 python scripts/pipeline.py --dry-run --audit              # a new sensor file: profile it first
+python scripts/pipeline.py --image-engine both            # read the scans with Tesseract and the model
 ```
+
+**Which engine reads the scans:** `--image-engine`, else `IMAGE_ENGINE` in `.env` (or the
+shell), else Tesseract alone. Put `IMAGE_ENGINE=both` in `.env` so every run stores the
+two-engine values ([`ingest_images.md`](ingest_images.md#two-engines---engine-both)). The
+report's header says which engine ran (`Image engine`). Reads are cached, so a reload with
+`both` costs model budget only for scans or prompts the cache hasn't seen.
 
 With uv (personal repo): `uv run python scripts/pipeline.py ...`.
 
@@ -92,6 +99,7 @@ files, under the sensor load, so its hash can still be checked against the load.
 | `--recreate` | off | Passed to the ingest scripts: drop and recreate their tables |
 | `--foreign-keys` | off | Drop `relationships.py`'s foreign keys before loading, add them back after ([why](relationships.md#foreign-keys)) |
 | `--audit` | off | First profile the sensor CSV with `audit_sensor_csv.py` ([see above](#profiling-a-new-sensor-file---audit)) |
+| `--image-engine tesseract\|llm\|both` | `IMAGE_ENGINE` in `.env`, else `tesseract` | Passed to `ingest_images.py` as `--engine` |
 | `--agent check` / `--agent setup` | off | Also run `agent_user.py --check`, or create/update the app user and check it ([`agent_user.md`](agent_user.md#the-check)) |
 | `--only STEPS` | all | Comma-separated: `audit`, `logs`, `spares`, `cmms`, `images`, `sops`, `relationships`, `agent_user`. Run in pipeline order whatever order you type |
 | `--logs` / `--spares` / `--cmms` / `--images` / `--sops PATH` | the paths above | Inputs, e.g. `--logs data/logs/vibration_temp_sample.csv`; `--images` and `--sops` are folders. The audit uses `--logs` |
@@ -107,11 +115,11 @@ Exit code: 0 if every step succeeded, 1 otherwise, so it can run in CI.
 
 | Section | What's in it |
 |---|---|
-| Header | result, start and finish time, mode and options, database (`user@host:port/db`, password hidden), git commit, a warning if the code has uncommitted changes, and with `--save-log` a link to the full log |
+| Header | result, start and finish time, mode and options, database (`user@host:port/db`, password hidden), git commit, a warning if the code has uncommitted changes, the **image engine** the images step used (from its `OCR engine:` line, e.g. `both:tesseract-v3+llm-v3:gpt-4o-mini=42`), and with `--save-log` a link to the full log |
 | Steps | one row per step: status, time, `run_id`, rows read / loaded / rejected (for the images, one row = one image; for the SOPs, one file, with the GM's email the expected reject; for the audit, Read only: rows profiled) |
 | Input files | each input's size and SHA-256, and for a load whether it is **the same file** `ingest_runs` recorded. A folder gets `lineage.folder_sha256` over the files its script reads (images for `ingest_images.py`, `.txt` and `.md` for `ingest_sops.py`), the same hash that script records, so a stray file of another type doesn't make the check say NO. A file two steps read (the audit and the sensor load) is listed once |
 | Links between sources | after a load: `table_relationships`, i.e. each link's rows, matched, orphans and orphan keys, including `sop_machine` and `sop_doc` ([`relationships.md`](relationships.md#relationships)) |
-| Details | each step's command, its summary lines (breakdowns by category, rejects, warnings, the severity rule used; for the SOPs one line per SOP with its revision, step count and machines), and the last 20 lines of error output if it failed. The audit's findings appear in full. What each line means: Run summary in [`ingest_logs.md`](ingest_logs.md#run-summary), [`ingest_spares.md`](ingest_spares.md#run-summary), [`ingest_cmms.md`](ingest_cmms.md#run-summary), [`ingest_images.md`](ingest_images.md#run-summary), [`ingest_sops.md`](ingest_sops.md#run-summary) |
+| Details | each step's command, its summary lines (breakdowns by category, rejects, warnings, the severity rule used; for the images the photos stored for the app and any form with no photo; for the SOPs one line per SOP with its revision, step count and machines), and the last 20 lines of error output if it failed. The audit's findings appear in full. What each line means: Run summary in [`ingest_logs.md`](ingest_logs.md#run-summary), [`ingest_spares.md`](ingest_spares.md#run-summary), [`ingest_cmms.md`](ingest_cmms.md#run-summary), [`ingest_images.md`](ingest_images.md#run-summary), [`ingest_sops.md`](ingest_sops.md#run-summary) |
 
 **Where the numbers come from:** for a load, from each run's own row in `ingest_runs`,
 so the report matches the database's record of that load. For a dry run, from the
@@ -167,7 +175,7 @@ database if you'd rather not publish its host name.
 
 ## Tests
 
-`tests/test_pipeline.py` (40 tests, no database, a fake runner stands in for the scripts):
+`tests/test_pipeline.py` (44 tests, no database, a fake runner stands in for the scripts):
 the plan's order and flags (foreign keys dropped first and added last, never in a dry run;
 `--only`; images after the CMMS; the SOPs after the CMMS and before the linking), summary
 lines kept and sample rows with names dropped (for the images, and for the SOPs: one line
@@ -181,7 +189,8 @@ failure, `--save-log` (both streams logged as they arrive, a header and outcome 
 the log git-ignored and readable only by you, linked from the report, with names in the
 log but not in the report), and `--audit` (off by default, first and before any write,
 given only the file, its findings kept in full with the rows it profiled, the shared CSV
-listed once under the sensor load). Two tests run a real process to check that both
+listed once under the sensor load), and the images: `--image-engine` passed to the images
+step only, the photo lines kept, the engine in the report header. Two tests run a real process to check that both
 output streams are captured and logged.
 
 **Not covered:** the real scripts and database. The first `pipeline.py --dry-run` on your
