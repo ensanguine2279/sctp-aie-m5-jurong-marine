@@ -371,7 +371,7 @@ class _Completions:
 
 class CostTrackingClient:
     """Wraps an OpenAI client so each chat call records the cost the LiteLLM proxy says it
-    charged (x-litellm-response-cost, see llm-proxy-setup.md). The loop only uses
+    charged (x-litellm-response-cost, see https://github.com/ensanguine2279/sctp-aie-m5-jurong-marine-llm-proxy). The loop only uses
     client.chat.completions.create, so that's all this provides."""
 
     def __init__(self, client):

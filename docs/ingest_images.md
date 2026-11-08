@@ -47,7 +47,7 @@ the script stops with these instructions instead of rejecting every image.
 
 **`--engine llm`** sends each image to the vision model behind the LLM proxy endpoint
 (`OPENAI_BASE_URL` and `OPENAI_API_KEY` in `.env`, see
-[`llm-proxy-setup.md`](https://github.com/ensanguine2279/sctp-aie-m5-jurong-marine-llm-proxy/)); the model is `--llm-model`
+<https://github.com/ensanguine2279/sctp-aie-m5-jurong-marine-llm-proxy>); the model is `--llm-model`
 (default `gpt-4o-mini`, or `IMAGE_LLM_MODEL`). No other AI service is used, as the brief
 requires. The model is asked to copy values exactly as written, and its answers go through
 the same parsing and checks as Tesseract's. It costs budget per image and sends the scans,

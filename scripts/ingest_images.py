@@ -510,13 +510,13 @@ def llm_client():
     missing = [k for k in ("OPENAI_BASE_URL", "OPENAI_API_KEY") if not os.environ.get(k)]
     if missing:
         raise RuntimeError(f"Set {' and '.join(missing)} in .env (the LLM proxy endpoint, "
-                           f"docs/llm-proxy-setup.md); no other AI service is used.")
+                           f"https://github.com/ensanguine2279/sctp-aie-m5-jurong-marine-llm-proxy); no other AI service is used.")
     return OpenAI()
 
 
 def extract_llm(path: Path, model: str) -> Extraction:
     """Vision model through the LLM proxy endpoint (OpenAI-compatible): OPENAI_BASE_URL and
-    OPENAI_API_KEY from .env, as in docs/llm-proxy-setup.md. No other AI service."""
+    OPENAI_API_KEY from .env, as in https://github.com/ensanguine2279/sctp-aie-m5-jurong-marine-llm-proxy. No other AI service."""
     client = llm_client()
     mime = _MIME.get(path.suffix.lower())
     if mime is None:  # .tif / .bmp: send as PNG

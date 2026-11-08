@@ -22,7 +22,7 @@ Needs, in `.env` (same file as the ingest scripts):
 AGENT_DB_USERNAME=agent_ro
 AGENT_DB_PASSWORD=...                                    # from agent_user.py
 OPENAI_API_KEY=...                                        # your llm proxy member key
-OPENAI_BASE_URL=https://35-240-177-226.sslip.io           # the llm proxy (llm-proxy-setup.md)
+OPENAI_BASE_URL=https://35-240-177-226.sslip.io           # the llm proxy (https://github.com/ensanguine2279/sctp-aie-m5-jurong-marine-llm-proxy)
 ```
 
 ## What it guarantees, in code

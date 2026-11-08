@@ -30,7 +30,7 @@ Usage
 Needs, in .env (same file as the ingest scripts, plus the llm proxy):
     AGENT_DB_USERNAME / AGENT_DB_PASSWORD       # the read-only agent_ro user
     OPENAI_API_KEY                              # your member key for the llm proxy
-    OPENAI_BASE_URL                             # the proxy's URL (docs/llm-proxy-setup.md)
+    OPENAI_BASE_URL                             # the proxy's URL (https://github.com/ensanguine2279/sctp-aie-m5-jurong-marine-llm-proxy)
 """
 from __future__ import annotations
 
@@ -272,7 +272,7 @@ def build_client():
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         sys.exit("Set OPENAI_API_KEY (your llm proxy member key) in .env. "
-                  "See docs/llm-proxy-setup.md.")
+                  "See https://github.com/ensanguine2279/sctp-aie-m5-jurong-marine-llm-proxy.")
     return OpenAI(base_url=os.environ.get("OPENAI_BASE_URL") or None, api_key=api_key)
 
 
