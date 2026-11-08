@@ -17,6 +17,7 @@ you can paste into the data quality report.
 | `scripts/pipeline.py` | Runs all of the above in order (the SOPs after the CMMS), writes a Markdown report | [`pipeline.md`](docs/pipeline.md) |
 | `scripts/agent_tools.py` | Not a load: the fixed tools the app's LLM calls, as the read-only user, with citations | [`agent_tools.md`](docs/agent_tools.md) |
 | `scripts/agent_app.py`, `scripts/agent_ui.py` | The chat agent (function-calling loop) and its Streamlit page, with sources, photos and caveats under each answer | [`agent_app.md`](docs/agent_app.md), [`agent_ui.md`](docs/agent_ui.md) |
+| `scripts/run_evals.py` | The eval suite (`evals/cases.yaml`): the real model, loop and database, each answer checked for the tools that ran, key facts, sources and grounding; prints the spend | [`evals.md`](docs/evals.md) |
 | `scripts/audit_sensor_csv.py` | Profiles a sensor CSV without loading it: formats, units, ids, gaps, duplicates, outliers, with line numbers. Run it alone, or first in the pipeline with `pipeline.py --audit` | [`trap_list.md`](docs/trap_list.md#sensor-log-vibration_temp_2026h1csv) |
 
 Every data-quality problem found so far, with evidence, is in
@@ -326,7 +327,7 @@ cited under every answer, and degrades honestly rather than inventing a value wh
 tool or the LLM call fails. Every note a tool returns (an OCR value the engines disagreed on,
 a severity read by eye, a description that doesn't fit the machine) is a caveat the answer
 must carry. Details, what it deliberately doesn't do yet (guardrails,
-cross-restart state, evals), and its tests: [`agent_app.md`](docs/agent_app.md).
+cross-restart state), and its tests: [`agent_app.md`](docs/agent_app.md).
 
 ```bash
 python scripts/agent_app.py "is CNC-02 running differently now?"
@@ -338,6 +339,20 @@ photos behind it (nameplates, redacted incident forms, from `img_files_public`) 
 tools' caveats in a closed expander. To host it (Google Cloud Run, Aiven for the data):
 [Deploying on Google Cloud Run](docs/agent_ui.md#deploying-on-google-cloud-run). After a
 redeploy, hard-refresh the page (Ctrl+Shift+R) before testing.
+
+**The eval suite** (`evals/cases.yaml`, run by `scripts/run_evals.py`) asks the real model
+23 questions (the severity kill-shot in five phrasings, the SOPs, CNC-02, oil, trap-list
+items, six refusals) through the same loop over the real database, and checks each answer
+for the tools that ran, its key facts, its sources, and that it states nothing no tool
+returned. It prints the spend; run it after every significant change and commit
+`evals/results/latest.txt` ([`evals.md`](docs/evals.md)).
+
+```bash
+pip install pyyaml                         # team repo; with uv (personal repo): uv add --dev pyyaml
+python scripts/run_evals.py --check        # validate the cases: free
+python scripts/run_evals.py                # the real run: about 40 model calls
+python scripts/run_evals.py --tag killshot # one group
+```
 
 ## Lineage: traceability and reproducibility
 
@@ -699,6 +714,7 @@ pytest tests/test_agent_tools.py                    # the agent's tools (SQLite 
 pytest -k "severity and (incident or count)"        # the severity kill-shot, on the tools layer
 pytest tests/test_agent_app.py                      # the agent's loop (chat call + tools both stubbed)
 pytest tests/test_agent_ui.py                       # the chat page's helpers: trace, photos, caveats
+pytest tests/test_evals.py                          # the eval runner's checks and cases.yaml (no model, no DB)
 pytest tests/test_pipeline.py                       # the pipeline and its report
 pytest -k "both or engine"                          # the two-engine decision tree
 pytest -k "redact or photo"                         # the photos: redaction, fail closed, the public view
@@ -717,6 +733,7 @@ With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
 | `tests/test_agent_tools.py` | [`agent_tools.py`](docs/agent_tools.md): every tool's schema; machine names written six ways, ambiguous and unknown machines; **the severity kill-shot**: four phrasings without a scale asked about on both incident tools, the same question on either scale giving the same incidents, the naive logged-value count never produced, July 2025 reported apart; listings by date with no employee data; form vs CMMS disagreements; OCR confidence per field, known plate problems, no photo; oil from two sources that disagree (shop-wide vs the machine's own), and an unreadable one; spares in both units, shop-wide only, below minimum once each; open costs apart and double entries; no sensors on a crane; weekly coverage; CNC-02 `machine_specific` against flat machines; the blasting chamber SOP quoted whole, nothing for welding; `query_sql` refusing writes, two statements, employees, `SELECT *`, the logged severity, `SLEEP` and `UNION`, and capping rows; a dead database giving `tool_failed`; bad, extra and JSON-string arguments; the app refusing the owner account; OCR confidence ranked (unreadable, engines disagreed, uncertain, majority, one engine, clear) with power warnings applying to kW, phases and voltage, values checked by eye; the photo behind a nameplate or form fetched and hash-checked, `query_sql` never returning `image_bytes`; descriptions that don't fit the machine (C6) | 119 |
 | `tests/test_agent_app.py` | [`agent_app.py`](docs/agent_app.md): the loop's own logic, with `agent_tools.run_tool` and the chat call stubbed — a plain answer needing no tool, a tool call round-tripping into the next model call, several tool calls in one round all running and all cited, a tool's clarification question returned to the user with no further model call (the severity-scale guess), a severity scale the user never named stripped so the tool asks (the model's guess), a failed chat call degrading to a plain message instead of raising, too many tool-call rounds stopping with an honest message instead of looping forever, the assistant-message shape matching the API with and without tool calls, source-label deduplication, a new conversation starting with only the system prompt, and `ask()` appending the question, returning formatted sources and logging one turn summary; raw sources and tool notes passed out of the turn, notes formatted once, the system prompt telling the model to carry every note as a caveat | 21 |
 | `tests/test_agent_ui.py` | [`agent_ui.py`](docs/agent_ui.md): the trace table behind the demo page: one row per model call and tool call in order, with the arguments the model sent, a refusal and a failed chat call shown (Streamlit not needed), the page password check, logging to stderr with no file; the photos under an answer (one per image, from the tools' sources, as data URLs so a redeploy can't break them) and the caveats listed once in a closed expander | 10 |
+| `tests/test_evals.py` | [`run_evals.py`](docs/evals.md) and `evals/cases.yaml`, with the model and tools stubbed: the suite meets the checklist (20+ cases, 2+ refusals, the kill-shot in 5 phrasings, each asking and never counting); a malformed `cases.yaml` refused before any call; selection by id and tag; grounding (an invented number fails, a rounded one warns, ids, dates in four formats, thousands separators, digits inside dates and ids not counting); paths into a tool result; the severity case end to end through the real loop and guard: passing when the guard strips the guess, **failing on the 5 Nov behaviour**, failing on an invented count; a failed model call as ERROR, not FAIL; a changed pinned value reported; the proxy's cost header read per call, list price as the fallback | 19 |
 | `tests/test_logs.py` | [`ingest_logs.py`](docs/ingest_logs.md): ISO/epoch timestamps (incl. the 8-hour bug), timezones, °C/°F, unknown units, every CSV line kept in raw with its line number, clean rows linked to raw, reject reasons, duplicates within the file and against rows already loaded, Windows (CRLF) line endings read exactly like LF | 10 |
 | `tests/test_spares.py` | [`ingest_spares.py`](docs/ingest_spares.md): costs (`$38/spool`), lead times (`2-3 weeks (Germany)`, `local`), metric/imperial sizes, machine lists; on a messy sheet: raw rows and row numbers, `raw_id`, duplicate/missing part numbers, warnings for unreadable values | 18 |
 | `tests/test_cmms.py` | [`ingest_cmms.py`](docs/ingest_cmms.md): dump parsing (`;` and quotes inside strings, comments, multi-row INSERTs with line and tuple numbers, column lists, malformed tuples); ids, numbers (`S$1,050`), day-first dates; the severity flip (old scale inverted, July 2025 left unconverted, a confirmed cutover, out-of-range values never guessed); on a messy dump: duplicates and conflicting duplicates, orphan machines/employees flagged not dropped, raw text kept, `work_orders.status` not clashing with the load status; employee names masked to their last 4 characters in everything printed | 27 |
@@ -726,7 +743,7 @@ With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
 | `tests/test_pipeline.py` | [`pipeline.py`](docs/pipeline.md): step order and flags (images after the CMMS), foreign keys dropped first and re-added last (never in a dry run), sample rows with names kept out of the report, counts from every script's summary, the images folder hashed like the load, a failure stopping the rest, `--keep-going`, Ctrl+C, the report's tables, `--save-log`, `--audit`; the SOP step (after the CMMS and before the linking, its folder hashed like the load, one summary line per SOP with the step table and the rejected email's name kept out); the image engine (`--image-engine`, else `IMAGE_ENGINE` from `.env`) passed on and shown in the report header, the photo lines in the summary | 44 |
 | `tests/test_agent_user.py` | [`agent_user.py`](docs/agent_user.md): the allow-list never includes employees or raw tables (nor the raw OCR, nor the raw SOP files), the scans' and SOPs' objects granted, objects with `emp_name` refused, missing objects skipped, a refused object told apart as "not created yet" or "exists but not granted", `SELECT`-only grants after a full reset, password never written into SQL or output, bad user/host/database names rejected, MySQL error codes read correctly, errors never include the password, failed steps named with MySQL's message, no statement needing rights over every database, the access check reads no rows; settings with Windows line endings (from the shell or a CRLF `.env`) read without the trailing `\r`, and no settings leak in from your shell or `.env`; the public photo view granted, the photo table itself probed and refused | 29 |
 | `tests/test_shared.py` | `db_config.py`, `lineage.py`: password never printed, passwords with special characters, values of a failed query kept out of error messages, table-name check, file SHA-256, a run recorded without a file, values passed to MySQL are plain Python types, `getenv` and `load_db_config` strip a trailing `\r` (CRLF `.env`) | 9 |
-| **Total** | | **645** |
+| **Total** | | **664** |
 
 **Not covered:** anything that needs MySQL, i.e. creating tables, views and users,
 the inserts, the one-transaction rollback and the `ingest_runs` record. After
@@ -734,7 +751,9 @@ changing DDL or load code, check with a real load (`--recreate`) and the audit
 queries above; after changing a view in `relationships.py`, run it and query the view;
 for the app user's grants, `agent_user.py --check` is the real test; for the agent's
 tools, the real-database verification pass in
-[`agent_tools.md`](docs/agent_tools.md#checked-against-the-real-database-5-nov-2026).
+[`agent_tools.md`](docs/agent_tools.md#checked-against-the-real-database-5-nov-2026);
+for the agent's answers on the real model and data, the eval suite
+(`python scripts/run_evals.py`, [`evals.md`](docs/evals.md)).
 
 ### Reading the output
 
@@ -745,7 +764,7 @@ tests/test_agent_app.py .....................                                   
 tests/test_agent_tools.py ...................................................... [ 11%]
 ...
 tests/test_spares.py ..................                                          [100%]
-========== 645 passed in 25.1s ==========
+========== 664 passed in 25.1s ==========
 ```
 
 | Mark | Meaning |
@@ -761,15 +780,15 @@ tests/test_spares.py ..................                                         
 |---|---|---|
 | `collected 0 items` | pytest isn't running from the repo root, or `tests/` is missing | `cd` to the folder with `pytest.ini`; check `ls tests` |
 | `ModuleNotFoundError: No module named 'ingest_logs'` (or `db_config`, `relationships`, `agent_tools`) | `pytest.ini` not found, or the scripts aren't in `scripts/` | Run from the repo root; check `pythonpath = scripts` matches the folder name |
-| `ModuleNotFoundError: No module named 'pandas'` (or `openpyxl`, `cv2`, `openai`, `dotenv`, `pydantic`, `sqlglot`, ...) | Virtual environment not active, or requirements not installed | Activate `.venv`, then `pip install -r requirements-dev.txt` |
+| `ModuleNotFoundError: No module named 'pandas'` (or `openpyxl`, `cv2`, `openai`, `dotenv`, `pydantic`, `sqlglot`, `yaml`, ...) | Virtual environment not active, or requirements not installed | Activate `.venv`, then `pip install -r requirements-dev.txt` (`yaml` is the `pyyaml` package) |
 | `pytest: command not found` | pytest not installed in the active environment | `pip install -r requirements-dev.txt`, or use `python -m pytest` |
 | `Invalid user name: 'agent_ro\r'` (or another value ending in `\r`) | `.env` has Windows line endings and was loaded with `source .env`, so every value in your shell ends in `\r` | Update to the current scripts (they strip it), and fix the file: `sed -i 's/\r$//' .env`, then open a new shell |
 
 ### Adding a test
 
-- Put it in the file for the script it tests (`test_logs.py`, `test_spares.py`, `test_cmms.py`, `test_images.py`, `test_sops.py`, `test_relationships.py`, `test_agent_tools.py`, `test_agent_app.py`, `test_agent_ui.py`, `test_agent_user.py`, `test_pipeline.py`), or `test_shared.py` for `db_config.py` / `lineage.py`.
+- Put it in the file for the script it tests (`test_logs.py`, `test_spares.py`, `test_cmms.py`, `test_images.py`, `test_sops.py`, `test_relationships.py`, `test_agent_tools.py`, `test_agent_app.py`, `test_agent_ui.py`, `test_evals.py`, `test_agent_user.py`, `test_pipeline.py`), or `test_shared.py` for `db_config.py` / `lineage.py`.
 - Name the function `test_...`, otherwise pytest won't find it.
-- Test the cleaning functions directly with a small `DataFrame` (see `test_temperature_units`), or a whole file through `process()` / `prepare()` using the `tmp_path` fixture (see the `lineage_run` and `messy_sheet` fixtures). For the CMMS script, pass a dump as a string to `parse_dump()` and then `process()` (see `test_pipeline_end_to_end`). For the scans, pass OCR text as an `Extraction` to `process()` (see `test_incident_form_end_to_end`); copy the text from `img_documents_raw.ocr_text` when a real scan misreads; for a two-engine case, give both readings to `interpret_both` (the model's from `fields_raw` / `ocr_notes`). For `relationships.py`, pass key counts to `check_relationship()` (see `test_check_counts_matched_null_and_orphans`). For an SOP question that finds the wrong SOP or none, add it to the search tests in `test_sops.py`, with a `SYNONYMS` entry (or an `ENTRY_VERBS`/`SPACE_WORDS` case) if it's a paraphrase. For a tool that answers wrong on a real call, add that exact question and arguments to `test_agent_tools.py` using the SQLite fixture, with a comment pointing at the real-data check that found it. For a loop bug (a tool call not round-tripping right, a bad degrade-on-failure path), add it to `test_agent_app.py` with the chat call and `agent_tools.run_tool` both stubbed — no database or real LLM call needed.
+- Test the cleaning functions directly with a small `DataFrame` (see `test_temperature_units`), or a whole file through `process()` / `prepare()` using the `tmp_path` fixture (see the `lineage_run` and `messy_sheet` fixtures). For the CMMS script, pass a dump as a string to `parse_dump()` and then `process()` (see `test_pipeline_end_to_end`). For the scans, pass OCR text as an `Extraction` to `process()` (see `test_incident_form_end_to_end`); copy the text from `img_documents_raw.ocr_text` when a real scan misreads; for a two-engine case, give both readings to `interpret_both` (the model's from `fields_raw` / `ocr_notes`). For `relationships.py`, pass key counts to `check_relationship()` (see `test_check_counts_matched_null_and_orphans`). For an SOP question that finds the wrong SOP or none, add it to the search tests in `test_sops.py`, with a `SYNONYMS` entry (or an `ENTRY_VERBS`/`SPACE_WORDS` case) if it's a paraphrase. For a tool that answers wrong on a real call, add that exact question and arguments to `test_agent_tools.py` using the SQLite fixture, with a comment pointing at the real-data check that found it. For a loop bug (a tool call not round-tripping right, a bad degrade-on-failure path), add it to `test_agent_app.py` with the chat call and `agent_tools.run_tool` both stubbed — no database or real LLM call needed. For a wrong answer on the real model, add the question to `evals/cases.yaml` ([Adding a case](docs/evals.md#adding-a-case)); a bug in the runner's own checks goes in `test_evals.py`.
 - When you find a new problem in the client's data, add a test with that exact value **before** fixing the code. It fails first, then passes with the fix, and it keeps the problem from coming back. The harness checklist asks for this pattern in your git history.
 
 ## Rules worth knowing
