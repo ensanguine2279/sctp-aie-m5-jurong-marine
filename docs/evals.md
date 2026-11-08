@@ -2,7 +2,7 @@
 
 The eval suite for [HARNESS_CHECKLIST.md](HARNESS_CHECKLIST.md) section 8 (and the
 kill-shot tests of section 3). Unlike the unit tests, it runs the **real model** (gpt-4o-mini
-through the llm proxy) through the **real loop** (`agent_app.ask`, guard included) over the
+through the class proxy) through the **real loop** (`agent_app.ask`, guard included) over the
 **real database** (as `agent_ro`), and checks each answer against what actually happened:
 the tools that ran, their results and the log events, not what the model says it did.
 
@@ -91,7 +91,7 @@ Spend: $0.0312 as charged by the proxy (x-litellm-response-cost); $0.0309 at lis
 ```
 
 The proxy's own figure comes from the `x-litellm-response-cost` header it returns on every
-call (<https://github.com/ensanguine2279/sctp-aie-m5-jurong-marine-llm-proxy>);
+call ([llm-budget-proxy-setup.md](llm-budget-proxy-setup.md#how-accurate-is-the-cost-tracking));
 the list-price estimate is tokens × $0.15 / $0.60 per million (gpt-4o-mini, checked 7 Nov
 2026; `PRICES` in the script). `--max-usd` (default $0.50) stops **starting** new cases once
 the run has spent that much; skipped cases show as SKIPPED. `spend_report.py` on the proxy is
@@ -106,8 +106,8 @@ still the authority for the key's remaining budget.
   each tool with the arguments it ran with and its result, the log events, tokens, cost,
   oracle values, failures and warnings.
 - `logs/agent_app.jsonl` (`--log-file`): the agent's own events, as the app writes them, with
-  an `eval_case` line before each turn, so `read_log.py` ([agent_app.md](agent_app.md#reading-the-log-of-one-question-a-working-example))
-  replays any case.
+  an `eval_case` line before each turn, so `python scripts/read_log.py logs/agent_app.jsonl`
+  ([agent_app.md](agent_app.md#reading-the-log-of-one-question-a-working-example)) replays any case.
 
 ## Adding a case
 

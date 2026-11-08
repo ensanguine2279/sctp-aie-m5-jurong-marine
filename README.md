@@ -1,27 +1,72 @@
-# Ingest scripts
+# JME maintenance and safety assistant
 
-One style for every data source: settings from one shared `.env`, small cleaning
-steps chained with `.pipe()`, each load in a single transaction, `--dry-run` to
-check parsing without a database, lineage back to the source file, and a summary
-you can paste into the data quality report.
+Jurong Marine & Engineering (JME) is a 32-person ship-repair and precision-engineering shop in
+Tuas, preparing for a MOM WSH audit. The client has two asks ([`CLIENT_BRIEF.md`](docs/CLIENT_BRIEF.md)):
 
-| Script | Source | Details |
+1. **A safety and maintenance knowledge agent.** Technicians ask "what oil does CNC-02 take",
+   "what's the grease interval for the compressor", "what's the SOP before entering the blasting
+   chamber", and get an answer with its source shown.
+2. **Audit-ready incident and condition reporting.** Incident history that never mixes up the
+   two severity scales (1 = worst until July 2025, 5 = worst since), and an answer to the night
+   shift's question: is CNC-02 running differently?
+
+This repo answers both from the client's own data: a CMMS SQL dump, a sensor log, a spares
+spreadsheet, scanned nameplates and incident forms, and SOP documents. Every source is cleaned
+and loaded into one MySQL database with lineage back to the exact file and line. The LLM
+reaches it only through fixed, read-only tools that cite their sources, and an eval suite
+checks the answers on the real model and data.
+
+- **Loading the data** (every ingest script, the tables, linking, lineage):
+  [`docs/ingestion.md`](docs/ingestion.md)
+- **Every data-quality problem found so far, with evidence:** [`trap_list.md`](docs/trap_list.md)
+- **What the deliverables are checked against:** [`HARNESS_CHECKLIST.md`](docs/HARNESS_CHECKLIST.md),
+  [`CHECKPOINTS.md`](docs/CHECKPOINTS.md)
+
+## How it fits together
+
+```mermaid
+flowchart LR
+    subgraph SRC["Client data"]
+        S1["CMMS SQL dump"]
+        S2["Sensor CSV"]
+        S3["Spares sheet"]
+        S4["Scans: nameplates, incident forms"]
+        S5["SOP documents"]
+    end
+    SRC --> I["ingest_*.py, run by pipeline.py<br/>clean, keep raw rows, lineage"]
+    I --> DB[("MySQL<br/>raw, clean, audit views")]
+    R["relationships.py<br/>links and views"] --> DB
+    DB -->|"agent_ro: SELECT only"| T["agent_tools.py<br/>fixed tools with citations"]
+    T --> A["agent_app.py<br/>function-calling loop"]
+    A <-->|"member key"| L["LLM via the proxy"]
+    U["agent_ui.py<br/>Streamlit chat page"] --> A
+    E["run_evals.py<br/>eval suite"] --> A
+```
+
+The [ER diagram](docs/er_diagram.md) shows the cleaned schema.
+
+## What's in the repo
+
+| Script | What it does | Details |
 |---|---|---|
-| `scripts/ingest_logs.py` | Sensor log CSV (`vibration_temp_*.csv`) | [`ingest_logs.md`](docs/ingest_logs.md) |
-| `scripts/ingest_spares.py` | Critical spares sheet (`critical_spares.xlsx`) | [`ingest_spares.md`](docs/ingest_spares.md) |
-| `scripts/ingest_cmms.py` | CMMS SQL dump (`jurongmarine_cmms.sql`) | [`ingest_cmms.md`](docs/ingest_cmms.md) |
-| `scripts/ingest_images.py` | Scanned nameplates and incident report forms (`data/images/`): read by Tesseract, the class vision model, or both; photos stored for the app (forms redacted) | [`ingest_images.md`](docs/ingest_images.md) |
-| `scripts/ingest_sops.py` | SOP documents (`data/sops/`): steps with line numbers, machine links, keyword search | [`ingest_sops.md`](docs/ingest_sops.md) |
-| `scripts/relationships.py` | The loaded tables: links the sources (CMMS, sensors, spares, scans, SOPs) | [`relationships.md`](docs/relationships.md), [ER diagram](docs/er_diagram.md) |
+| `scripts/ingest_logs.py` | Loads the sensor log CSV (`vibration_temp_*.csv`) | [`ingest_logs.md`](docs/ingest_logs.md) |
+| `scripts/ingest_spares.py` | Loads the critical spares sheet (`critical_spares.xlsx`) | [`ingest_spares.md`](docs/ingest_spares.md) |
+| `scripts/ingest_cmms.py` | Loads the CMMS SQL dump (`jurongmarine_cmms.sql`) | [`ingest_cmms.md`](docs/ingest_cmms.md) |
+| `scripts/ingest_images.py` | Loads the scanned nameplates and incident report forms (`data/images/`): read by Tesseract, the class vision model, or both; photos stored for the app (forms redacted) | [`ingest_images.md`](docs/ingest_images.md) |
+| `scripts/ingest_sops.py` | Loads the SOP documents (`data/sops/`): steps with line numbers, machine links, keyword search | [`ingest_sops.md`](docs/ingest_sops.md) |
+| `scripts/relationships.py` | Links the loaded sources (CMMS, sensors, spares, scans, SOPs) and creates the views | [`relationships.md`](docs/relationships.md), [ER diagram](docs/er_diagram.md) |
+| `scripts/pipeline.py` | Runs all the loads and the linking in order, writes a Markdown report | [`pipeline.md`](docs/pipeline.md) |
+| `scripts/audit_sensor_csv.py` | Profiles a sensor CSV without loading it: formats, units, ids, gaps, duplicates, outliers, with line numbers. Run it alone, or first in the pipeline with `pipeline.py --audit` | [`trap_list.md`](docs/trap_list.md#sensor-log-vibration_temp_2026h1csv) |
 | `scripts/agent_user.py` | Creates the app's read-only database user (PDPA) | [`agent_user.md`](docs/agent_user.md) |
-| `scripts/pipeline.py` | Runs all of the above in order (the SOPs after the CMMS), writes a Markdown report | [`pipeline.md`](docs/pipeline.md) |
-| `scripts/agent_tools.py` | Not a load: the fixed tools the app's LLM calls, as the read-only user, with citations | [`agent_tools.md`](docs/agent_tools.md) |
+| `scripts/agent_tools.py` | The fixed tools the app's LLM calls, as the read-only user, with citations | [`agent_tools.md`](docs/agent_tools.md) |
 | `scripts/agent_app.py`, `scripts/agent_ui.py` | The chat agent (function-calling loop) and its Streamlit page, with sources, photos and caveats under each answer | [`agent_app.md`](docs/agent_app.md), [`agent_ui.md`](docs/agent_ui.md) |
 | `scripts/run_evals.py` | The eval suite (`evals/cases.yaml`): the real model, loop and database, each answer checked for the tools that ran, key facts, sources and grounding; prints the spend | [`evals.md`](docs/evals.md) |
-| `scripts/audit_sensor_csv.py` | Profiles a sensor CSV without loading it: formats, units, ids, gaps, duplicates, outliers, with line numbers. Run it alone, or first in the pipeline with `pipeline.py --audit` | [`trap_list.md`](docs/trap_list.md#sensor-log-vibration_temp_2026h1csv) |
+| `scripts/read_log.py` | Prints the agent's log (`logs/agent_app.jsonl`, or Cloud Logging for the hosted page) one question at a time: model calls, tools and their arguments, timings | [`agent_app.md`](docs/agent_app.md#reading-the-log-of-one-question-a-working-example) |
 
-Every data-quality problem found so far, with evidence, is in
-[`trap_list.md`](docs/trap_list.md).
+The first nine are covered together, with the database they fill, in
+[`docs/ingestion.md`](docs/ingestion.md).
+
+## Quick start
 
 ```bash
 python -m venv .venv
@@ -29,63 +74,19 @@ source .venv/bin/activate                 # Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt       # pandas, sqlalchemy, pymysql, ... + pytest
 cp .env.example .env                      # set the passwords
 pytest                                    # tests, no DB needed (see "Testing with pytest")
-
-docker compose up -d                      # MySQL 8.4 on localhost:3307
-docker compose ps                         # wait for "healthy"
-
-python scripts/ingest_logs.py   data/logs/vibration_temp_2026H1.csv --dry-run
-python scripts/ingest_logs.py   data/logs/vibration_temp_2026H1.csv --recreate   # first load
-python scripts/ingest_spares.py data/tabular/critical_spares.xlsx --dry-run
-python scripts/ingest_spares.py data/tabular/critical_spares.xlsx --recreate     # first load
-python scripts/ingest_cmms.py   data/sql/jurongmarine_cmms.sql --dry-run
-python scripts/ingest_cmms.py   data/sql/jurongmarine_cmms.sql --recreate        # first load
-python scripts/ingest_images.py data/images --dry-run                            # needs Tesseract, see below
-python scripts/ingest_images.py data/images --dry-run --photos-preview .cache/ingest_images/preview   # look at the redacted forms
-python scripts/ingest_images.py data/images --recreate                           # first load (engine: see below)
-python scripts/ingest_sops.py   data/sops --dry-run
-python scripts/ingest_sops.py   data/sops --recreate                             # first load (after the CMMS)
-
-python scripts/relationships.py --mermaid docs/er_diagram.md   # link the sources (after the loads)
-python scripts/agent_user.py                                   # the app's read-only user, then a check
 ```
 
-**The images need Tesseract** (free, offline OCR), installed once: Windows from
-[UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki) (default folder), WSL/Ubuntu
-`sudo apt install tesseract-ocr`, macOS `brew install tesseract`. The Python side is
-`pytesseract` and `opencv-python-headless`; the vision model needs `openai`, and `.env` is
-read with `python-dotenv` (all four belong in `requirements.txt`)
-([setup](docs/ingest_images.md#setup-tesseract)).
-
-**Which engine reads the scans** (`--engine`, else `IMAGE_ENGINE` in `.env`, else `tesseract`):
-
-| Engine | What it does | When |
-|---|---|---|
-| `tesseract` | Three preprocessings of each scan, fields voted; on the new forms the severity also read from its blue ink alone ([voting](docs/ingest_images.md#four-pass-voting), [colour separation](docs/ingest_images.md#colour-separation-severity-from-the-blue-value-ink)) | No network; the default |
-| `llm` | The class LLM endpoint's vision model (`OPENAI_BASE_URL` / `OPENAI_API_KEY`), nothing else | For comparison only |
-| `both` | Both read every scan; per field, a [decision tree](docs/ingest_images.md#decision-tree-2-per-field-which-value-is-kept) keeps one value and flags `engines_disagree_*` where they differ | **What we load** (`IMAGE_ENGINE=both` in `.env`): it fixed every misread checked by eye on the plates (I15, I18) |
-
-Values neither engine can read can be read off the scan by a person and recorded in the
-script ([Values read by a person](docs/ingest_images.md#values-read-by-a-person); flagged
-`checked_by_eye_*`). The load also stores the photos the chat page shows: nameplates as
-they are, incident forms **only redacted** (person and signature covered; a form whose labels
-can't be found isn't stored). Look at the redacted forms with `--photos-preview` before the
-first load ([Photos for the app](docs/ingest_images.md#photos-for-the-app)).
-
-Or run the loads and `relationships.py` in one go, with a report of the results in
-`reports/` ([`pipeline.md`](docs/pipeline.md)):
+Then load the data ([`docs/ingestion.md`](docs/ingestion.md#quick-start)): start MySQL, run
+the loads (or `pipeline.py`), link the sources, and create the app's read-only user. After
+that, ask the agent:
 
 ```bash
-python scripts/pipeline.py --dry-run     # check everything first
-python scripts/pipeline.py --recreate    # first load; later loads without --recreate
-python scripts/pipeline.py --image-engine both   # engine for the scans (default: IMAGE_ENGINE in .env)
+python scripts/agent_app.py "is CNC-02 running differently now?"
+streamlit run scripts/agent_ui.py          # the same, as a chat page for the demo
 ```
 
-Use `--recreate` on the first load and after any schema change; afterwards run
-without it. Run `relationships.py` again after every load: it re-checks the links
-and refreshes the views and the ER diagram.
-
 With uv (personal repo): `uv sync`, then put `uv run` in front of each command,
-e.g. `uv run python scripts/ingest_cmms.py data/sql/jurongmarine_cmms.sql --dry-run`.
+e.g. `uv run pytest -v`.
 
 ## Why MySQL
 
@@ -95,10 +96,10 @@ what the app must guarantee:
 
 | Need | Why MySQL fits |
 |---|---|
-| **The client's system of record is already MySQL** | The CMMS arrived as a MySQL dump (`jurongmarine_cmms.sql`). Staying on the same engine keeps its types, dates and collation as the client has them, and the cleaned `cmms_*` tables can sit next to the dump's own tables in one database (see [The client's CMMS dump](#the-clients-cmms-dump)). The dump is still parsed, never executed |
+| **The client's system of record is already MySQL** | The CMMS arrived as a MySQL dump (`jurongmarine_cmms.sql`). Staying on the same engine keeps its types, dates and collation as the client has them, and the cleaned `cmms_*` tables can sit next to the dump's own tables in one database (see [The client's CMMS dump](docs/ingestion.md#the-clients-cmms-dump)). The dump is still parsed, never executed |
 | **The sources link by shared keys** | `machine_id` ties the CMMS, sensor log, spares sheet, nameplates, incident forms and SOPs together; `emp_code` and `incident_id` link others. Cross-source questions ("CNC-02's work orders with the readings before each") are joins, and `relationships.py` checks every link and can enforce it with foreign keys. A relational database does this natively |
 | **PDPA has to be enforced by the database, not the prompt** | MySQL users, `GRANT SELECT` per view, and views that run with their creator's rights (`SQL SECURITY DEFINER`) let the app's user read `work_order_detail` but never `cmms_employees.emp_name` or any `*_raw` table. `agent_user.py --check` proves it live. A file store or a vector store has no access control at this level |
-| **Loads must be all-or-nothing and traceable** | Each load runs in one transaction, so a failure changes nothing, and is recorded in `ingest_runs` with the file's SHA-256 and the git commit (see [Lineage](#lineage-traceability-and-reproducibility)). Raw tables keep every row as written, with the `run_id` of the load that brought it in |
+| **Loads must be all-or-nothing and traceable** | Each load runs in one transaction, so a failure changes nothing, and is recorded in `ingest_runs` with the file's SHA-256 and the git commit (see [Lineage](docs/ingestion.md#lineage-traceability-and-reproducibility)). Raw tables keep every row as written, with the `run_id` of the load that brought it in |
 | **The SOPs need text search, not a second database** | InnoDB `FULLTEXT` indexes find the right SOP by keyword in the same database, under the same grants and lineage. For three short SOPs, a separate vector store would add a second copy to keep in step and make "no SOP covers this" harder to say reliably (decision and details in [`ingest_sops.md`](docs/ingest_sops.md#search-keyword-not-a-vector-database)) |
 | **The data is small** | About 106k sensor readings, 1,603 work orders, 85 incidents, 42 scans and 3 SOPs. One MySQL instance holds and queries this in milliseconds; a data warehouse or distributed store would add cost and moving parts for nothing |
 | **It runs wherever the team does** | Free, one `docker compose up` locally, and offered by hosted providers for the demo. Its SQL dialect is widely known, which helps when the app's SQL tool writes queries |
@@ -120,145 +121,6 @@ what the app must guarantee:
 `pgvector`), but the client's dump is MySQL and would have to be converted. SQLite has no
 users or grants, so the PDPA guardrail would move into application code. A vector
 database alone can't do the joins, the grants or the lineage.
-
-## Database (Docker)
-
-`docker-compose.yml` runs MySQL in a container, configured from the same `.env`
-as the scripts: on first start it creates `DB_NAME` and the user
-`DB_USERNAME`/`DB_PASSWORD`. Data lives in the `mysql-data` volume, so it
-survives `docker compose down`; `docker compose down -v` wipes it.
-
-Changing `DB_NAME`, `DB_USERNAME` or a password in `.env` after the first start
-has no effect on the existing database. Either change it in MySQL, or wipe and
-recreate with `docker compose down -v && docker compose up -d`.
-
-```bash
-# MySQL shell inside the container
-docker compose exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"'
-```
-
-GUI clients (MySQL Workbench, DBeaver) connect to `localhost:3307` from Windows.
-
-### The client's CMMS dump
-
-Load it with **`ingest_cmms.py`** (see the quick start and
-[`ingest_cmms.md`](docs/ingest_cmms.md)). The script parses the dump
-without executing it, cleans it, and writes `cmms_*` tables with lineage, like the
-other sources. This is the path to use for the app and the audit.
-
-Running the dump directly in MySQL is only for browsing the client's tables as they
-are. It runs as root and executes whatever the dump contains, including any
-`DROP TABLE` or `CREATE DATABASE`, so look at the dump first:
-
-```bash
-grep -nE '^(DROP|CREATE) (TABLE|DATABASE)|^USE ' data/sql/jurongmarine_cmms.sql   # what it will do
-docker compose exec -T mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD"' < data/sql/jurongmarine_cmms.sql
-```
-
-If the dump creates its own database (e.g. `jurongmarine_cmms`), grant the ingest
-user access to it:
-
-```bash
-docker compose exec mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "GRANT ALL ON jurongmarine_cmms.* TO \"$MYSQL_USER\"@\"%\""'
-```
-
-The `cmms_` prefix keeps `ingest_cmms.py`'s tables apart from the dump's own
-`machines`, `work_orders`, ... tables, so both can live in the same database.
-
-## Tables
-
-The [ER diagram](docs/er_diagram.md) shows the cleaned tables and how they link;
-`relationships.py --mermaid docs/er_diagram.md` regenerates it.
-
-| Table | What it holds | Made by |
-|---|---|---|
-| `ingest_runs` | One row per run: script, file name, file SHA-256, git commit, time, row counts, `success`/`failed` + error. `relationships.py` runs appear as source `(database)`; image loads as the folder, with one hash over all its images | every script |
-| `vibration_temp_raw` | Every CSV row exactly as in the file (text), with `source_line`, `status` (`loaded`/`rejected`), `reject_reason`, `duplicate_of_raw_id`, `warnings` | [`ingest_logs`](docs/ingest_logs.md) |
-| `vibration_temp` | Cleaned readings only; `raw_id` links each to its raw row | [`ingest_logs`](docs/ingest_logs.md) |
-| `vibration_temp_audit` (view) | Clean + raw + run joined: use this for citations | [`ingest_logs`](docs/ingest_logs.md) |
-| `critical_spares_raw` | Every sheet row exactly as written (text), with `source_row`, `source_rev`, `status`, `reject_reason`, `duplicate_of_raw_id`, `warnings` | [`ingest_spares`](docs/ingest_spares.md) |
-| `critical_spares` | Cleaned parts only; `raw_id` links each to its raw row | [`ingest_spares`](docs/ingest_spares.md) |
-| `critical_spare_machines` | Part to machine links (`CNC-01/02/03` split into three rows) | [`ingest_spares`](docs/ingest_spares.md) |
-| `critical_spares_audit` (view) | Clean + raw + run joined: use this for citations | [`ingest_spares`](docs/ingest_spares.md) |
-| `cmms_<table>_raw` | For `machines`, `employees`, `work_orders`, `safety_incidents`: every INSERT tuple exactly as in the dump (text), with `source_line`, `tuple_no`, `raw_tuple`, `status`, `reject_reason`, `duplicate_of_raw_id`, `warnings`. The dump's `work_orders.status` is stored as `status_src` | [`ingest_cmms`](docs/ingest_cmms.md) |
-| `cmms_<table>` | Cleaned rows only; `raw_id` links each to its raw row. Incidents carry `severity_as_logged`, `severity_scale` and `severity_5_worst` | [`ingest_cmms`](docs/ingest_cmms.md) |
-| `cmms_<table>_audit` (view) | Clean + raw + run joined: use this for citations | [`ingest_cmms`](docs/ingest_cmms.md) |
-| `img_documents_raw` | One row per image: file name, its SHA-256, document type, OCR engine(s), each field as read (JSON), where the readings or the two engines disagreed and which value was kept, the OCR text, `status`, `reject_reason`, `warnings` | [`ingest_images`](docs/ingest_images.md) |
-| `img_nameplates` | One per machine (`asset_tag` = `machine_id`): serial, power, weight, **lubricant**, **grease interval**, ... | [`ingest_images`](docs/ingest_images.md) |
-| `img_incident_reports` | One per incident (`IR-2024-900` -> `incident_id` 900): immediate action, root cause, signature, severity on the **scale printed on the form** | [`ingest_images`](docs/ingest_images.md) |
-| `img_files` | The photos for the app, in the database (the hosted page has no data folder): nameplates as they are, incident forms only redacted; `bytes_sha256` to check them | [`ingest_images`](docs/ingest_images.md#photos-for-the-app) |
-| `img_files_public` (view) | The photos the app may show: nameplates' originals and forms' redacted copies, of loaded scans only | [`ingest_images`](docs/ingest_images.md#photos-for-the-app) |
-| `img_nameplates_audit`, `img_incident_reports_audit` (views) | Clean + image file + its SHA-256 + run: use these for citations | [`ingest_images`](docs/ingest_images.md) |
-| `sop_documents_raw` | One row per file in the SOP folder: file name, SHA-256, text as read, `status`, `reject_reason`, `warnings` | [`ingest_sops`](docs/ingest_sops.md) |
-| `sops`, `sop_steps`, `sop_machines` | One row per SOP revision (`is_current`; `search_text` is what the app searches), per step with its line number, per machine it names | [`ingest_sops`](docs/ingest_sops.md) |
-| `sop_ft_stopwords` | The words the SOP `FULLTEXT` indexes ignore (MySQL's defaults + the script's own) | [`ingest_sops`](docs/ingest_sops.md#stop-words-how-they-help-retrieval) |
-| `sops_audit`, `sop_steps_audit` (views) | Clean + file + its SHA-256 + run: use these for citations | [`ingest_sops`](docs/ingest_sops.md) |
-| `table_relationships` | One row per link between sources (see below): child and parent column, `fk`/`soft`, rows checked, matched, orphans and which keys, `run_id` of the run that checked it | [`relationships`](docs/relationships.md) |
-| `machine_overview` (view) | One row per machine: work orders, breakdowns, open WOs, incidents, lost days, spares, spares below min, sensor readings and their date range | [`relationships`](docs/relationships.md#views) |
-| `machine_spares` (view) | Spares per machine, with `ALL` expanded to every machine | [`relationships`](docs/relationships.md#views) |
-| `work_order_detail` (view) | Work orders + machine + employee trade/shift (no names) | [`relationships`](docs/relationships.md#views) |
-| `incident_detail` (view) | Incidents + machine + employee trade/shift; severity as `severity_5_worst` only | [`relationships`](docs/relationships.md#views) |
-| `work_order_sensor_window` (view) | Each work order with the sensor readings in the 7 days up to it (`--window-days`) | [`relationships`](docs/relationships.md#views) |
-| `machine_nameplate` (view) | Every machine with its nameplate's values; `has_nameplate = 0` if there is no photo | [`relationships`](docs/relationships.md#views) |
-| `machine_sops` (view) | Every machine with the current SOPs that name it; `has_sop = 0` if none does | [`relationships`](docs/relationships.md#views) |
-| `incident_report_vs_cmms` (view) | Scanned form vs CMMS, one row per field: `form_value`, `logged_value`, `agrees` | [`relationships`](docs/relationships.md#views) |
-
-Re-loading a sensor file or a CMMS dump replaces that file's rows (other files are
-kept). The spares sheet is a complete list, so each spares load replaces all spares
-rows with the new sheet; the images folder likewise replaces every row from that folder.
-`ingest_runs` keeps the history of what was loaded when.
-Spares `raw_id` = `run_id * 100000 + sheet row`, so `300008` is run 3, row 8.
-
-## Linking the sources
-
-The ingest scripts load each source on its own. `relationships.py` ties them together
-through their shared keys and is safe to run after every load:
-
-| Link (child -> parent) | Kind |
-|---|---|
-| `cmms_work_orders.machine_id` -> `cmms_machines.machine_id` | FK with `--foreign-keys`, if no orphans |
-| `cmms_safety_incidents.machine_id` -> `cmms_machines.machine_id` | FK with `--foreign-keys`, if no orphans |
-| `vibration_temp.machine_id` -> `cmms_machines.machine_id` | FK with `--foreign-keys`, if no orphans |
-| `critical_spare_machines.machine_code` -> `cmms_machines.machine_id` | soft: `ALL` means every machine |
-| `critical_spare_machines.part_no` -> `critical_spares.part_no` | FK, made by `ingest_spares.py` |
-| `cmms_work_orders.emp_code` -> `cmms_employees.emp_code` | soft: `emp_code` is not unique by design |
-| `cmms_safety_incidents.emp_code` -> `cmms_employees.emp_code` | soft: `emp_code` is not unique by design |
-| `img_nameplates.asset_tag` -> `cmms_machines.machine_id` | FK with `--foreign-keys`, if no orphans |
-| `img_incident_reports.incident_id` -> `cmms_safety_incidents.incident_id` | FK with `--foreign-keys`, if no orphans |
-| `img_incident_reports.machine_id` -> `cmms_machines.machine_id` | FK with `--foreign-keys`, if no orphans |
-| `sop_machines.machine_id` -> `cmms_machines.machine_id` | FK with `--foreign-keys`, if no orphans |
-| `sop_machines.doc_no` -> `sops.doc_no` | FK on `(doc_no, revision)`, made by `ingest_sops.py` |
-
-Each run checks every link (rows, matched, NULL, **orphans**: child keys with no
-parent), prints the result, writes it to `table_relationships`, creates the views
-above, and records itself in `ingest_runs`. Orphans are flagged in the views
-(`machine_known`, `employee_known`), never dropped.
-
-On the client's data we expect no orphans on the sensor link: the five machine ids in
-`vibration_temp_2026H1.csv` (CMP-01, CNC-01, CNC-02, CNC-03, PMP-T01) are spelled exactly
-as in the CMMS. The other seven CMMS machines have no sensor readings, so
-`machine_overview` shows them with zero readings; that's missing coverage, not an
-orphan. If a later sensor file gives orphans, lookalike ids (`CNC2` for `CNC-02`) would
-need a `machine_aliases` table. On the image links, an orphan asset tag or incident id
-means OCR misread it or the scan isn't in the CMMS; check `img_documents_raw.ocr_notes`.
-All 30 incident forms link with 0 orphans (one misread machine id, `CRN-002`, was fixed
-by a stricter machine-id check: trap list I10). The 7 machines the SOPs name (by id, CMMS
-name or alias) all match the CMMS.
-
-```bash
-python scripts/relationships.py --dry-run --mermaid docs/er_diagram.md   # no database needed
-python scripts/relationships.py                                          # check + catalog + views
-python scripts/relationships.py --foreign-keys                           # also enforce where clean
-python scripts/relationships.py --drop-foreign-keys                      # before reloading a source
-```
-
-Foreign keys are opt-in: a reload deletes rows they would protect, so while they
-exist a reload fails. Order of work: `--drop-foreign-keys`, reload, `--foreign-keys`
-(see [Foreign keys](docs/relationships.md#foreign-keys)). Every run is logged too
-(see [Run log](docs/relationships.md#run-log)).
-The ER diagram of the cleaned schema is in [`er_diagram.md`](docs/er_diagram.md); solid
-lines are foreign keys, dotted lines are soft links. Details in
-[`relationships.md`](docs/relationships.md).
 
 ## Database access for the app (PDPA)
 
@@ -308,7 +170,8 @@ list incidents on one severity scale, compare a machine's sensor trend, find and
 an SOP, and a last-resort checked `query_sql`) that the model picks from and fills in
 arguments for, never writing free SQL itself. Every tool runs as the read-only
 `agent_ro` user from `agent_user.py` above, and returns its answer with citations back to
-the audit views (`*_audit`) and lineage (`ingest_runs`) described in this file.
+the audit views (`*_audit`) and lineage (`ingest_runs`) described in
+[`docs/ingestion.md`](docs/ingestion.md#lineage-traceability-and-reproducibility).
 
 ```bash
 python scripts/agent_tools.py schemas                                     # the tool definitions
@@ -353,156 +216,6 @@ python scripts/run_evals.py --check        # validate the cases: free
 python scripts/run_evals.py                # the real run: about 40 model calls
 python scripts/run_evals.py --tag killshot # one group
 ```
-
-## Lineage: traceability and reproducibility
-
-Every cleaned value can be followed back to the exact line of the exact file it came
-from, and to the exact code that cleaned it. That is what lets the app cite its sources
-and what an auditor will test.
-
-```mermaid
-flowchart LR
-    A["answer / view row"] -->|raw_id| B["clean table<br/>vibration_temp, cmms_*, critical_spares, img_*"]
-    B -->|raw_id| C["*_raw table<br/>value exactly as written,<br/>source_line / source_row / tuple_no / image file"]
-    C -->|run_id| D["ingest_runs<br/>file name, file_sha256,<br/>git_commit, counts"]
-    D -->|file_sha256| E["source file<br/>(bytes provably the same)"]
-    D -->|git_commit| F["code version<br/>that cleaned it"]
-```
-
-| Link | Where it is | What it proves |
-|---|---|---|
-| clean row -> raw row | `raw_id` on every clean table, joined in the `*_audit` views | which input row produced this value |
-| raw row -> place in the file | `source_line` (CSV, header is line 1), `source_line` + `tuple_no` (SQL dump), `source_row` + `source_rev` (spreadsheet), `source_file` + `image_sha256` (scans) | where to look in the original |
-| raw row -> load | `run_id` on every raw row | which load brought it in, and when |
-| load -> file | `ingest_runs.file_sha256` (for the images: one hash over the folder, `lineage.folder_sha256`) | the file you hold is byte-for-byte the one that was loaded |
-| load -> code | `ingest_runs.git_commit` | which version of the cleaning rules ran |
-| rejected rows | `*_raw` with `status = 'rejected'`, `reject_reason`, `duplicate_of_raw_id` | nothing was dropped silently |
-| links between sources | `table_relationships.run_id`; `relationships.py` runs in `ingest_runs` with a fingerprint of the check | how well the sources linked up at that moment |
-
-The views made by `relationships.py` keep `raw_id`, so a row from `work_order_detail` or
-`incident_detail` traces through `cmms_work_orders_audit` / `cmms_safety_incidents_audit`,
-and a row from `machine_nameplate` or `incident_report_vs_cmms` through the `img_*_audit`
-views to the image file.
-
-### Demonstrating traceability
-
-Take a value the app gave as an answer and walk it back to the source. Run the SQL in
-the MySQL shell (or DBeaver), the shell commands from the repo root.
-
-**A sensor reading:**
-
-```sql
--- 1. The value, as stored and as written in the file
-SELECT temp_c, temp_raw, temp_unit_raw, timestamp_raw, source_file, source_line, run_id, file_sha256
-FROM vibration_temp_audit
-WHERE machine_id = 'CNC-02' AND sampled_at = '2026-03-14 02:00:00';
-
--- 2. The load that brought it in
-SELECT run_id, script, source_file, file_sha256, git_commit, started_at, status
-FROM ingest_runs WHERE run_id = <run_id>;
-```
-
-```bash
-sed -n '<source_line>p' data/logs/vibration_temp_2026H1.csv   # 3. the line exactly as in the file
-sha256sum data/logs/vibration_temp_2026H1.csv                 # 4. must equal file_sha256
-git show --stat <git_commit>                                  # 5. the code that cleaned it
-```
-
-On Windows: `Get-FileHash -Algorithm SHA256 data\logs\vibration_temp_2026H1.csv`.
-
-That reading is line 42343 of the 2026H1 file. Point out what changed on the way. The
-file's first CNC-03 reading (line 4) was logged as `141.4` with unit `F` and is stored
-as `temp_c = 60.78`; the rule is `clean_temperatures` in `ingest_logs.py` at that commit.
-
-**A safety incident** (the severity flip the auditor will test):
-
-```sql
-SELECT incident_id, incident_date, severity_as_logged, severity_scale, severity_5_worst,
-       source_file, source_line, raw_tuple, file_sha256
-FROM cmms_safety_incidents_audit WHERE incident_id = 902;
-```
-
-```bash
-sed -n '<source_line>p' data/sql/jurongmarine_cmms.sql   # the INSERT line holding raw_tuple
-```
-
-Incident 902 (16 Apr 2024) was logged as `5` on the old scale (1 = worst), so it appears
-as `severity_5_worst = 1`: same incident, translated, with the original kept beside it.
-
-**A scanned form** (and the printed scale behind the conversion):
-
-```sql
-SELECT incident_id, severity_as_logged, severity_scale, severity_5_worst, source_file, image_sha256
-FROM img_incident_reports_audit WHERE incident_id = 900;
-SELECT field, form_value, logged_value, agrees FROM incident_report_vs_cmms WHERE incident_id = 900;
-```
-
-```bash
-sha256sum data/images/IR-2024-900.jpg   # must equal image_sha256; then open the image
-```
-
-The form says `Severity (1 = MOST SEVERE): 4`, so it is `severity_5_worst = 2`, the same
-value the CMMS date rule gives.
-
-**A spare part:** `critical_spares_audit` gives `source_row` and `source_rev`; open
-`critical_spares.xlsx` at that row and check the title says the same revision.
-
-**Nothing lost:** every row read is either loaded or rejected with a reason.
-
-```sql
--- Counts add up for every load
-SELECT run_id, script, source_file, rows_read, rows_loaded, rows_rejected,
-       rows_read = rows_loaded + rows_rejected AS adds_up
-FROM ingest_runs WHERE script LIKE 'ingest_%' AND status = 'success' ORDER BY run_id DESC;
-
--- The rows behind a run's counts (latest run of each file; older runs' rows were replaced)
-SELECT status, reject_reason, COUNT(*) FROM vibration_temp_raw
-WHERE run_id = <run_id> GROUP BY status, reject_reason;
-```
-
-### Demonstrating reproducibility
-
-Same file + same code = same result. `ingest_runs` records both halves, so a load can be
-repeated and compared.
-
-1. **Before a load that matters, commit.** `git_commit` records only `HEAD`; changes
-   that aren't committed are not recorded. Check `git status` is clean, then load.
-2. **Re-run the load at the recorded commit, without touching the database:**
-
-   ```bash
-   git switch --detach <git_commit>                     # the code as it was
-   sha256sum data/logs/vibration_temp_2026H1.csv        # same file as file_sha256?
-   python scripts/ingest_logs.py data/logs/vibration_temp_2026H1.csv --dry-run
-   git switch -                                         # back to where you were
-   ```
-
-   `Rows read / loaded / rejected` and the reject reasons must match that run's row in
-   `ingest_runs` and the `GROUP BY` above. For the client's 2026H1 file that's
-   106,384 read, 106,384 loaded, 0 rejected ([Run summary](docs/ingest_logs.md#run-summary)).
-3. **Linking reproduces too.** Run `relationships.py` twice with no load in between: both
-   runs get the same `file_sha256` (the fingerprint of the check results).
-
-   ```sql
-   SELECT run_id, started_at, file_sha256, rows_read, rows_loaded, rows_rejected
-   FROM ingest_runs WHERE script = 'relationships.py' ORDER BY run_id DESC LIMIT 2;
-   ```
-
-**Compare content, not ids.** `run_id` and `raw_id` are assigned by the database, so they
-differ between runs and between databases (spares `raw_id` even contains the `run_id`).
-Compare by `source_file` + `source_line` / `source_row` and by the counts.
-
-**Dry run vs real load:** a real load also rejects rows that duplicate rows already
-loaded from *other* files, which a dry run can't see. The counts match exactly for the
-first file of a source; for later files, the difference is the `duplicate_*` rejects.
-
-**OCR is the exception:** another Tesseract version can read a bad photo differently, and
-the vision model's answers vary from run to run even at `temperature = 0` (trap list I24).
-Each image's reading is cached by its SHA-256 and the engine tag
-(`.cache/ingest_images/<hash>_tesseract-v3.json`, `<hash>_llm-v3-gpt-4o-mini.json`), and
-`img_documents_raw` keeps what was read, so a re-run on the same machine with the cache gives
-the same result; across machines, compare `fields_raw` and `ocr_notes`. Changing the image
-preparation or the model's prompt means a new tag, so old cached reads are ignored.
-`ingest_runs` and the run summary record the engine (`both:tesseract-v3+llm-v3:gpt-4o-mini`).
 
 ## Data concerns and open questions
 
@@ -580,93 +293,6 @@ FROM cmms_work_orders GROUP BY 1, 2, 3 HAVING n > 1 ORDER BY wo_date;
 | Names also appear in the spares sheet title (`storeman: Halim`) | stored only in `critical_spares_raw.source_title`, which the app user can't read; keep it that way |
 | Views, grants and run logging have only been tested without a database | run `relationships.py` and `agent_user.py --check` on the real database |
 
-## Run summary
-
-Every run, dry or real, ends with counts you can paste into the data quality report.
-Each breakdown line ends with its total, for example:
-
-```
-Timestamp formats: epoch_ms=4, iso_naive=1, iso_offset=2, unknown=2 (total 9)
-Rejected rows: bad_timestamp=2, duplicate_reading=1, missing_machine_id=1 (total 4)
-```
-
-Category totals (timestamp formats, temperature units, `trade`, `severity_scale`, document
-types, ...) add up to the rows read or loaded, which is a quick check that no row was missed.
-`Rejected rows` totals equal the rejected count. Warning totals (`Loaded with gaps`,
-`Loaded with warnings`) count **warnings**, not rows: one row can carry several.
-Each script's doc shows a full example: [`ingest_logs.md`](docs/ingest_logs.md),
-[`ingest_spares.md`](docs/ingest_spares.md), [`ingest_cmms.md`](docs/ingest_cmms.md),
-[`ingest_images.md`](docs/ingest_images.md#run-summary).
-`relationships.py` prints a per-link check instead
-(see [`relationships.md`](docs/relationships.md#relationships)).
-
-## Audit queries
-
-```sql
--- Where did this reading come from?
-SELECT source_file, source_line, timestamp_raw, temp_raw, temp_unit_raw, temp_c, file_sha256
-FROM vibration_temp_audit WHERE machine_id = 'CNC-02' AND sampled_at = '2026-03-14 02:00:00';
-
--- What was rejected, and why?
-SELECT reject_reason, COUNT(*) FROM vibration_temp_raw WHERE status = 'rejected' GROUP BY 1;
-
--- Duplicates side by side with the row that was kept
-SELECT d.source_line, d.`timestamp`, d.temp, d.temp_unit,
-       k.source_line AS kept_line, k.`timestamp` AS kept_ts, k.temp AS kept_temp, k.temp_unit AS kept_unit
-FROM vibration_temp_raw d JOIN vibration_temp_raw k ON k.raw_id = d.duplicate_of_raw_id;
-
--- Where did this spare's lead time come from?
-SELECT part_no, lead_time_raw, lead_time_min_days, lead_time_max_days, source_file, source_row, source_rev
-FROM critical_spares_audit WHERE part_no = 'SEAL-KIT-KSB';
-
--- Spares rows that were rejected or loaded with warnings
-SELECT source_row, part_no, status, reject_reason, warnings FROM critical_spares_raw
-WHERE status = 'rejected' OR warnings IS NOT NULL;
-
--- Incidents on one severity scale, with their source line in the dump
-SELECT incident_id, incident_date, severity_as_logged, severity_scale, severity_5_worst,
-       source_line, raw_tuple
-FROM cmms_safety_incidents_audit ORDER BY incident_date;
-
--- Incidents the severity rule could not place (resolve before the audit)
-SELECT incident_id, incident_date, severity_as_logged, severity_scale
-FROM cmms_safety_incidents WHERE severity_5_worst IS NULL;
-
--- Work orders pointing at unknown machines or employees (fix before adding foreign keys)
-SELECT source_line, wo_id, machine_id, emp_code, warnings FROM cmms_work_orders_raw
-WHERE warnings LIKE '%unknown_%';
-
--- What oil and grease interval does each machine's nameplate give?
-SELECT machine_id, has_nameplate, lubricant, grease_interval_h FROM machine_nameplate;
-
--- Where scanned forms and the CMMS disagree
-SELECT incident_id, field, form_value, logged_value FROM incident_report_vs_cmms WHERE agrees = 0;
-
--- Which SOPs apply to a machine (has_sop = 0: no SOP in the data covers it)
-SELECT machine_id, has_sop, doc_no, rev_label, linked_by FROM machine_sops WHERE machine_id = 'CNC-02';
-
--- The SOP for a question (terms from ingest_sops.search_terms), then quote it whole
-SELECT doc_no, revision, MATCH (search_text) AGAINST ('blasting chamber entry') AS score
-FROM sops WHERE is_current = 1 AND MATCH (search_text) AGAINST ('blasting chamber entry');
-SELECT step_no, line_no, marker, step_text, refers_to FROM sop_steps_audit
-WHERE doc_no = 'SOP-CONFINED-03' AND is_current = 1 ORDER BY step_no;
-
--- How well do the sources link up? (paste into the data quality report)
-SELECT name, child_table, child_column, enforced, child_rows, matched_rows, orphan_rows, orphan_values
-FROM table_relationships;
-
--- One machine across all sources
-SELECT * FROM machine_overview WHERE machine_id = 'CNC-02';
-
--- Sensor readings before each CNC-02 work order (is the night shift right?)
-SELECT wo_id, wo_date, wo_type, description, readings, vib_avg, vib_max, temp_c_max
-FROM work_order_sensor_window WHERE machine_id = 'CNC-02' AND readings > 0 ORDER BY wo_date;
-
--- Load history
-SELECT run_id, script, source_file, status, rows_read, rows_loaded, rows_rejected, started_at
-FROM ingest_runs ORDER BY run_id DESC;
-```
-
 ## Testing with pytest
 
 The tests check the reading and cleaning logic of every script, plus the shared
@@ -715,6 +341,7 @@ pytest -k "severity and (incident or count)"        # the severity kill-shot, on
 pytest tests/test_agent_app.py                      # the agent's loop (chat call + tools both stubbed)
 pytest tests/test_agent_ui.py                       # the chat page's helpers: trace, photos, caveats
 pytest tests/test_evals.py                          # the eval runner's checks and cases.yaml (no model, no DB)
+pytest tests/test_read_log.py                       # the log reader (standard library only)
 pytest tests/test_pipeline.py                       # the pipeline and its report
 pytest -k "both or engine"                          # the two-engine decision tree
 pytest -k "redact or photo"                         # the photos: redaction, fail closed, the public view
@@ -734,6 +361,7 @@ With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
 | `tests/test_agent_app.py` | [`agent_app.py`](docs/agent_app.md): the loop's own logic, with `agent_tools.run_tool` and the chat call stubbed — a plain answer needing no tool, a tool call round-tripping into the next model call, several tool calls in one round all running and all cited, a tool's clarification question returned to the user with no further model call (the severity-scale guess), a severity scale the user never named stripped so the tool asks (the model's guess), a failed chat call degrading to a plain message instead of raising, too many tool-call rounds stopping with an honest message instead of looping forever, the assistant-message shape matching the API with and without tool calls, source-label deduplication, a new conversation starting with only the system prompt, and `ask()` appending the question, returning formatted sources and logging one turn summary; raw sources and tool notes passed out of the turn, notes formatted once, the system prompt telling the model to carry every note as a caveat | 21 |
 | `tests/test_agent_ui.py` | [`agent_ui.py`](docs/agent_ui.md): the trace table behind the demo page: one row per model call and tool call in order, with the arguments the model sent, a refusal and a failed chat call shown (Streamlit not needed), the page password check, logging to stderr with no file; the photos under an answer (one per image, from the tools' sources, as data URLs so a redeploy can't break them) and the caveats listed once in a closed expander | 10 |
 | `tests/test_evals.py` | [`run_evals.py`](docs/evals.md) and `evals/cases.yaml`, with the model and tools stubbed: the suite meets the checklist (20+ cases, 2+ refusals, the kill-shot in 5 phrasings, each asking and never counting); a malformed `cases.yaml` refused before any call; selection by id and tag; grounding (an invented number fails, a rounded one warns, ids, dates in four formats, thousands separators, digits inside dates and ids not counting); paths into a tool result; the severity case end to end through the real loop and guard: passing when the guard strips the guess, **failing on the 5 Nov behaviour**, failing on an invented count; a failed model call as ERROR, not FAIL; a changed pinned value reported; the proxy's cost header read per call, list price as the fallback | 19 |
+| `tests/test_read_log.py` | [`read_log.py`](docs/agent_app.md#reading-the-log-of-one-question-a-working-example): the documented example printed exactly as in the doc; other lines skipped and an unfinished question shown; gcloud output read oldest first from either payload; the guard, eval and chat-error events shown; the command line with `--last` | 5 |
 | `tests/test_logs.py` | [`ingest_logs.py`](docs/ingest_logs.md): ISO/epoch timestamps (incl. the 8-hour bug), timezones, °C/°F, unknown units, every CSV line kept in raw with its line number, clean rows linked to raw, reject reasons, duplicates within the file and against rows already loaded, Windows (CRLF) line endings read exactly like LF | 10 |
 | `tests/test_spares.py` | [`ingest_spares.py`](docs/ingest_spares.md): costs (`$38/spool`), lead times (`2-3 weeks (Germany)`, `local`), metric/imperial sizes, machine lists; on a messy sheet: raw rows and row numbers, `raw_id`, duplicate/missing part numbers, warnings for unreadable values | 18 |
 | `tests/test_cmms.py` | [`ingest_cmms.py`](docs/ingest_cmms.md): dump parsing (`;` and quotes inside strings, comments, multi-row INSERTs with line and tuple numbers, column lists, malformed tuples); ids, numbers (`S$1,050`), day-first dates; the severity flip (old scale inverted, July 2025 left unconverted, a confirmed cutover, out-of-range values never guessed); on a messy dump: duplicates and conflicting duplicates, orphan machines/employees flagged not dropped, raw text kept, `work_orders.status` not clashing with the load status; employee names masked to their last 4 characters in everything printed | 27 |
@@ -743,12 +371,13 @@ With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
 | `tests/test_pipeline.py` | [`pipeline.py`](docs/pipeline.md): step order and flags (images after the CMMS), foreign keys dropped first and re-added last (never in a dry run), sample rows with names kept out of the report, counts from every script's summary, the images folder hashed like the load, a failure stopping the rest, `--keep-going`, Ctrl+C, the report's tables, `--save-log`, `--audit`; the SOP step (after the CMMS and before the linking, its folder hashed like the load, one summary line per SOP with the step table and the rejected email's name kept out); the image engine (`--image-engine`, else `IMAGE_ENGINE` from `.env`) passed on and shown in the report header, the photo lines in the summary | 44 |
 | `tests/test_agent_user.py` | [`agent_user.py`](docs/agent_user.md): the allow-list never includes employees or raw tables (nor the raw OCR, nor the raw SOP files), the scans' and SOPs' objects granted, objects with `emp_name` refused, missing objects skipped, a refused object told apart as "not created yet" or "exists but not granted", `SELECT`-only grants after a full reset, password never written into SQL or output, bad user/host/database names rejected, MySQL error codes read correctly, errors never include the password, failed steps named with MySQL's message, no statement needing rights over every database, the access check reads no rows; settings with Windows line endings (from the shell or a CRLF `.env`) read without the trailing `\r`, and no settings leak in from your shell or `.env`; the public photo view granted, the photo table itself probed and refused | 29 |
 | `tests/test_shared.py` | `db_config.py`, `lineage.py`: password never printed, passwords with special characters, values of a failed query kept out of error messages, table-name check, file SHA-256, a run recorded without a file, values passed to MySQL are plain Python types, `getenv` and `load_db_config` strip a trailing `\r` (CRLF `.env`) | 9 |
-| **Total** | | **670** |
+| **Total** | | **675** |
 
 **Not covered:** anything that needs MySQL, i.e. creating tables, views and users,
 the inserts, the one-transaction rollback and the `ingest_runs` record. After
-changing DDL or load code, check with a real load (`--recreate`) and the audit
-queries above; after changing a view in `relationships.py`, run it and query the view;
+changing DDL or load code, check with a real load (`--recreate`) and the
+[audit queries](docs/ingestion.md#audit-queries); after changing a view in
+`relationships.py`, run it and query the view;
 for the app user's grants, `agent_user.py --check` is the real test; for the agent's
 tools, the real-database verification pass in
 [`agent_tools.md`](docs/agent_tools.md#checked-against-the-real-database-5-nov-2026);
@@ -764,7 +393,7 @@ tests/test_agent_app.py .....................                                   
 tests/test_agent_tools.py ...................................................... [ 11%]
 ...
 tests/test_spares.py ..................                                          [100%]
-========== 670 passed in 25.1s ==========
+========== 675 passed in 25.1s ==========
 ```
 
 | Mark | Meaning |
@@ -793,17 +422,9 @@ tests/test_spares.py ..................                                         
 
 ## Rules worth knowing
 
-**Timezone rule:** `epoch_ms` is UTC; `sampled_at` is Singapore time (UTC+8).
-ISO timestamps without an offset are assumed to be Singapore time (`--source-tz`).
-See [`ingest_logs.md`](docs/ingest_logs.md).
-
-**Temperatures:** stored in Celsius only (`temp_c`); the reading and unit as
-logged stay in `vibration_temp_raw`. Unknown units give `temp_c = NULL`.
-See [`ingest_logs.md`](docs/ingest_logs.md).
-
-**Spares sizes and lead times:** sizes in inches and mm both end up in `size_mm`;
-lead times like `2-3 weeks (Germany)` become day ranges. See
-[`ingest_spares.md`](docs/ingest_spares.md).
+How the app must treat the data. Rules about loading it (timezones, temperatures, spares
+units, foreign keys, adding an ingest script) are in
+[`docs/ingestion.md`](docs/ingestion.md#rules-for-the-data).
 
 **Severity:** the CMMS scale flipped from 1 = worst to 5 = worst in July 2025.
 `severity_5_worst` puts every incident on the new scale; always query it, never
@@ -838,14 +459,3 @@ this holds whatever the model is asked. Scanned forms keep only `EMP` codes and 
 the form was signed, and their photos are stored only redacted. See
 [Database access for the app](#database-access-for-the-app-pdpa) and
 [`relationships.md`](docs/relationships.md#views).
-
-**Foreign keys before reloading:** if you ran `relationships.py --foreign-keys`, run
-`relationships.py --drop-foreign-keys` before reloading any source or using
-`--recreate`, then add them back afterwards. See
-[`relationships.md`](docs/relationships.md#foreign-keys).
-
-**Adding a new ingest script:** import `load_db_config`, `add_common_args` from
-`db_config` and `start_run`, `finish_run` from `lineage`; write each cleaning rule
-as a `df -> df` function and add a test for it. If its tables share a key with
-another source, add the link to `RELATIONSHIPS` in `relationships.py`
-(see [`relationships.md`](docs/relationships.md#relationships)).

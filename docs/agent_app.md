@@ -45,7 +45,9 @@ What it does **not** yet do, by design (see the capstone task list, not an overs
   app loses the conversation. A checkpointer (SQLite, the NB 03 pattern) is a
   LangGraph-shaped problem, not this loop's.
 - **No human-in-the-loop gate (#6).** Not needed: every tool is read-only.
-- **No eval suite yet (#8).** `evals/cases.yaml`, separate piece of work.
+
+The eval suite (#8) runs this loop against the real model and database:
+`scripts/run_evals.py` over `evals/cases.yaml` ([`evals.md`](evals.md)).
 
 ## The loop
 
@@ -110,6 +112,8 @@ Every line carries a UTC `ts` (ISO 8601, milliseconds):
 - `max_rounds_exceeded`: the loop was stopped rather than left to run forever.
 - `turn`: one line per question — the question (truncated), every tool called, how
   many sources came back.
+- `eval_case`: written by `run_evals.py` before each eval turn (case id and turn), so an
+  eval run can be replayed from the same file.
 
 By default this goes to `logs/agent_app.jsonl` (`--log-file ''` sends it to stderr
 instead). Per-tool detail (the actual SQL, row counts, timing) is already logged
@@ -134,61 +138,17 @@ existed), as it sits in `logs/agent_app.jsonl`:
 {"ts": "2026-11-05T09:55:10.856+00:00", "event": "turn", "question": "how many incidents in 2025 were severity 4 or worse?", "tools_called": ["count_incidents"], "n_sources": 1}
 ```
 
+`scripts/read_log.py` (standard library only) prints it one question at a time:
+
 ```bash
-# save the script below as read_log.py, then:
-python read_log.py < logs/agent_app.jsonl                    # the local file
-tail -n 50 logs/agent_app.jsonl | python read_log.py          # only the latest
+python scripts/read_log.py logs/agent_app.jsonl                 # the whole file
+tail -n 50 logs/agent_app.jsonl | python scripts/read_log.py    # only the latest
+python scripts/read_log.py --last 3 logs/agent_app.jsonl        # the last 3 questions
 ```
 
-```python
-import json, sys
-from datetime import datetime
-
-def events(text):
-    """JSON lines from agent_app.jsonl, or the output of `gcloud logging read --format=json`."""
-    text = text.strip()
-    if text.startswith("["):                                   # gcloud JSON: a list of entries
-        for entry in reversed(json.loads(text)):               # gcloud lists newest first
-            e = entry.get("jsonPayload") or json.loads(entry.get("textPayload", "{}"))
-            if "event" in e:
-                yield e
-    else:
-        for line in text.splitlines():
-            if line.startswith("{"):
-                yield json.loads(line)
-
-def turns(evts):
-    """A `turn` event closes a question: everything since the previous one belongs to it."""
-    cur = []
-    for e in evts:
-        cur.append(e)
-        if e["event"] == "turn":
-            yield cur
-            cur = []
-
-def when(e):
-    return datetime.fromisoformat(e["ts"])
-
-for t in turns(events(sys.stdin.read())):
-    last = t[-1]
-    start = when(t[0]).timestamp() - t[0].get("ms", 0) / 1000     # events are stamped at their END
-    print(f'\nQ: {last["question"]}   ({when(last).strftime("%H:%M:%S")} UTC, '
-          f'{when(last).timestamp() - start:.1f} s)')
-    for e in t[:-1]:
-        k = e["event"]
-        if k == "chat_call":
-            print(f'  model  r{e["round"]}  {e["ms"]/1000:5.1f} s  {e["prompt_tokens"]}+{e["completion_tokens"]} tokens'
-                  f'  asked for: {", ".join(e["tool_calls"]) or "(answered)"}')
-        elif k == "tool_call":
-            state = "ok" if e["ok"] else "REFUSED " + str(e["error_code"])
-            print(f'  tool   r{e["round"]}  {e["ms"]/1000:5.2f} s  {e["tool"]}  {state}  sources={e["n_sources"]}')
-            print(f'         args: {e["arguments"]}')
-        else:
-            print(f'  **     {k}: {e.get("arguments", "")}')
-    print(f'  => tools: {last["tools_called"]}, sources: {last["n_sources"]}')
-```
-
-It prints one block per question, and the example above comes out as:
+With uv (personal repo): `uv run python scripts/read_log.py ...`. Lines that aren't the
+agent's events are skipped; events after the last `turn` (a question still running, or
+one that crashed) are shown as `(unfinished)`. The example above comes out as:
 
 ```
 Q: how many incidents in 2025 were severity 4 or worse?   (09:55:10 UTC, 41.5 s)
@@ -209,6 +169,8 @@ How to read it:
 | `REFUSED needs_clarification` | The tool declined and the user was asked instead of getting a number |
 | `** scale_guess_blocked` | The model's scale had no quote from the user, so it was removed before the tool ran. Its arguments are shown on that line, the arguments the tool actually got are on the `tool` line below it |
 | `** clarification_returned` | The loop passed the tool's question straight to the user, with no second model call |
+| `** chat_error` | The model call failed (budget cap, network, timeout), with the reason |
+| `eval case …, turn N` | The question was asked by `run_evals.py`; the case id is in `evals/cases.yaml` |
 | `sources=0` after a number is given | A number with no source: investigate |
 
 **On the hosted page** the same lines go to Cloud Logging (stderr). Read the latest ones into
@@ -216,7 +178,7 @@ the same script (the exact filter has not been run against the live service; if 
 come back as `textPayload` instead of `jsonPayload`, the script reads both):
 
 ```bash
-gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="jme-agent"'     --freshness=1h --limit=200 --format=json | python read_log.py
+gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="jme-agent"'     --freshness=1h --limit=200 --format=json | python scripts/read_log.py
 ```
 
 Or open **Cloud Run, jme-agent, Logs** in the console and search for `turn`.
@@ -250,7 +212,11 @@ a severity scale the user never named (no quote, an invented quote, a quote nami
 in `run_tool` itself (not a normal tool error) still propagates today — a deliberate
 choice to surface in a test, not a gap to silently paper over.
 
-**Not covered:** a real call to the llm proxy. Before the demo, run
-`python scripts/agent_app.py --debug "<question>"` against the real database and
-proxy for each of the trap-list kill-shot questions, same as the real-data
-verification pass for `agent_tools.py` ([`agent_tools.md`](agent_tools.md#checked-against-the-real-database-5-nov-2026)).
+`tests/test_read_log.py` (5 tests, standard library only): the documented example prints
+exactly as shown above; other lines skipped and an unfinished question shown; gcloud output
+read oldest first from `jsonPayload` or `textPayload`; the guard, eval and chat-error events
+shown; the command line reading a file and keeping the last N questions.
+
+**Not covered:** a real call to the llm proxy. That is what the eval suite is for
+(`python scripts/run_evals.py`, [`evals.md`](evals.md)): it asks the kill-shot questions and
+the trap-list questions through this loop against the real database and proxy.

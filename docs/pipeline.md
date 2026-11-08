@@ -128,7 +128,7 @@ matched and orphans.
 
 **Reproducibility:** the header's git commit and the input files' SHA-256 are what you
 need to re-run a load later and compare (see
-[Lineage](../README.md#lineage-traceability-and-reproducibility) in the README). If the header
+[Lineage](ingestion.md#lineage-traceability-and-reproducibility) in `ingestion.md`). If the header
 says "with uncommitted changes", commit and run again before a load that matters.
 
 ## The full log
