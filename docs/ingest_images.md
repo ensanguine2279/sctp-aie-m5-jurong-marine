@@ -47,7 +47,7 @@ the script stops with these instructions instead of rejecting every image.
 
 **`--engine llm`** sends each image to the vision model behind the class LLM endpoint
 (`OPENAI_BASE_URL` and `OPENAI_API_KEY` in `.env`, see
-[`llm-budget-proxy-setup.md`](llm-budget-proxy-setup.md)); the model is `--llm-model`
+[`llm-proxy-setup.md`](llm-proxy-setup.md)); the model is `--llm-model`
 (default `gpt-4o-mini`, or `IMAGE_LLM_MODEL`). No other AI service is used, as the brief
 requires. The model is asked to copy values exactly as written, and its answers go through
 the same parsing and checks as Tesseract's. It costs budget per image and sends the scans,
@@ -450,7 +450,7 @@ Run summary lines: `Photos for the app: original=12, redacted=30` and, if any,
 - The OCR cache (`.cache/ingest_images/`) holds the same text as the raw table; it is
   git-ignored. Delete files from old engine tags once the new ones exist, and the whole
   cache with the rest of the data after the project.
-- `--engine llm` and `--engine both` send the images through the class proxy (Singapore VM)
+- `--engine llm` and `--engine both` send the images through the llm proxy (Singapore VM)
   to the model.
 
 ## Run summary

@@ -2,7 +2,7 @@
 
 The eval suite for [HARNESS_CHECKLIST.md](HARNESS_CHECKLIST.md) section 8 (and the
 kill-shot tests of section 3). Unlike the unit tests, it runs the **real model** (gpt-4o-mini
-through the class proxy) through the **real loop** (`agent_app.ask`, guard included) over the
+through the llm proxy) through the **real loop** (`agent_app.ask`, guard included) over the
 **real database** (as `agent_ro`), and checks each answer against what actually happened:
 the tools that ran, their results and the log events, not what the model says it did.
 
@@ -91,7 +91,7 @@ Spend: $0.0312 as charged by the proxy (x-litellm-response-cost); $0.0309 at lis
 ```
 
 The proxy's own figure comes from the `x-litellm-response-cost` header it returns on every
-call ([llm-budget-proxy-setup.md](llm-budget-proxy-setup.md#how-accurate-is-the-cost-tracking));
+call ([llm-setup.md](llm-setup.md#how-accurate-is-the-cost-tracking));
 the list-price estimate is tokens × $0.15 / $0.60 per million (gpt-4o-mini, checked 7 Nov
 2026; `PRICES` in the script). `--max-usd` (default $0.50) stops **starting** new cases once
 the run has spent that much; skipped cases show as SKIPPED. `spend_report.py` on the proxy is
