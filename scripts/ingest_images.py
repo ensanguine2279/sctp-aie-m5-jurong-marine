@@ -21,7 +21,7 @@ Pipeline (each step is a small function you can test on its own):
       -> extract           OCR. tesseract (default): three preprocessed versions of each
                            image, read separately; on incident forms the severity value is
                            also read from the blue value ink alone (severity_from_ink); the
-                           class LLM endpoint with --engine llm; --engine both reads
+                           LLM proxy endpoint with --engine llm; --engine both reads
                            with both and compares them field by field (interpret_both)
       -> classify          incident_report | nameplate | unknown
       -> parse_*_text      label -> value, as written
@@ -509,14 +509,14 @@ def llm_client():
     load_dotenv()
     missing = [k for k in ("OPENAI_BASE_URL", "OPENAI_API_KEY") if not os.environ.get(k)]
     if missing:
-        raise RuntimeError(f"Set {' and '.join(missing)} in .env (the class LLM endpoint, "
-                           f"docs/llm-budget-proxy-setup.md); no other AI service is used.")
+        raise RuntimeError(f"Set {' and '.join(missing)} in .env (the LLM proxy endpoint, "
+                           f"docs/llm-proxy-setup.md); no other AI service is used.")
     return OpenAI()
 
 
 def extract_llm(path: Path, model: str) -> Extraction:
-    """Vision model through the class LLM endpoint (OpenAI-compatible): OPENAI_BASE_URL and
-    OPENAI_API_KEY from .env, as in docs/llm-budget-proxy-setup.md. No other AI service."""
+    """Vision model through the LLM proxy endpoint (OpenAI-compatible): OPENAI_BASE_URL and
+    OPENAI_API_KEY from .env, as in docs/llm-proxy-setup.md. No other AI service."""
     client = llm_client()
     mime = _MIME.get(path.suffix.lower())
     if mime is None:  # .tif / .bmp: send as PNG

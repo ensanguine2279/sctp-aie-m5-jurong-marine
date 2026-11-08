@@ -61,7 +61,7 @@ read with `python-dotenv` (all four belong in `requirements.txt`)
 | Engine | What it does | When |
 |---|---|---|
 | `tesseract` | Three preprocessings of each scan, fields voted; on the new forms the severity also read from its blue ink alone ([voting](docs/ingest_images.md#four-pass-voting), [colour separation](docs/ingest_images.md#colour-separation-severity-from-the-blue-value-ink)) | No network; the default |
-| `llm` | The class LLM endpoint's vision model (`OPENAI_BASE_URL` / `OPENAI_API_KEY`), nothing else | For comparison only |
+| `llm` | The LLM proxy endpoint's vision model (`OPENAI_BASE_URL` / `OPENAI_API_KEY`), nothing else | For comparison only |
 | `both` | Both read every scan; per field, a [decision tree](docs/ingest_images.md#decision-tree-2-per-field-which-value-is-kept) keeps one value and flags `engines_disagree_*` where they differ | **What we load** (`IMAGE_ENGINE=both` in `.env`): it fixed every misread checked by eye on the plates (I15, I18) |
 
 Values neither engine can read can be read off the scan by a person and recorded in the

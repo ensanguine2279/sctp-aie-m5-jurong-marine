@@ -146,7 +146,7 @@ affinity.
 # Deploying on Google Cloud Run
 
 This runs `scripts/agent_ui.py` as a container on Cloud Run, next to the
-[LiteLLM budget proxy](README-setup-gcp.md). The database stays on Aiven. The page connects to
+[LiteLLM proxy](README-setup-gcp.md). The database stays on Aiven. The page connects to
 it as the read-only `agent_ro` user, and reaches the LLM through the proxy.
 
 ```mermaid

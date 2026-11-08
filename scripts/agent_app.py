@@ -27,10 +27,10 @@ Usage
     python scripts/agent_app.py                      # interactive session
     python scripts/agent_app.py --debug "..."         # also prints which tools ran
 
-Needs, in .env (same file as the ingest scripts, plus the class proxy):
+Needs, in .env (same file as the ingest scripts, plus the llm proxy):
     AGENT_DB_USERNAME / AGENT_DB_PASSWORD       # the read-only agent_ro user
-    OPENAI_API_KEY                              # your member key for the class proxy
-    OPENAI_BASE_URL                             # the proxy's URL (docs/llm-budget-proxy-setup.md)
+    OPENAI_API_KEY                              # your member key for the llm proxy
+    OPENAI_BASE_URL                             # the proxy's URL (docs/llm-proxy-setup.md)
 """
 from __future__ import annotations
 
@@ -271,8 +271,8 @@ def build_client():
         sys.exit("The openai package is needed: pip install openai (or uv add openai).")
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        sys.exit("Set OPENAI_API_KEY (your class proxy member key) in .env. "
-                  "See docs/llm-budget-proxy-setup.md.")
+        sys.exit("Set OPENAI_API_KEY (your llm proxy member key) in .env. "
+                  "See docs/llm-proxy-setup.md.")
     return OpenAI(base_url=os.environ.get("OPENAI_BASE_URL") or None, api_key=api_key)
 
 
