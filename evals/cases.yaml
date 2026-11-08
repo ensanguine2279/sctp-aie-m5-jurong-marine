@@ -1,6 +1,6 @@
 # Eval suite for the JME agent (HARNESS_CHECKLIST.md section 8). Run: python scripts/run_evals.py
 #
-# Every case runs against the REAL model (class proxy) and the REAL database (agent_ro).
+# Every case runs against the REAL model (llm proxy) and the REAL database (agent_ro).
 # Each turn's `expect` is checked against what actually happened (the tools that ran, their
 # results, the log events), not against what the model says it did. Keys:
 #
