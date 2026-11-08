@@ -121,6 +121,110 @@ tracking cumulative spend against the team budget from this log (the llm proxy's
 own `spend_report.py` / dashboard covers this today; a running total from the app's
 own logs would close the gap for weekly reporting).
 
+### Reading the log of one question: a working example
+
+Each line is one event; a `turn` line closes a question, so everything since the previous
+`turn` line belongs to it. This is a real run (5 Nov 2026, before the severity-scale guard
+existed), as it sits in `logs/agent_app.jsonl`:
+
+```jsonl
+{"ts": "2026-11-05T09:55:06.189+00:00", "event": "chat_call", "round": 1, "model": "gpt-4o-mini", "prompt_tokens": 2555, "completion_tokens": 49, "tool_calls": ["count_incidents"], "ms": 36849.2}
+{"ts": "2026-11-05T09:55:06.274+00:00", "event": "tool_call", "round": 1, "tool": "count_incidents", "arguments": "{\"date_from\":\"2025-01-01\",\"date_to\":\"2025-12-31\",\"at_least_as_severe_as\":4,\"severity_scale\":\"5_is_worst\"}", "ok": true, "error_code": null, "n_sources": 1, "ms": 85.2}
+{"ts": "2026-11-05T09:55:10.856+00:00", "event": "chat_call", "round": 2, "model": "gpt-4o-mini", "prompt_tokens": 3067, "completion_tokens": 47, "tool_calls": [], "ms": 4581.7}
+{"ts": "2026-11-05T09:55:10.856+00:00", "event": "turn", "question": "how many incidents in 2025 were severity 4 or worse?", "tools_called": ["count_incidents"], "n_sources": 1}
+```
+
+```bash
+# save the script below as read_log.py, then:
+python read_log.py < logs/agent_app.jsonl                    # the local file
+tail -n 50 logs/agent_app.jsonl | python read_log.py          # only the latest
+```
+
+```python
+import json, sys
+from datetime import datetime
+
+def events(text):
+    """JSON lines from agent_app.jsonl, or the output of `gcloud logging read --format=json`."""
+    text = text.strip()
+    if text.startswith("["):                                   # gcloud JSON: a list of entries
+        for entry in reversed(json.loads(text)):               # gcloud lists newest first
+            e = entry.get("jsonPayload") or json.loads(entry.get("textPayload", "{}"))
+            if "event" in e:
+                yield e
+    else:
+        for line in text.splitlines():
+            if line.startswith("{"):
+                yield json.loads(line)
+
+def turns(evts):
+    """A `turn` event closes a question: everything since the previous one belongs to it."""
+    cur = []
+    for e in evts:
+        cur.append(e)
+        if e["event"] == "turn":
+            yield cur
+            cur = []
+
+def when(e):
+    return datetime.fromisoformat(e["ts"])
+
+for t in turns(events(sys.stdin.read())):
+    last = t[-1]
+    start = when(t[0]).timestamp() - t[0].get("ms", 0) / 1000     # events are stamped at their END
+    print(f'\nQ: {last["question"]}   ({when(last).strftime("%H:%M:%S")} UTC, '
+          f'{when(last).timestamp() - start:.1f} s)')
+    for e in t[:-1]:
+        k = e["event"]
+        if k == "chat_call":
+            print(f'  model  r{e["round"]}  {e["ms"]/1000:5.1f} s  {e["prompt_tokens"]}+{e["completion_tokens"]} tokens'
+                  f'  asked for: {", ".join(e["tool_calls"]) or "(answered)"}')
+        elif k == "tool_call":
+            state = "ok" if e["ok"] else "REFUSED " + str(e["error_code"])
+            print(f'  tool   r{e["round"]}  {e["ms"]/1000:5.2f} s  {e["tool"]}  {state}  sources={e["n_sources"]}')
+            print(f'         args: {e["arguments"]}')
+        else:
+            print(f'  **     {k}: {e.get("arguments", "")}')
+    print(f'  => tools: {last["tools_called"]}, sources: {last["n_sources"]}')
+```
+
+It prints one block per question, and the example above comes out as:
+
+```
+Q: how many incidents in 2025 were severity 4 or worse?   (09:55:10 UTC, 41.5 s)
+  model  r1   36.8 s  2555+49 tokens  asked for: count_incidents
+  tool   r1   0.09 s  count_incidents  ok  sources=1
+         args: {"date_from":"2025-01-01","date_to":"2025-12-31","at_least_as_severe_as":4,"severity_scale":"5_is_worst"}
+  model  r2    4.6 s  3067+47 tokens  asked for: (answered)
+  => tools: ['count_incidents'], sources: 1
+```
+
+How to read it:
+
+| What you see | What it means |
+|---|---|
+| `model rN` seconds | Time the model call took. Here 36.8 s of the 41.5 s total went on the first model call, so the wait was the model or proxy, not the database |
+| `tool rN` seconds | Time the tool took (the SQL). 0.09 s here |
+| `args:` | The arguments the model sent, truncated at 500 characters. Here it sent `severity_scale: 5_is_worst` although the user never said which scale: the guess the guard now blocks |
+| `REFUSED needs_clarification` | The tool declined and the user was asked instead of getting a number |
+| `** scale_guess_blocked` | The model's scale had no quote from the user, so it was removed before the tool ran. Its arguments are shown on that line, the arguments the tool actually got are on the `tool` line below it |
+| `** clarification_returned` | The loop passed the tool's question straight to the user, with no second model call |
+| `sources=0` after a number is given | A number with no source: investigate |
+
+**On the hosted page** the same lines go to Cloud Logging (stderr). Read the latest ones into
+the same script (the exact filter has not been run against the live service; if the fields
+come back as `textPayload` instead of `jsonPayload`, the script reads both):
+
+```bash
+gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="jme-agent"'     --freshness=1h --limit=200 --format=json | python read_log.py
+```
+
+Or open **Cloud Run, jme-agent, Logs** in the console and search for `turn`.
+
+**Limits:** lines carry no session id. If two people use the hosted page at the same moment,
+their events interleave and the grouping above can mix two questions together. For a one-person
+demo or a local run this doesn't matter; adding a turn id to every event would fix it.
+
 ## Why this loop, and not LangGraph yet
 
 A plain function-calling loop was built first because it's the smallest thing that

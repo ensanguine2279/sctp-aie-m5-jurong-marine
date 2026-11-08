@@ -15,7 +15,7 @@ The scans add what the CMMS doesn't have:
 python scripts/ingest_images.py data/images --dry-run      # read and check; no database needed
 python scripts/ingest_images.py data/images --recreate     # first load
 python scripts/ingest_images.py data/images                # later loads
-python scripts/ingest_images.py data/images --engine llm   # vision model via the class endpoint
+python scripts/ingest_images.py data/images --engine llm   # vision model via the proxy endpoint
 python scripts/ingest_images.py data/images --engine both  # both, compared field by field
 ```
 

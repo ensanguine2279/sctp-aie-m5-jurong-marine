@@ -91,7 +91,7 @@ Spend: $0.0312 as charged by the proxy (x-litellm-response-cost); $0.0309 at lis
 ```
 
 The proxy's own figure comes from the `x-litellm-response-cost` header it returns on every
-call ([llm-setup.md](llm-setup.md#how-accurate-is-the-cost-tracking));
+call (<https://github.com/ensanguine2279/sctp-aie-m5-jurong-marine-llm-proxy>);
 the list-price estimate is tokens × $0.15 / $0.60 per million (gpt-4o-mini, checked 7 Nov
 2026; `PRICES` in the script). `--max-usd` (default $0.50) stops **starting** new cases once
 the run has spent that much; skipped cases show as SKIPPED. `spend_report.py` on the proxy is

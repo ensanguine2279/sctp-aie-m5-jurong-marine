@@ -56,7 +56,7 @@ Usage
     python scripts/ingest_images.py data/images --dry-run
     python scripts/ingest_images.py data/images --recreate        # first time
     python scripts/ingest_images.py data/images
-    python scripts/ingest_images.py data/images --engine llm      # vision model via the class proxy
+    python scripts/ingest_images.py data/images --engine llm      # vision model via the llm proxy
     python scripts/ingest_images.py data/images --engine both     # both, compared field by field
     python scripts/ingest_images.py data/images --dry-run --photos-preview .cache/ingest_images/preview
                                                                   # check the redacted forms
@@ -498,7 +498,7 @@ _MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
 
 
 def llm_client():
-    """OpenAI client for the class endpoint. Setup problems raise RuntimeError, which stops
+    """OpenAI client for the proxy endpoint. Setup problems raise RuntimeError, which stops
     the run instead of rejecting (or, with --engine both, silently skipping) every image."""
     try:
         from dotenv import load_dotenv
@@ -1802,7 +1802,7 @@ def main() -> None:
                     help="ingest_cmms.py's prefix, to check machine ids (default %(default)s)")
     ap.add_argument("--engine", choices=ENGINES,
                     help="tesseract (offline), llm (the vision model behind OPENAI_BASE_URL, "
-                         "the class endpoint), or both: each image read by both and compared "
+                         "the proxy endpoint), or both: each image read by both and compared "
                          "field by field (default: IMAGE_ENGINE from the shell or .env, "
                          "else tesseract)")
     ap.add_argument("--llm-model",
