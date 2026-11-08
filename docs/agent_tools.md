@@ -22,7 +22,7 @@ run if that is the owner account (`DB_USERNAME`). `--trace` also prints the SQL 
 | Tool | Answers | Reads (all granted to `agent_ro`) |
 |---|---|---|
 | `list_machines` | Machine ids and names, and what data each has | `machine_overview` |
-| `get_nameplate` | What the plate photo says, field by field, with an OCR confidence per field | `machine_nameplate`, `img_nameplates_audit` |
+| `get_nameplate` | What the plate photo says, field by field, with an OCR confidence per field; for a crane's capacity, the SOP's max load with its line | `machine_nameplate`, `img_nameplates_audit`, `sop_steps_audit` |
 | `machine_lubrication` | "What oil does X take / grease interval": plate and spares sheet side by side, whether the grades agree, which to trust and why | the two above + `machine_spares`, `critical_spares_audit` |
 | `get_spares` | Spares for a machine or part, stock vs minimum, lead time in days and as written, size in mm and inches | `machine_spares`, `critical_spares_audit` |
 | `count_incidents` | "How many", "which machine has most", grouped by machine, year, month, severity, description or `scale_period` | `incident_detail`, `cmms_safety_incidents_audit` |
@@ -71,16 +71,18 @@ Every query runs with `MAX_EXECUTION_TIME` 10 s on MySQL.
 | Trap | How |
 |---|---|
 | **Severity scales (C1, the auditor's test)** | Incident tools filter and group on `severity_5_worst` only. A user's severity number must come with `severity_scale` (`5_is_worst` or `1_is_worst`), converted in code (6 − n); without it the tool returns `needs_clarification`. Tested: "sev 1, old scale" and "sev 5, current scale" give the same incidents across the July 2025 switch, and a naive "logged ≥ 4" count is never produced |
-| July 2025 (C2) | Incidents whose severity can't be placed are left out of severity counts and listed under `unplaced`, with a note |
+| July 2025 (C2) | Incidents whose severity can't be placed are left out of severity counts and listed under `unplaced`, with a note **that names their ids** (906, 907 on the real data), so the answer can name them too |
 | Incident ids not in date order (C5) | Listings are ordered by `incident_date` |
 | Descriptions that don't fit the machine (C6, I6) | `get_incident` notes when a description names work the machine doesn't do (`DESCRIPTION_FITS`: weld on a non-welder, crane or sling on a non-crane, chuck on a non-lathe/mill), e.g. 911's "weld flash burn" on the air compressor. Short on purpose: only clear cases |
 | A form value read by a person (I12) | `get_incident` notes when the scanned form carries `checked_by_eye_<field>`, so the answer says the value was read off the scan by a person |
 | PDPA (C16) | No tool returns employee codes, trades or shifts; `agent_ro` can't read names anyway |
 | OCR on nameplates (I14-I24) | Each field gets a confidence from the image's warnings (`field_flags`, `confidence`), least trusted first: `unreadable` (failed its check: I18), `engines_disagreed` (with `--engine both`, Tesseract and the vision model read different values; the stored one was chosen by rule, [decision tree 2](ingest_images.md#decision-tree-2-per-field-which-value-is-kept)), `uncertain` (no two Tesseract passes agreed: I15), `read_by_majority`, `read_by_one_engine` (only one engine read it), `clear` (with `--engine both`: both engines read the same value), and `checked_by_eye` (below). `unreadable`, `engines_disagreed` and `uncertain` (`NOT_RELIABLE`) come with a note to say so and cite the photo. `get_nameplate` also returns `read_by` (the image's `ocr_engine`). A power warning applies to every value parsed from the POWER line (`POWER_FIELDS`: kW, phases, min and max voltage), since `ingest_images` compares the engines on all of them |
 | Plate lines that don't fit the machine (I2, I3, I19, I20) | `KNOWN_CONCERNS` in the code attaches the trap-list finding to the field (BLAST-01's capacity and oil, crane capacities point to SOP-CRANE-02, the welders' and compressor's oil, CNC-01's 9257 kg). These ride on values read **clearly**: both engines agree on CNC-01's weight, and it is still doubtful. A capacity flagged `capacity_looks_like_power_line` (I25) counts as `unreadable` |
+| Crane loads (D7, I19) | `SOP_VALUES`: for CRN-01 and CRN-02's capacity, `get_nameplate` looks up the current SOP-CRANE-02 step that gives the max load and names the crane, and returns it as `data.from_sop.capacity_raw` (doc no, revision, line, the step as written), with a note and an `sop` source citing the line. The plate's capacity is never the answer for a crane |
 | Two sources for the oil (I3) | `machine_lubrication` returns both and states the trust rule: the plate is the machine's spec when read clearly. Grades are compared only with spares listed for **that machine**; a shop-wide (`ALL`) item such as hydraulic oil gets a note that it doesn't contradict the plate (on the real data, CNC-03's plate VG68 was wrongly reported as disagreeing with the shop's VG32 hydraulic oil) |
 | Plate values checked by eye (I15, I18) | `EYE_CHECKED` holds what the photo says for the values checked by eye, each with its date (4 Nov 2026: CNC-03 grease 500 h and weight 8092 kg; CRN-02 grease 500 h and capacity 2000 kg; WELD-02 and CMP-01 oil `Shell Tonna S3 M68`; CNC-03 serial `DM4958733`. 7 Nov 2026: CRN-01 serial `KO4778956`, LTH-01 `CO5612371`). Compared with the **stored** value at query time (`eye_check`): if they match, the field is `checked_by_eye`, with a note saying so; if not, the answer gives both ("stored 590 h; the photo reads 500 h"). The stored value is never changed here. So the notes stay right whichever engine loaded the plates: after `--engine both` CRN-02's 500 h is stored, and the old note "OCR stored 509 h" would have described an error that is no longer there. The lasting fix is still a reviewed-corrections table at ingest |
 | Open WO costs (C10), double entries (C9) | Costs closed vs not closed reported apart; same machine, day and type flagged |
+| Parts on work orders (C11) | The CMMS records no parts. A work order whose status is awaiting parts carries `part_awaited: "not recorded in the CMMS (trap list C11)"` on its own row, and a note names those work orders and says not to name a part |
 | Spares units (S2, S5, S7) | Sizes in mm and inches; notes on belt part numbers, units of issue and the unstated currency |
 | Machines without sensors (L5) | `no_data`, naming the 5 machines that have them |
 | Gaps, noise (L4, L6) | Coverage per bucket against the 12-minute grid; means, never single readings |
@@ -146,20 +148,23 @@ code is `needs_clarification` or `ambiguous_machine`.
 
 ## Tests
 
-`tests/test_agent_tools.py` (119 tests, no MySQL): the tools run their real SQL on an
+`tests/test_agent_tools.py` (124 tests, no MySQL): the tools run their real SQL on an
 in-memory SQLite database whose tables have the names and columns of the granted views,
 filled with a small sample shaped like the client's data (machine names and some values are
 illustrative) and the client's three SOPs loaded through `ingest_sops.process`. Covers:
 every tool's schema; machine names written six ways, ambiguous and unknown machines;
 **the severity kill-shot**: four phrasings without a scale asked about on both incident
 tools, the same question on either scale giving the same incidents, the naive logged-value
-count never produced, July 2025 reported apart; listings by date with no employee data;
+count never produced, July 2025 reported apart and named in the note; listings by date with
+no employee data;
 form vs CMMS disagreements; OCR confidence per field, known plate problems, no photo; the
 two-engine warnings (`engines_disagree_*`, `one_engine_only_*`) each tied to its field and
 never stated as fact; an eye-checked value that matches the stored one trusted with no stale
 OCR note, one that doesn't given both ways, and an unreadable oil with its photo value; oil
-from two sources that disagree, and an unreadable one; spares in both units, shop-wide
-only, below minimum once each; open costs apart and double entries; no sensors on a crane;
+from two sources that disagree, and an unreadable one; a crane's max load from SOP-CRANE-02
+with its line, and no SOP lookup for other plates; spares in both units, shop-wide
+only, below minimum once each; open costs apart and double entries; a work order awaiting
+parts with the part marked as not recorded and never named; no sensors on a crane;
 weekly coverage; CNC-02 `machine_specific` against flat machines; the blasting chamber SOP
 quoted whole with lines 3-6, nothing for welding, the missing machine manual; query_sql
 refusing writes, two statements, employees, `SELECT *`, the logged severity, `SLEEP` and
@@ -183,9 +188,25 @@ Re-verified after the fixes, all against the real database:
 - `find_sop '{"question": "welding hot work PPE for grinding"}'`: `found: false`, all 3 current SOPs searched, none scoring 2 — confirmed the tool doesn't adapt another SOP when none covers the topic.
 - The full test suite (`tests/test_agent_tools.py` + `tests/test_sops.py` + the rest of the repo's tests): 423 passed, 0 failed, 0 skipped, with the fixes above applied.
 
-**Still not covered:** a systematic sweep of every tool against every trap-list item on the
-real data (the checks above were targeted, not exhaustive). That gap is what the eval
-suite (`evals/cases.yaml`, planned) is for — see [`HARNESS_CHECKLIST.md`](HARNESS_CHECKLIST.md#8).
+**Found by the eval suite (8 Nov 2026):** the first run of `scripts/run_evals.py`
+([`evals.md`](evals.md)) against the real model and database. In each case the tool's
+result was correct, but the model left out or deferred what mattered, so the fix moves it
+into the tool's own output, where the model reads it first:
 
+| Eval case | What the model did | Fix |
+|---|---|---|
+| `severity-current-scale`, `severity-5-is-worst-named` | Said "2 additional incidents in July 2025 could not be placed" without naming them; the ids were only in `data.unplaced` | `count_incidents`' note names them: "2 incident(s) in July 2025 (907, 906) can't be placed … name them in the answer" |
+| `sop-crane-max-load` | Called `get_nameplate` for CRN-01, rightly didn't call the 450 A line a load, then told the user to "refer to SOP-CRANE-02" instead of looking it up | `SOP_VALUES`: `get_nameplate` looks up the SOP step itself and returns it with its line (`data.from_sop`), cited |
+| `wo-11570-parts-not-recorded` | "Awaiting parts for a corrective action related to a crane limit switch fault": the C11 note was dropped | `part_awaited: "not recorded in the CMMS"` on each awaiting-parts row, and a note naming those work orders |
+
+Each has a unit test replaying the case (`test_the_unplaced_incidents_are_named_in_the_note`,
+`test_a_cranes_load_comes_from_the_sop_with_its_line`,
+`test_the_part_a_work_order_awaits_is_never_named`). Rerun the eval suite to confirm on the
+real model.
+
+**Still not covered:** a systematic sweep of every tool against every trap-list item on the
+real data (the checks above were targeted, not exhaustive). The eval suite
+(`evals/cases.yaml`, [`evals.md`](evals.md)) covers the questions it asks; add a case when
+a real question finds a gap.
 
 **`scale_quote` (added 5 Nov 2026).** `count_incidents` and `list_incidents` accept `scale_quote`, the user's own words naming the severity scale. The tool itself ignores it; [`agent_app.py`](agent_app.md) checks it against the conversation and removes a `severity_scale` the user never stated, so the tool returns `needs_clarification`. Calling the tool directly (`agent_tools.py call ...`) needs no quote.

@@ -353,6 +353,15 @@ def test_the_july_2025_incident_is_reported_apart_never_counted(db):
     assert any("July 2025" in n for n in r.notes)
 
 
+def test_the_unplaced_incidents_are_named_in_the_note(db):
+    """Eval run 8 Nov 2026 (severity-current-scale): the answer said '2 additional incidents
+    in July 2025 could not be placed' without naming them. The ids were only in
+    data.unplaced; the note the model reads said 'mention them' without saying which."""
+    r = call(db, "count_incidents", at_least_as_severe_as=4, severity_scale="5_is_worst")
+    note = next(n for n in r.notes if "July 2025" in n)
+    assert "(907)" in note and "name them" in note
+
+
 def test_without_a_severity_filter_every_incident_counts(db):
     assert call(db, "count_incidents").data["count"] == len(INCIDENTS)
 
@@ -482,6 +491,26 @@ def test_known_plate_problems_travel_with_the_value(db):
     assert r.data["fields"]["manufacturer"]["confidence"] in ("clear", "not_read")
 
 
+@pytest.mark.parametrize("mid,load", [("CRN-01", "10,000 kg"), ("crane 2", "2,000 kg")])
+def test_a_cranes_load_comes_from_the_sop_with_its_line(db, mid, load):
+    """Eval run 8 Nov 2026 (sop-crane-max-load): asked CRN-01's max load, the model read the
+    plate (a welder's 450 A rating), rightly didn't call it a load, then told the user to
+    'refer to SOP-CRANE-02' instead of looking it up. The join is now done in code."""
+    r = call(db, "get_nameplate", machine=mid)
+    sop = r.data["from_sop"]["capacity_raw"]
+    assert sop["doc_no"] == "SOP-CRANE-02" and sop["line_no"] == 4
+    assert load in sop["step_text"] and sop["rev_label"] == "rev 6, Mar 2026"
+    assert any(load in n and "SOP-CRANE-02" in n and "line 4" in n for n in r.notes)
+    src = [s for s in r.sources if s["kind"] == "sop"]
+    assert src and src[0]["file"] == "SOP-CRANE-02.txt" and src[0]["locator"] == "line 4"
+
+
+def test_a_machine_without_an_sop_value_gets_no_sop_lookup(db):
+    r = call(db, "get_nameplate", machine="BLAST-01")
+    assert "from_sop" not in r.data
+    assert not any(s["kind"] == "sop" for s in r.sources)
+
+
 def test_no_photo_means_no_nameplate_not_a_guess(db):
     r = call(db, "get_nameplate", machine="MILL-01")
     assert r.ok and r.data["has_nameplate"] is False
@@ -589,6 +618,19 @@ def test_work_orders_keep_open_costs_apart_and_flag_double_entries(db):
 def test_open_means_anything_not_closed(db):
     r = call(db, "list_work_orders", status="open")
     assert sorted(w["wo_id"] for w in r.data["work_orders"]) == [11570, 11591]
+
+
+def test_the_part_a_work_order_awaits_is_never_named(db):
+    """Eval run 8 Nov 2026 (wo-11570-parts-not-recorded): asked what WO 11570 is waiting
+    for, the model said 'awaiting parts for ... a crane limit switch fault' and dropped the
+    note that the CMMS records no parts. The gap now sits on the work order row itself."""
+    r = call(db, "list_work_orders", machine="CRN-01")
+    wo = r.data["work_orders"][0]
+    assert wo["wo_id"] == 11570 and "not recorded" in wo["part_awaited"]
+    assert any("C11" in n and "11570" in n and "don't name" in n for n in r.notes)
+    assert "LS-CXT-11" not in json.dumps(r.to_dict())
+    closed = call(db, "list_work_orders", machine="CNC-02").data["work_orders"]
+    assert all("part_awaited" not in w for w in closed)
 
 
 def test_work_order_type_filter(db):
