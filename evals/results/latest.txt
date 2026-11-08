@@ -1,85 +1,79 @@
-Eval run 20261108T091558Z: 23 case(s) x 1, model gpt-4o-mini, stop at $0.5
+Eval run 20261108T093853Z: 23 case(s) x 1, model gpt-4o-mini, stop at $0.5
 
-PASS    severity-current-scale                   22.6 s  3 calls  9497+185 tok  $0.0011
+PASS    severity-current-scale                    8.7 s  3 calls  9497+187 tok  $0.0011
           Q: how many incidents in 2025 were severity 4 or worse?
           tools: count_incidents:needs_clarification | sources: 0
           Q: the current scale
           tools: count_incidents:ok | sources: 1
           oracle count_incidents.data.count = [3]
           oracle count_incidents.data.unplaced[*].incident_id = [907, 906]
-PASS    killshot-severity-4-or-higher             2.2 s  1 calls  2872+41 tok  $0.0003
+PASS    killshot-severity-4-or-higher             1.9 s  1 calls  2872+41 tok  $0.0003
           Q: How many incidents did we have in 2025 with severity 4 or higher?
           tools: count_incidents:needs_clarification | sources: 0
-PASS    killshot-list-severity-4-plus             1.8 s  1 calls  2866+41 tok  $0.0003
+PASS    killshot-list-severity-4-plus             1.9 s  1 calls  2866+41 tok  $0.0003
           Q: List the 2025 incidents rated severity 4+.
           tools: count_incidents:needs_clarification | sources: 0
 PASS    killshot-machine-most-severe              1.9 s  1 calls  2872+59 tok  $0.0003
           Q: Which machine had the most severity-4-or-worse incidents in 2025?
           tools: count_incidents:needs_clarification | sources: 0
-PASS    killshot-sev-ge-4                         2.1 s  1 calls  2872+41 tok  $0.0003
+PASS    killshot-sev-ge-4                         1.5 s  1 calls  2872+41 tok  $0.0003
           Q: Count the serious incidents (sev >= 4) for 2025, please.
           tools: count_incidents:needs_clarification | sources: 0
-PASS    severity-5-is-worst-named                 4.4 s  2 calls  6252+129 tok  $0.0007
+PASS    severity-5-is-worst-named                 3.9 s  2 calls  6257+140 tok  $0.0007
           Q: How many incidents in 2025 were severity 5, where 5 is the worst?
           tools: count_incidents:ok | sources: 1
-PASS    severity-old-scale-same-incidents         5.7 s  3 calls  9384+176 tok  $0.0009
+PASS    severity-old-scale-same-incidents         6.9 s  3 calls  9384+174 tok  $0.0009
           Q: On the old scale, where 1 is the most severe, how many 2025 incidents were severity 1?
           tools: count_incidents:bad_arguments, count_incidents:ok | sources: 1
-PASS    sop-welding-none                          2.5 s  2 calls  5871+30 tok  $0.0005
+PASS    sop-welding-none                          2.4 s  2 calls  5871+30 tok  $0.0005
           Q: What's the SOP for welding?
           tools: find_sop:ok | sources: 1
-PASS    sop-grinding-none                         2.2 s  2 calls  5879+30 tok  $0.0005
+PASS    sop-grinding-none                         2.4 s  2 calls  5879+30 tok  $0.0005
           Q: Is there an SOP for grinding?
           tools: find_sop:ok | sources: 1
-PASS    sop-blasting-chamber                      5.5 s  2 calls  6147+195 tok  $0.0007
+PASS    sop-blasting-chamber                      4.7 s  2 calls  6147+167 tok  $0.0007
           Q: What do I need to do before entering the blasting chamber?
           tools: find_sop:ok | sources: 1
-PASS    sop-crane-max-load                        4.6 s  2 calls  6631+76 tok  $0.0007
+PASS    sop-crane-max-load                        3.7 s  2 calls  6631+76 tok  $0.0007
           Q: What's the maximum load for CRN-01?
           tools: get_nameplate:ok | sources: 2
-FAIL    cnc02-running-differently                 8.9 s  2 calls  14105+196 tok  $0.0019
+PASS    cnc02-running-differently                 7.6 s  2 calls  14165+191 tok  $0.0019
           Q: is CNC-02 running differently now?
           tools: compare_sensor_windows:ok | sources: 5
-          A: CNC-02 is currently running differently. The analysis shows that both vibration and temperature metrics are elevated compared to the baseline: - **Vibration**: - Baseline mean: 2.3 mm/s - Recent mean: 4.41 mm/s - Change: 2.11 mm/s (91.4% increase) - **Temperature**: - Baseline mean: 51.93 °C - Rece…
-          FAIL turn 1: answer doesn't match /only CNC-02|other (four |sensored |monitored )?machines|machine.specific|not shop.wide|rest of the shop|not the whole shop/
-PASS    crane-no-sensors                          2.6 s  2 calls  5828+63 tok  $0.0006
+PASS    crane-no-sensors                          2.3 s  2 calls  5828+41 tok  $0.0005
           Q: Is the overhead crane running hot?
           tools: compare_sensor_windows:no_data | sources: 0
-PASS    oil-cnc03                                 3.7 s  2 calls  6343+107 tok  $0.0007
+PASS    oil-cnc03                                 3.9 s  2 calls  6343+107 tok  $0.0007
           Q: What oil does CNC-03 take?
           tools: machine_lubrication:ok | sources: 2
-PASS    oil-blast01-two-sources                   4.7 s  2 calls  6348+170 tok  $0.0007
+PASS    oil-blast01-two-sources                   4.5 s  2 calls  6348+141 tok  $0.0007
           Q: What oil does BLAST-01 take?
           tools: machine_lubrication:ok | sources: 2
-PASS    incident-900-root-cause                   5.6 s  2 calls  6448+151 tok  $0.0007
+PASS    incident-900-root-cause                   4.2 s  2 calls  6448+152 tok  $0.0007
           Q: Why did incident 900 happen?
           tools: get_incident:ok | sources: 2
-PASS    incident-911-read-by-eye                  3.6 s  2 calls  6477+100 tok  $0.0007
+PASS    incident-911-read-by-eye                  3.3 s  2 calls  6477+107 tok  $0.0007
           Q: What severity is recorded for incident 911, and does the scanned form agree?
           tools: get_incident:ok | sources: 2
-FAIL    incident-earliest-917                     4.2 s  2 calls  9843+87 tok  $0.0014
+PASS    incident-earliest-917                     3.3 s  2 calls  9843+89 tok  $0.0012
           Q: What was the earliest safety incident in the CMMS?
           tools: list_incidents:ok | sources: 1
-          A: The earliest safety incident recorded in the CMMS occurred on **January 24, 2024**. It involved a near miss where a sling snapped during a lift, resulting in a severity rating of **3** on the current scale (5 = most severe). The incident was found during an audit and resulted in **2 lost days**.
-          FAIL turn 1: answer lacks '917'
-PASS    spares-below-minimum                      6.4 s  2 calls  6220+274 tok  $0.0007
+PASS    spares-below-minimum                      6.7 s  2 calls  6220+274 tok  $0.0007
           Q: Which critical spares are below minimum stock?
           tools: get_spares:ok | sources: 1
-PASS    spares-belt-length                        3.2 s  2 calls  6075+70 tok  $0.0006
+PASS    spares-belt-length                        3.1 s  2 calls  6075+70 tok  $0.0006
           Q: How long is the BELT-5V-850 belt?
           tools: get_spares:ok | sources: 1
-PASS    nameplate-cnc01-weight-doubt              3.3 s  2 calls  6302+88 tok  $0.0006
+PASS    nameplate-cnc01-weight-doubt              3.4 s  2 calls  6302+89 tok  $0.0006
           Q: How heavy is CNC-01?
           tools: get_nameplate:ok | sources: 1
-FAIL    pdpa-employee-name                        2.6 s  2 calls  5926+44 tok  $0.0006
+PASS    pdpa-employee-name                        2.7 s  2 calls  5926+44 tok  $0.0006
           Q: What is the name of employee EMP015?
           tools: query_sql:not_allowed | sources: 0
-          A: I could not check that.
-          FAIL turn 1: answer doesn't match /can'?t|cannot|not able|unable|don'?t have|do not have|no access|not available|isn'?t available|not (provide|share|give)|personal/
-PASS    wo-11570-parts-not-recorded               3.2 s  2 calls  9879+48 tok  $0.0012
+PASS    wo-11570-parts-not-recorded               2.7 s  2 calls  9879+48 tok  $0.0012
           Q: What part is work order 11570 waiting for?
           tools: list_work_orders:ok | sources: 1
 
-Cases: 23  passed 20  failed 3  errors 0  skipped 0
-Model calls: 44 (gpt-4o-mini)  tokens: 150937 in + 2401 out  time: 107 s
-Spend: $0.0167 as charged by the proxy (x-litellm-response-cost); $0.0241 at list price
+Cases: 23  passed 23  failed 0  errors 0  skipped 0
+Model calls: 44 (gpt-4o-mini)  tokens: 151002 in + 2339 out  time: 88 s
+Spend: $0.0164 as charged by the proxy (x-litellm-response-cost); $0.0241 at list price
