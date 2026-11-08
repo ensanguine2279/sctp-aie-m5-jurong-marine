@@ -1,97 +1,85 @@
-Eval run 20261108T025517Z: 23 case(s) x 1, model gpt-4o-mini, stop at $0.5
+Eval run 20261108T091558Z: 23 case(s) x 1, model gpt-4o-mini, stop at $0.5
 
-FAIL    severity-current-scale                   45.0 s  3 calls  9488+173 tok  $0.0011
+PASS    severity-current-scale                   22.6 s  3 calls  9497+185 tok  $0.0011
           Q: how many incidents in 2025 were severity 4 or worse?
           tools: count_incidents:needs_clarification | sources: 0
-          A: Severity 4 means opposite things on the two scales. Ask the user: the current scale (5 = most severe, used since Jul 2025) or the old one (1 = most severe)?
           Q: the current scale
           tools: count_incidents:ok | sources: 1
           oracle count_incidents.data.count = [3]
           oracle count_incidents.data.unplaced[*].incident_id = [907, 906]
-          A: In 2025, there were 3 incidents with a severity of 4 or worse on the current scale (where 5 is the most severe). These incidents resulted in a total of 4 lost days. Please note that there were 2 additional incidents in July 2025 that could not be placed on either scale due to the uncertainty around…
-          FAIL turn 2: answer lacks '906'
-          FAIL turn 2: answer lacks '907'
-          FAIL turn 2: answer lacks 907 (count_incidents data.unplaced[*].incident_id)
-          FAIL turn 2: answer lacks 906 (count_incidents data.unplaced[*].incident_id)
-PASS    killshot-severity-4-or-higher             2.4 s  1 calls  2872+41 tok  $0.0003
+PASS    killshot-severity-4-or-higher             2.2 s  1 calls  2872+41 tok  $0.0003
           Q: How many incidents did we have in 2025 with severity 4 or higher?
           tools: count_incidents:needs_clarification | sources: 0
 PASS    killshot-list-severity-4-plus             1.8 s  1 calls  2866+41 tok  $0.0003
           Q: List the 2025 incidents rated severity 4+.
           tools: count_incidents:needs_clarification | sources: 0
-PASS    killshot-machine-most-severe              1.8 s  1 calls  2872+59 tok  $0.0003
+PASS    killshot-machine-most-severe              1.9 s  1 calls  2872+59 tok  $0.0003
           Q: Which machine had the most severity-4-or-worse incidents in 2025?
           tools: count_incidents:needs_clarification | sources: 0
-PASS    killshot-sev-ge-4                         1.6 s  1 calls  2872+41 tok  $0.0003
+PASS    killshot-sev-ge-4                         2.1 s  1 calls  2872+41 tok  $0.0003
           Q: Count the serious incidents (sev >= 4) for 2025, please.
           tools: count_incidents:needs_clarification | sources: 0
-FAIL    severity-5-is-worst-named                 4.2 s  2 calls  6248+131 tok  $0.0007
+PASS    severity-5-is-worst-named                 4.4 s  2 calls  6252+129 tok  $0.0007
           Q: How many incidents in 2025 were severity 5, where 5 is the worst?
           tools: count_incidents:ok | sources: 1
-          A: In 2025, there was 1 incident with severity 5, where 5 is the worst. This incident resulted in a total of 2 lost days. Please note that there were 2 additional incidents in July 2025 that could not be placed on the severity scale due to the transition period, so they are not included in this count.
-          FAIL turn 1: answer lacks '906'
-          FAIL turn 1: answer lacks '907'
-PASS    severity-old-scale-same-incidents         5.6 s  3 calls  9375+181 tok  $0.0009
+PASS    severity-old-scale-same-incidents         5.7 s  3 calls  9384+176 tok  $0.0009
           Q: On the old scale, where 1 is the most severe, how many 2025 incidents were severity 1?
           tools: count_incidents:bad_arguments, count_incidents:ok | sources: 1
-PASS    sop-welding-none                          7.1 s  2 calls  5871+30 tok  $0.0005
+PASS    sop-welding-none                          2.5 s  2 calls  5871+30 tok  $0.0005
           Q: What's the SOP for welding?
           tools: find_sop:ok | sources: 1
-PASS    sop-grinding-none                         2.6 s  2 calls  5879+42 tok  $0.0006
+PASS    sop-grinding-none                         2.2 s  2 calls  5879+30 tok  $0.0005
           Q: Is there an SOP for grinding?
           tools: find_sop:ok | sources: 1
-PASS    sop-blasting-chamber                      5.6 s  2 calls  6147+182 tok  $0.0007
+PASS    sop-blasting-chamber                      5.5 s  2 calls  6147+195 tok  $0.0007
           Q: What do I need to do before entering the blasting chamber?
           tools: find_sop:ok | sources: 1
-FAIL    sop-crane-max-load                        3.9 s  2 calls  6335+95 tok  $0.0007
+PASS    sop-crane-max-load                        4.6 s  2 calls  6631+76 tok  $0.0007
           Q: What's the maximum load for CRN-01?
-          tools: get_nameplate:ok | sources: 1
-          A: The nameplate for CRN-01 indicates a capacity of "450 A @ 60%," which is a welder's rating and not a crane load. For accurate crane load specifications, you should refer to SOP-CRANE-02. Please note that this information was read from the nameplate photo, and the capacity line is specifically a wel…
-          FAIL turn 1: answer doesn't match /10,?000\s*kg/
-          FAIL turn 1: no source matches /SOP-CRANE-02/ (sources: ['CRN-01 nameplate photo: nameplate_CRN-01.jpg (img_nameplates_audit), SHA-256 d6508ba9127e…'])
-PASS    cnc02-running-differently                 9.1 s  2 calls  14105+190 tok  $0.0019
+          tools: get_nameplate:ok | sources: 2
+FAIL    cnc02-running-differently                 8.9 s  2 calls  14105+196 tok  $0.0019
           Q: is CNC-02 running differently now?
           tools: compare_sensor_windows:ok | sources: 5
-PASS    crane-no-sensors                          2.8 s  2 calls  5828+63 tok  $0.0006
+          A: CNC-02 is currently running differently. The analysis shows that both vibration and temperature metrics are elevated compared to the baseline: - **Vibration**: - Baseline mean: 2.3 mm/s - Recent mean: 4.41 mm/s - Change: 2.11 mm/s (91.4% increase) - **Temperature**: - Baseline mean: 51.93 °C - Rece…
+          FAIL turn 1: answer doesn't match /only CNC-02|other (four |sensored |monitored )?machines|machine.specific|not shop.wide|rest of the shop|not the whole shop/
+PASS    crane-no-sensors                          2.6 s  2 calls  5828+63 tok  $0.0006
           Q: Is the overhead crane running hot?
           tools: compare_sensor_windows:no_data | sources: 0
-PASS    oil-cnc03                                 3.9 s  2 calls  6343+107 tok  $0.0007
+PASS    oil-cnc03                                 3.7 s  2 calls  6343+107 tok  $0.0007
           Q: What oil does CNC-03 take?
           tools: machine_lubrication:ok | sources: 2
-PASS    oil-blast01-two-sources                   4.4 s  2 calls  6348+132 tok  $0.0007
+PASS    oil-blast01-two-sources                   4.7 s  2 calls  6348+170 tok  $0.0007
           Q: What oil does BLAST-01 take?
           tools: machine_lubrication:ok | sources: 2
-PASS    incident-900-root-cause                   4.2 s  2 calls  6448+160 tok  $0.0007
+PASS    incident-900-root-cause                   5.6 s  2 calls  6448+151 tok  $0.0007
           Q: Why did incident 900 happen?
           tools: get_incident:ok | sources: 2
-PASS    incident-911-read-by-eye                  3.7 s  2 calls  6477+107 tok  $0.0007
+PASS    incident-911-read-by-eye                  3.6 s  2 calls  6477+100 tok  $0.0007
           Q: What severity is recorded for incident 911, and does the scanned form agree?
           tools: get_incident:ok | sources: 2
-FAIL    incident-earliest-917                     3.8 s  2 calls  9843+88 tok  $0.0012
+FAIL    incident-earliest-917                     4.2 s  2 calls  9843+87 tok  $0.0014
           Q: What was the earliest safety incident in the CMMS?
           tools: list_incidents:ok | sources: 1
-          A: The earliest safety incident recorded in the CMMS occurred on January 24, 2024. It involved a near miss where a sling snapped during a lift, associated with the machine CRN-01. The incident had a severity rating of 3 on the old scale (where 1 is most severe) and resulted in 2 lost days.
+          A: The earliest safety incident recorded in the CMMS occurred on **January 24, 2024**. It involved a near miss where a sling snapped during a lift, resulting in a severity rating of **3** on the current scale (5 = most severe). The incident was found during an audit and resulted in **2 lost days**.
           FAIL turn 1: answer lacks '917'
-PASS    spares-below-minimum                      6.2 s  2 calls  6220+282 tok  $0.0007
+PASS    spares-below-minimum                      6.4 s  2 calls  6220+274 tok  $0.0007
           Q: Which critical spares are below minimum stock?
           tools: get_spares:ok | sources: 1
-PASS    spares-belt-length                        3.0 s  2 calls  6075+70 tok  $0.0006
+PASS    spares-belt-length                        3.2 s  2 calls  6075+70 tok  $0.0006
           Q: How long is the BELT-5V-850 belt?
           tools: get_spares:ok | sources: 1
-PASS    nameplate-cnc01-weight-doubt              3.8 s  2 calls  6302+102 tok  $0.0007
+PASS    nameplate-cnc01-weight-doubt              3.3 s  2 calls  6302+88 tok  $0.0006
           Q: How heavy is CNC-01?
           tools: get_nameplate:ok | sources: 1
-FAIL    pdpa-employee-name                        3.0 s  2 calls  5926+44 tok  $0.0006
+FAIL    pdpa-employee-name                        2.6 s  2 calls  5926+44 tok  $0.0006
           Q: What is the name of employee EMP015?
           tools: query_sql:not_allowed | sources: 0
           A: I could not check that.
           FAIL turn 1: answer doesn't match /can'?t|cannot|not able|unable|don'?t have|do not have|no access|not available|isn'?t available|not (provide|share|give)|personal/
-FAIL    wo-11570-parts-not-recorded               3.7 s  2 calls  9601+48 tok  $0.0011
+PASS    wo-11570-parts-not-recorded               3.2 s  2 calls  9879+48 tok  $0.0012
           Q: What part is work order 11570 waiting for?
           tools: list_work_orders:ok | sources: 1
-          A: Work order 11570 is awaiting parts for a corrective action related to a "crane limit switch fault."
-          FAIL turn 1: answer doesn't match /(don'?t|do not|doesn'?t|does not|no|not)\b.{0,60}\b(record|list|track|link|show|include|say)/
 
-Cases: 23  passed 17  failed 6  errors 0  skipped 0
-Model calls: 44 (gpt-4o-mini)  tokens: 150341 in + 2409 out  time: 133 s
-Spend: $0.0164 as charged by the proxy (x-litellm-response-cost); $0.0240 at list price
+Cases: 23  passed 20  failed 3  errors 0  skipped 0
+Model calls: 44 (gpt-4o-mini)  tokens: 150937 in + 2401 out  time: 107 s
+Spend: $0.0167 as charged by the proxy (x-litellm-response-cost); $0.0241 at list price

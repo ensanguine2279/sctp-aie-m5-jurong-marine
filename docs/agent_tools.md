@@ -148,7 +148,7 @@ code is `needs_clarification` or `ambiguous_machine`.
 
 ## Tests
 
-`tests/test_agent_tools.py` (124 tests, no MySQL): the tools run their real SQL on an
+`tests/test_agent_tools.py` (125 tests, no MySQL): the tools run their real SQL on an
 in-memory SQLite database whose tables have the names and columns of the granted views,
 filled with a small sample shaped like the client's data (machine names and some values are
 illustrative) and the client's three SOPs loaded through `ingest_sops.process`. Covers:
@@ -165,7 +165,7 @@ from two sources that disagree, and an unreadable one; a crane's max load from S
 with its line, and no SOP lookup for other plates; spares in both units, shop-wide
 only, below minimum once each; open costs apart and double entries; a work order awaiting
 parts with the part marked as not recorded and never named; no sensors on a crane;
-weekly coverage; CNC-02 `machine_specific` against flat machines; the blasting chamber SOP
+weekly coverage; CNC-02 `machine_specific` against flat machines, with the verdict in words; the blasting chamber SOP
 quoted whole with lines 3-6, nothing for welding, the missing machine manual; query_sql
 refusing writes, two statements, employees, `SELECT *`, the logged severity, `SLEEP` and
 `UNION`, and capping rows; a dead database giving `tool_failed`; bad, extra and JSON-string
@@ -197,11 +197,12 @@ into the tool's own output, where the model reads it first:
 |---|---|---|
 | `severity-current-scale`, `severity-5-is-worst-named` | Said "2 additional incidents in July 2025 could not be placed" without naming them; the ids were only in `data.unplaced` | `count_incidents`' note names them: "2 incident(s) in July 2025 (907, 906) can't be placed … name them in the answer" |
 | `sop-crane-max-load` | Called `get_nameplate` for CRN-01, rightly didn't call the 450 A line a load, then told the user to "refer to SOP-CRANE-02" instead of looking it up | `SOP_VALUES`: `get_nameplate` looks up the SOP step itself and returns it with its line (`data.from_sop`), cited |
+| `cnc02-running-differently` (rerun, same day; passed on the first run) | Gave every number but not the conclusion: that only CNC-02 is elevated, not the shop | `compare_sensor_windows`' first note states the verdict in words: "Verdict: CNC-02 is running differently (vibration and temperature elevated), and none of the other sensored machines (…) is: it is this machine, not a shop-wide change" |
 | `wo-11570-parts-not-recorded` | "Awaiting parts for a corrective action related to a crane limit switch fault": the C11 note was dropped | `part_awaited: "not recorded in the CMMS"` on each awaiting-parts row, and a note naming those work orders |
 
 Each has a unit test replaying the case (`test_the_unplaced_incidents_are_named_in_the_note`,
 `test_a_cranes_load_comes_from_the_sop_with_its_line`,
-`test_the_part_a_work_order_awaits_is_never_named`). Rerun the eval suite to confirm on the
+`test_the_part_a_work_order_awaits_is_never_named`, `test_the_verdict_is_spelled_out_in_the_first_note`). Rerun the eval suite to confirm on the
 real model.
 
 **Still not covered:** a systematic sweep of every tool against every trap-list item on the

@@ -78,7 +78,7 @@ def count_incidents(args):
                        "current scale (5 = most severe, used since Jul 2025) or the old one "
                        "(1 = most severe)?"})
     return Result("count_incidents", True, sources=[INCIDENTS], data={
-        "count": 5, "incident_ids": [904, 913, 939, 953, 978],
+        "count": 3, "incident_ids": [913, 953, 978],      # count as on the real data, 8 Nov
         "unplaced": [{"incident_id": 906, "incident_date": "2025-07-11"},
                      {"incident_id": 907, "incident_date": "2025-07-04"}]})
 
@@ -223,7 +223,7 @@ def test_the_severity_case_passes_when_the_guard_strips_the_guess(monkeypatch, t
                              Q1 + ',"severity_scale":"5_is_worst","scale_quote":"5 is worst"}')]),
         Msg(tool_calls=[Call("c2", "count_incidents",
                              Q1 + ',"severity_scale":"5_is_worst","scale_quote":"the current scale"}')]),
-        Msg(content="On the current scale, 5 incidents in 2025 were severity 4 or worse. "
+        Msg(content="On the current scale, 3 incidents in 2025 were severity 4 or worse. "
                     "Incidents 906 and 907 (July 2025) can't be placed on one scale, so they "
                     "aren't counted.")))
     r = ev.run_case(severity_case(), None, None, capture, oracle_runner=oracle)
@@ -245,9 +245,9 @@ def test_the_severity_case_fails_on_the_5_nov_behaviour(monkeypatch, capture):
     monkeypatch.setattr(app.at, "tool_schemas", lambda: [])
     monkeypatch.setattr(app, "complete", scripted(
         Msg(tool_calls=[Call("c1", "count_incidents", Q1 + "}")]),
-        Msg(content="5 incidents in 2025 were severity 4 or worse."),
+        Msg(content="3 incidents in 2025 were severity 4 or worse."),
         Msg(tool_calls=[Call("c2", "count_incidents", Q1 + "}")]),
-        Msg(content="5.")))
+        Msg(content="3.")))
     r = ev.run_case(severity_case(), None, None, capture, oracle_runner=oracle)
     assert r.status == "FAIL"
     assert any("turn 1: count_incidents succeeded but must not" in f for f in r.failures)
@@ -263,7 +263,7 @@ def test_an_invented_count_fails_grounding_and_the_oracle(monkeypatch, tools, ca
     r = ev.run_case(severity_case(), None, None, capture, oracle_runner=oracle)
     assert r.status == "FAIL"
     assert "turn 2: not grounded: number 7 is in no tool result" in r.failures
-    assert "turn 2: answer lacks 5 (count_incidents data.count)" in r.failures
+    assert "turn 2: answer lacks 3 (count_incidents data.count)" in r.failures
 
 
 def test_a_failed_model_call_is_an_error_not_a_verdict(monkeypatch, tools, capture):
@@ -276,11 +276,11 @@ def test_a_failed_model_call_is_an_error_not_a_verdict(monkeypatch, tools, captu
 
 
 def test_a_pinned_value_that_changed_is_reported():
-    rec = ev.TurnRecord("q", answer="5", sources=["x"])
+    rec = ev.TurnRecord("q", answer="3", sources=["x"])
     exp = {"oracle": [{"tool": "count_incidents", "args": {}, "equals": {"data.count": 4}}],
            "grounded": False}
     fails, _, _ = ev.check_turn(rec, exp, ev.Evidence([]), oracle_runner=oracle)
-    assert any("data.count = [5], expected 4" in f for f in fails)
+    assert any("data.count = [3], expected 4" in f for f in fails)
 
 
 # ------------------------------------------------------------------ spend ---

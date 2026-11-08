@@ -689,6 +689,17 @@ def test_a_temperature_rise_counts_in_degrees_not_percent():
     assert s["temp"]["change_in_sd"] > 3 and s["temp"]["elevated"] is False   # under 2 °C
 
 
+def test_the_verdict_is_spelled_out_in_the_first_note(db):
+    """Eval rerun 8 Nov 2026 (cnc02-running-differently): the answer gave every number but
+    never said it was CNC-02 alone, not the shop: the verdict was only in data.verdict.
+    It passed on the first run of the day, so it is flaky, not consistently wrong."""
+    note = call(db, "compare_sensor_windows", machine="CNC-02").notes[0]
+    assert note.startswith("Verdict:") and "vibration and temperature" in note
+    assert "CNC-01, PMP-T01" in note and "not a shop-wide change" in note
+    flat = call(db, "compare_sensor_windows", machine="CNC-01").notes[0]
+    assert flat.startswith("Verdict:") and "not running differently" in flat
+
+
 def test_a_flat_machine_is_not_elevated(db):
     assert call(db, "compare_sensor_windows", machine="CNC-01").data["verdict"] == "not_elevated"
 

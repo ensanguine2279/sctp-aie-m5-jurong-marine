@@ -1399,13 +1399,28 @@ def compare_sensor_windows(db: Db, a: CompareArgs) -> ToolResult:
     others_up = sorted(m for m, s in others.items() if any(v and v["elevated"] for v in s.values()))
     verdict = ("not_elevated" if not target_up else
                "shop_wide" if others_up else "machine_specific")
+    # The verdict in words, first among the notes. Eval rerun 8 Nov 2026: the answer gave
+    # every number but not the conclusion (only CNC-02, not the shop); it was only in
+    # data.verdict.
+    metrics = " and ".join({"vib": "vibration", "temp": "temperature"}[k] for k in target_up)
+    rest = ", ".join(sorted(others))
+    if verdict == "machine_specific":
+        said = (f"Verdict: {mid} is running differently ({metrics} elevated), and none of the "
+                f"other sensored machines ({rest}) is: it is this machine, not a shop-wide "
+                f"change. Say so in the answer.")
+    elif verdict == "shop_wide":
+        said = (f"Verdict: {mid} is running differently ({metrics} elevated), but so are "
+                f"{', '.join(others_up)}: a shop-wide change, not this machine alone. Say so.")
+    else:
+        said = (f"Verdict: {mid} is not running differently by the rule: no metric is "
+                f"elevated. Say so.")
     return ToolResult("compare_sensor_windows", True, data={
         "machine_id": mid, "verdict": verdict, "elevated_metrics": target_up,
         "other_machines_elevated": others_up, "rule": VERDICT_RULE,
         "baseline": {"from": b0, "to": b1}, "recent": {"from": r0, "to": r1},
         "target": target, "others": others,
         "chart_weekly": chart},
-        notes=list(SENSOR_NOTES) + ["In chart_weekly, a week with days < 7 is partial (the "
+        notes=[said] + list(SENSOR_NOTES) + ["In chart_weekly, a week with days < 7 is partial (the "
                                     "data starts on a Thursday, 1 Jan 2026): plot it, but don't "
                                     "read it as a full week."],
         sources=sources)
