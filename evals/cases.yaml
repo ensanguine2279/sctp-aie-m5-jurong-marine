@@ -1,0 +1,341 @@
+# Eval suite for the JME agent (HARNESS_CHECKLIST.md section 8). Run: python scripts/run_evals.py
+#
+# Every case runs against the REAL model (llm proxy) and the REAL database (agent_ro).
+# Each turn's `expect` is checked against what actually happened (the tools that ran, their
+# results, the log events), not against what the model says it did. Keys:
+#
+#   tools_all / tools_any / tools_none   tools that must all run / at least one / none
+#   tools_ok / tools_not_ok              tools that must / must not return ok: true
+#   tool_error: {tool: code}             a tool must refuse with this code
+#   tool_args: [{tool, args}]            a successful call ran with these arguments (as run,
+#                                        after the severity-scale guard)
+#   tool_data: [{tool, path, equals|in|contains|exists}]   a value in a tool's result
+#   answer_contains (case-insensitive; a nested list = any one of), answer_not_contains,
+#   answer_matches / answer_not_matches (regex, case-insensitive)
+#   sources_min (default 1), sources_match (regex on the source labels)
+#   grounded (default true): every number, date and id-like token in the answer is in a
+#     tool result of this conversation or the user's own words; allow_numbers for exceptions
+#   events_present / events_absent       agent_app log events (scale_guess_blocked, ...)
+#   clarification: true                  the turn must end with a question to the user
+#   oracle: [{tool, args, must_appear, equals}]   the runner calls the tool itself (no model,
+#     no cost); every value at a must_appear path must be in the answer, and an equals path
+#     must hold (a pinned value from the real-data checks; fails if the data changes)
+#
+# Pinned values come from the project's own real-data checks: trap_list.md, agent_tools.md
+# ("Checked against the real database, 5 Nov 2026") and the CNC-02 run. Where no check has
+# pinned a number yet (the severity >= 4 count), the oracle supplies it at run time.
+#
+# Tags: killshot (the severity question, five phrasings), severity, sop, sensors, oil,
+# spares, incidents, refusal (the correct answer says it can't / there is none), trap ids.
+
+cases:
+
+# ---------------------------------------------------------------- severity (C1, C2) ---
+
+- id: severity-current-scale
+  tags: [killshot, severity, C1, C2]
+  note: >
+    The auditor's question. 5 Nov 2026 the model guessed severity_scale itself; the guard
+    in agent_app.py now strips a scale the user never named. Turn 1 must ask, with no count;
+    turn 2 must count on the current scale and report 906 and 907 apart as unplaced.
+  turns:
+    - ask: how many incidents in 2025 were severity 4 or worse?
+      expect:
+        clarification: true
+        tools_not_ok: [count_incidents, list_incidents]
+        answer_matches: ["current", "old"]
+        sources_min: 0
+    - ask: the current scale
+      expect:
+        tools_ok: [count_incidents]
+        tool_args:
+          - tool: count_incidents
+            args: {severity_scale: 5_is_worst, at_least_as_severe_as: 4}
+        events_absent: [scale_guess_blocked]
+        tool_data:
+          - {tool: count_incidents, path: "data.unplaced[*].incident_id", contains: [906, 907]}
+        answer_contains: ["906", "907"]
+        answer_matches: ["unplaced|can'?t be placed|cannot be placed|not (be )?placed|ambiguous|not (included|counted)|excluded|left out|separately|switch"]
+        sources_match: ["CMMS incidents"]
+        oracle:
+          - tool: count_incidents
+            args: {date_from: "2025-01-01", date_to: "2025-12-31", at_least_as_severe_as: 4,
+                   severity_scale: 5_is_worst}
+            must_appear: [data.count, "data.unplaced[*].incident_id"]
+
+- id: killshot-severity-4-or-higher
+  tags: [killshot, severity, C1]
+  turns:
+    - ask: How many incidents did we have in 2025 with severity 4 or higher?
+      expect:
+        clarification: true
+        tools_not_ok: [count_incidents, list_incidents]
+        answer_matches: ["scale"]
+        sources_min: 0
+
+- id: killshot-list-severity-4-plus
+  tags: [killshot, severity, C1]
+  turns:
+    - ask: List the 2025 incidents rated severity 4+.
+      expect:
+        clarification: true
+        tools_not_ok: [count_incidents, list_incidents]
+        answer_matches: ["scale"]
+        sources_min: 0
+
+- id: killshot-machine-most-severe
+  tags: [killshot, severity, C1]
+  turns:
+    - ask: Which machine had the most severity-4-or-worse incidents in 2025?
+      expect:
+        clarification: true
+        tools_not_ok: [count_incidents, list_incidents]
+        answer_matches: ["scale"]
+        sources_min: 0
+
+- id: killshot-sev-ge-4
+  tags: [killshot, severity, C1]
+  turns:
+    - ask: Count the serious incidents (sev >= 4) for 2025, please.
+      expect:
+        clarification: true
+        tools_not_ok: [count_incidents, list_incidents]
+        answer_matches: ["scale"]
+        sources_min: 0
+
+- id: severity-5-is-worst-named
+  tags: [severity, C1, C2]
+  note: The user names the scale in the question, so no clarification. Real data (agent_tools.md, 5 Nov 2026) gives 1 incident, 978.
+  turns:
+    - ask: How many incidents in 2025 were severity 5, where 5 is the worst?
+      expect:
+        tools_ok: [count_incidents]
+        tool_args:
+          - {tool: count_incidents, args: {severity_scale: 5_is_worst}}
+        events_absent: [scale_guess_blocked]
+        tool_data:
+          - {tool: count_incidents, path: data.count, equals: 1}
+          - {tool: count_incidents, path: data.incident_ids, contains: [978]}
+        answer_contains: ["906", "907"]
+        sources_match: ["CMMS incidents"]
+
+- id: severity-old-scale-same-incidents
+  tags: [severity, C1]
+  note: Severity 1 on the old scale is severity 5 on the current one, so the same incident (978) must come back.
+  turns:
+    - ask: On the old scale, where 1 is the most severe, how many 2025 incidents were severity 1?
+      expect:
+        tools_ok: [count_incidents]
+        tool_args:
+          - {tool: count_incidents, args: {severity_scale: 1_is_worst}}
+        events_absent: [scale_guess_blocked]
+        tool_data:
+          - {tool: count_incidents, path: data.count, equals: 1}
+          - {tool: count_incidents, path: data.incident_ids, contains: [978]}
+        sources_match: ["CMMS incidents"]
+
+# -------------------------------------------------------------------------- SOPs (D3) ---
+
+- id: sop-welding-none
+  tags: [sop, refusal, D3]
+  note: No SOP covers welding; the answer must say so and must not adapt another SOP.
+  turns:
+    - ask: What's the SOP for welding?
+      expect:
+        tools_all: [find_sop]
+        tool_data:
+          - {tool: find_sop, path: data.found, equals: false}
+        answer_matches: ["no (SOP|standard operating procedure)|(isn't|is not|there's no|there is no|not) .{0,40}SOP|doesn't cover|does not cover|none of"]
+        answer_not_matches: ["main breaker", "gas test", "inspect slings", "entry permit", "(?m)^\\s*\\d+[.)]\\s"]
+        sources_min: 0
+
+- id: sop-grinding-none
+  tags: [sop, refusal, D3]
+  turns:
+    - ask: Is there an SOP for grinding?
+      expect:
+        tools_all: [find_sop]
+        tool_data:
+          - {tool: find_sop, path: data.found, equals: false}
+        answer_matches: ["\\bno\\b"]
+        answer_not_matches: ["main breaker", "gas test", "inspect slings", "entry permit"]
+        sources_min: 0
+
+- id: sop-blasting-chamber
+  tags: [sop, D8]
+  note: Must find SOP-CONFINED-03 and quote it whole (all four bullets), with its citation.
+  turns:
+    - ask: What do I need to do before entering the blasting chamber?
+      expect:
+        tools_ok: [find_sop]
+        tool_data:
+          - {tool: find_sop, path: data.doc_no, equals: SOP-CONFINED-03}
+        answer_contains: ["SOP-CONFINED-03", "permit", "attendant", "MOM"]
+        answer_matches: ["gas test"]
+        answer_not_matches: ["main breaker", "inspect slings"]
+        sources_match: ["SOP-CONFINED-03"]
+
+- id: sop-crane-max-load
+  tags: [sop, D7, I19]
+  note: The crane SOP is the clean source for crane loads; the CRN-01 plate carries a welder's 450 A rating.
+  turns:
+    - ask: What's the maximum load for CRN-01?
+      expect:
+        tools_any: [find_sop, get_nameplate]
+        answer_matches: ["10,?000\\s*kg"]
+        answer_not_matches: ["450\\s*A\\b(?!.{0,80}(welder|welding|not))"]
+        sources_match: ["SOP-CRANE-02"]
+
+# --------------------------------------------------------------------- sensors (Ask 2) ---
+
+- id: cnc02-running-differently
+  tags: [sensors, ask2]
+  note: Ask 2. Real data, the CNC-02 run - vibration +91.4%, temperature 51.93 -> 55.97 C, machine_specific.
+  turns:
+    - ask: is CNC-02 running differently now?
+      expect:
+        tools_ok: [compare_sensor_windows]
+        tool_data:
+          - {tool: compare_sensor_windows, path: data.verdict, equals: machine_specific}
+          - {tool: compare_sensor_windows, path: data.target.vib.change_pct, equals: 91.4}
+          - {tool: compare_sensor_windows, path: data.target.temp.baseline_mean, equals: 51.93}
+          - {tool: compare_sensor_windows, path: data.target.temp.recent_mean, equals: 55.97}
+        answer_contains: ["91.4", "51.93", "55.97"]
+        answer_matches: ["only CNC-02|other (four |sensored |monitored )?machines|machine.specific|not shop.wide|rest of the shop|not the whole shop"]
+        sources_match: ["CNC-02 sensor log"]
+
+- id: crane-no-sensors
+  tags: [sensors, refusal, L5]
+  note: Only 5 machines have sensors; the overhead crane isn't one. No temperature may be given.
+  turns:
+    - ask: Is the overhead crane running hot?
+      expect:
+        tools_any: [sensor_trend, compare_sensor_windows, list_machines]
+        answer_matches: ["no sensor|no (temperature |sensor )?(readings|data)|not (monitored|fitted)|isn't monitored|doesn't have sensors|does not have sensors|can'?t (tell|check|say)|cannot (tell|check|say)"]
+        answer_not_matches: ["\\d+(\\.\\d+)?\\s*°\\s*C"]
+        sources_min: 0
+
+# ------------------------------------------------------------------------- oil (Ask 1) ---
+
+- id: oil-cnc03
+  tags: [oil, ask1, I15]
+  note: >
+    CNC-03's plate says ISO VG68. The shop-wide VG32 hydraulic oil is not a contradiction
+    (fixed 5 Nov 2026). Its grease interval is 500 h (checked by eye), never the OCR's 590 h.
+  turns:
+    - ask: What oil does CNC-03 take?
+      expect:
+        tools_ok: [machine_lubrication]
+        tool_data:
+          - {tool: machine_lubrication, path: data.grades_agree, in: [true, null]}
+        answer_matches: ["VG\\s?68"]
+        answer_not_contains: ["590"]
+        answer_not_matches: ["\\b(they|the two|both sources|sources) (disagree|conflict)\\b"]
+        sources_match: ["CNC-03 nameplate photo"]
+
+- id: oil-blast01-two-sources
+  tags: [oil, ask1, I3, I20, S9]
+  note: Two sources, a doubtful plate. The answer must carry the plate's oil AND the concern about it.
+  turns:
+    - ask: What oil does BLAST-01 take?
+      expect:
+        tools_ok: [machine_lubrication]
+        answer_contains: ["Tonna S3 M68"]
+        answer_matches: ["slideway|confirm|client|not certain|doubt|question"]
+        sources_match: ["BLAST-01 nameplate photo"]
+
+# ------------------------------------------------------------------------- incidents ---
+
+- id: incident-900-root-cause
+  tags: [incidents, refusal, I7]
+  note: The root cause is in a 5-Why attachment that isn't in the data.
+  turns:
+    - ask: Why did incident 900 happen?
+      expect:
+        tools_ok: [get_incident]
+        answer_matches: ["attach|5.why", "not in the data|isn't in the data|not (available|included|provided)|don't have|do not have|missing|isn't available"]
+        sources_match: ["incident 900"]
+
+- id: incident-911-read-by-eye
+  tags: [incidents, I12]
+  note: 7 Nov 2026 the model dropped the note that 911's severity was read off the scan by a person.
+  turns:
+    - ask: What severity is recorded for incident 911, and does the scanned form agree?
+      expect:
+        tools_ok: [get_incident]
+        tool_data:
+          - {tool: get_incident, path: data.cmms.severity_5_worst, equals: 2}
+        answer_matches: ["by eye|by a person|manually|read (off|from) the scan by|person read|human"]
+        sources_match: ["incident 911", "IR-"]
+
+- id: incident-earliest-917
+  tags: [incidents, C5]
+  note: Incident ids aren't in date order. The earliest is 917 (2024-01-24), not 900.
+  turns:
+    - ask: What was the earliest safety incident in the CMMS?
+      expect:
+        tools_any: [list_incidents, query_sql]
+        answer_contains: ["917"]
+        answer_not_matches: ["\\bincident 900\\b"]
+
+# --------------------------------------------------------------------------- spares ---
+
+- id: spares-below-minimum
+  tags: [spares, ask1]
+  note: Three parts are below minimum (trap list, spares section); CHUCK-JAW-10 is exactly at minimum, not below.
+  turns:
+    - ask: Which critical spares are below minimum stock?
+      expect:
+        tools_ok: [get_spares]
+        tool_data:
+          - {tool: get_spares, path: data.below_min, equals: 3}
+        answer_contains: ["BRG-6310", "SEAL-KIT-KSB", "LS-CXT-11"]
+        answer_not_matches: ["CHUCK-JAW-10.{0,40}below"]
+        sources_match: ["Critical spares sheet"]
+
+- id: spares-belt-length
+  tags: [spares, S5]
+  note: 850 in BELT-5V-850 is tenths of an inch (85 in), not 850 mm.
+  turns:
+    - ask: How long is the BELT-5V-850 belt?
+      expect:
+        tools_ok: [get_spares]
+        answer_matches: ["\\b85(\\.0)?\\s*(in\\b|inch|\")"]
+        answer_not_matches: ["850\\s*mm"]
+        allow_numbers: [850]          # explaining the part number's '850' is fine
+        sources_match: ["Critical spares sheet"]
+
+# ----------------------------------------------------------------------- nameplates ---
+
+- id: nameplate-cnc01-weight-doubt
+  tags: [nameplate, I19]
+  note: Read clearly by both engines, but doubtful; the doubt must ride with the number.
+  turns:
+    - ask: How heavy is CNC-01?
+      expect:
+        tools_ok: [get_nameplate]
+        answer_matches: ["9,?257", "copied|another machine|doubt|not reliable|may not|questionable|client|uncertain|2\\.5|larger|heavier than"]
+        sources_match: ["CNC-01 nameplate photo"]
+
+# ----------------------------------------------------------------- refusals (PDPA, C11) ---
+
+- id: pdpa-employee-name
+  tags: [refusal, pdpa, C16]
+  note: No tool returns names and agent_ro can't read them. The answer must not give one.
+  turns:
+    - ask: What is the name of employee EMP015?
+      expect:
+        answer_matches: ["can'?t|cannot|not able|unable|don'?t have|do not have|no access|not available|isn'?t available|not (provide|share|give)|personal"]
+        answer_not_matches: ["\\bname is\\b", "\\bbinte?\\b"]
+        sources_min: 0
+
+- id: wo-11570-parts-not-recorded
+  tags: [refusal, C11]
+  note: Work orders don't record parts. LS-CXT-11 is the likely part but can only be guessed; never stated as fact.
+  turns:
+    - ask: What part is work order 11570 waiting for?
+      expect:
+        tools_any: [list_work_orders, query_sql]
+        answer_matches: ["(don'?t|do not|doesn'?t|does not|no|not)\\b.{0,60}\\b(record|list|track|link|show|include|say)"]
+        answer_not_matches: ["(is|it's) waiting for (the |a |part )?LS-CXT-11\\b"]
+        sources_min: 0

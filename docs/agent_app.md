@@ -21,8 +21,8 @@ Needs, in `.env` (same file as the ingest scripts):
 ```bash
 AGENT_DB_USERNAME=agent_ro
 AGENT_DB_PASSWORD=...                                    # from agent_user.py
-OPENAI_API_KEY=...                                        # your class proxy member key
-OPENAI_BASE_URL=https://35-240-177-226.sslip.io           # the class proxy (llm-budget-proxy-setup.md)
+OPENAI_API_KEY=...                                        # your llm proxy member key
+OPENAI_BASE_URL=https://35-240-177-226.sslip.io           # the llm proxy (llm-proxy-setup.md)
 ```
 
 ## What it guarantees, in code
@@ -117,7 +117,7 @@ separately by `agent_tools.run_tool` on the `agent_tools` logger — the two log
 together give the full per-request trace the checklist asks for. **Logs stay in a file, not the database:** `agent_ro` is read-only by design, and logging
 to the DB would need a second writable account and a retention decision for the user's
 questions. **Not yet done:**
-tracking cumulative spend against the team budget from this log (the class proxy's
+tracking cumulative spend against the team budget from this log (the llm proxy's
 own `spend_report.py` / dashboard covers this today; a running total from the app's
 own logs would close the gap for weekly reporting).
 
@@ -146,7 +146,7 @@ a severity scale the user never named (no quote, an invented quote, a quote nami
 in `run_tool` itself (not a normal tool error) still propagates today — a deliberate
 choice to surface in a test, not a gap to silently paper over.
 
-**Not covered:** a real call to the class proxy. Before the demo, run
+**Not covered:** a real call to the llm proxy. Before the demo, run
 `python scripts/agent_app.py --debug "<question>"` against the real database and
 proxy for each of the trap-list kill-shot questions, same as the real-data
 verification pass for `agent_tools.py` ([`agent_tools.md`](agent_tools.md#checked-against-the-real-database-5-nov-2026)).
