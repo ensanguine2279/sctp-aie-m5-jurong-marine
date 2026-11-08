@@ -501,6 +501,37 @@ KNOWN_CONCERNS = {
 }
 
 
+# Plate fields whose real value is in an SOP, not on the plate: (machine, field) ->
+# (doc_no, a regex for the step that gives it). get_nameplate looks the step up itself and
+# returns it with its line. 8 Nov 2026: asked CRN-01's max load, the model read the plate's
+# welder rating, then told the user to "refer to SOP-CRANE-02" instead of looking it up.
+# Joined in code, not left to the model (HARNESS_CHECKLIST.md section 1).
+SOP_VALUES = {
+    ("CRN-01", "capacity_raw"): ("SOP-CRANE-02", r"\bmax(imum)?\s+load\b"),
+    ("CRN-02", "capacity_raw"): ("SOP-CRANE-02", r"\bmax(imum)?\s+load\b"),
+}
+
+
+def _sop_values(db: Db, mid: str) -> dict[str, dict]:
+    """{field: the current SOP step that gives this machine's value} for SOP_VALUES. Only a
+    step that names the machine counts. Missing SOP or step: nothing (the concern note,
+    which points to the SOP, still stands)."""
+    out = {}
+    for (m, f), (doc_no, pattern) in SOP_VALUES.items():
+        if m != mid:
+            continue
+        steps = db.query("SELECT doc_no, revision, rev_label, line_no, step_text, source_file, "
+                         "file_sha256 FROM sop_steps_audit WHERE doc_no = :d AND is_current = 1 "
+                         "ORDER BY step_no", {"d": doc_no})
+        hit = next((s for s in steps if re.search(pattern, str(s["step_text"]), re.I)
+                    and mid.lower() in str(s["step_text"]).lower()), None)
+        if hit:
+            out[f] = {"doc_no": doc_no, "revision": hit["revision"], "rev_label": hit["rev_label"],
+                      "line_no": hit["line_no"], "step_text": hit["step_text"],
+                      "source_file": hit["source_file"], "file_sha256": hit["file_sha256"]}
+    return out
+
+
 def field_flags(warnings: str | None) -> dict[str, list[str]]:
     """img_nameplates warnings ('ocr_disagreed_lubricant,lubricant_without_grade,...') ->
     {field: [flags]}. Flags it can't tie to a field go under '_other'."""
@@ -633,9 +664,20 @@ def get_nameplate(db: Db, a: MachineArgs) -> ToolResult:
     data = {"machine_id": mid, "machine_name": r.get("machine_name"), "has_nameplate": True,
             "cmms_model": r.get("logged_model"), "model_agrees": r.get("model_agrees"),
             "read_by": r.get("ocr_engine"), "fields": fields}
-    return ToolResult("get_nameplate", True, data=data, notes=notes, sources=[
-        cite("image", "img_nameplates_audit", file=r.get("source_file"),
-             sha256=r.get("image_sha256"), what=f"{mid} nameplate photo")])
+    sources = [cite("image", "img_nameplates_audit", file=r.get("source_file"),
+                    sha256=r.get("image_sha256"), what=f"{mid} nameplate photo")]
+    from_sop = _sop_values(db, mid)
+    for f, s in from_sop.items():
+        notes.append(f"{f}: for {mid}, {s['doc_no']} ({s['rev_label']}), line {s['line_no']}, "
+                     f"says: \"{s['step_text']}\". Give that as the value, cited to the SOP; "
+                     f"the plate's {f} is not it.")
+        sources.append(cite("sop", "sop_steps_audit", file=s["source_file"],
+                            locator=f"line {s['line_no']}", sha256=s["file_sha256"],
+                            what=f"{s['doc_no']} {s['rev_label'] or ''}".strip()))
+    if from_sop:
+        data["from_sop"] = {f: {k: v for k, v in s.items() if k not in ("source_file", "file_sha256")}
+                            for f, s in from_sop.items()}
+    return ToolResult("get_nameplate", True, data=data, notes=notes, sources=sources)
 
 
 # ================================================================= spares ===
@@ -934,9 +976,12 @@ def count_incidents(db: Db, a: CountArgs) -> ToolResult:
         data["unplaced"] = [{"incident_id": int(r["incident_id"]), "incident_date": r["incident_date"],
                              "severity_as_logged": _logged(r)}
                             for r in unplaced.to_dict("records")]
-        notes.append(f"{len(unplaced)} incident(s) in July 2025 can't be placed on one scale "
-                     f"(the exact switch day is unconfirmed, trap list C2), so they are not in "
-                     f"the count: mention them.")
+        # The ids go in the note, not only in data.unplaced: the eval run of 8 Nov 2026
+        # said "2 additional incidents" without naming them.
+        ids = ", ".join(str(int(x)) for x in unplaced["incident_id"])
+        notes.append(f"{len(unplaced)} incident(s) in July 2025 ({ids}) can't be placed on one "
+                     f"scale (the exact switch day is unconfirmed, trap list C2), so they are "
+                     f"not in the count: name them in the answer.")
     if a.machine:
         notes.append("Some incident descriptions don't fit the machine they're logged on "
                      "(trap list C6); quote them, don't reason from them.")
@@ -1129,8 +1174,18 @@ def list_work_orders(db: Db, a: WorkOrderArgs) -> ToolResult:
                                 "description": r["description"], "hours": r["duration_hrs"],
                                 "cost_sgd": r["cost_sgd"], "status": r["status"],
                                 "dump_line": r["source_line"]} for r in newest.to_dict("records")]
+        # 8 Nov 2026: asked what WO 11570 waits for, the model dropped the general C11 note.
+        # The gap now sits on the row itself, next to the status it explains.
+        awaiting = [w for w in data["work_orders"]
+                    if "await" in str(w["status"]).lower() and "part" in str(w["status"]).lower()]
+        for w in awaiting:
+            w["part_awaited"] = "not recorded in the CMMS (trap list C11)"
         if len(df) > MAX_ROWS:
             notes.append(f"Newest {MAX_ROWS} of {len(df)} listed; the totals cover all of them.")
+        if awaiting:
+            notes.append(f"Work order(s) {', '.join(str(w['wo_id']) for w in awaiting)} are "
+                         f"awaiting parts, but the CMMS doesn't record which part (trap list "
+                         f"C11). If asked, say the data doesn't record it; don't name a part.")
         notes.append("Work orders record no parts used (trap list C11).")
     else:
         notes.append("No work orders in the CMMS match.")
@@ -1344,13 +1399,28 @@ def compare_sensor_windows(db: Db, a: CompareArgs) -> ToolResult:
     others_up = sorted(m for m, s in others.items() if any(v and v["elevated"] for v in s.values()))
     verdict = ("not_elevated" if not target_up else
                "shop_wide" if others_up else "machine_specific")
+    # The verdict in words, first among the notes. Eval rerun 8 Nov 2026: the answer gave
+    # every number but not the conclusion (only CNC-02, not the shop); it was only in
+    # data.verdict.
+    metrics = " and ".join({"vib": "vibration", "temp": "temperature"}[k] for k in target_up)
+    rest = ", ".join(sorted(others))
+    if verdict == "machine_specific":
+        said = (f"Verdict: {mid} is running differently ({metrics} elevated), and none of the "
+                f"other sensored machines ({rest}) is: it is this machine, not a shop-wide "
+                f"change. Say so in the answer.")
+    elif verdict == "shop_wide":
+        said = (f"Verdict: {mid} is running differently ({metrics} elevated), but so are "
+                f"{', '.join(others_up)}: a shop-wide change, not this machine alone. Say so.")
+    else:
+        said = (f"Verdict: {mid} is not running differently by the rule: no metric is "
+                f"elevated. Say so.")
     return ToolResult("compare_sensor_windows", True, data={
         "machine_id": mid, "verdict": verdict, "elevated_metrics": target_up,
         "other_machines_elevated": others_up, "rule": VERDICT_RULE,
         "baseline": {"from": b0, "to": b1}, "recent": {"from": r0, "to": r1},
         "target": target, "others": others,
         "chart_weekly": chart},
-        notes=list(SENSOR_NOTES) + ["In chart_weekly, a week with days < 7 is partial (the "
+        notes=[said] + list(SENSOR_NOTES) + ["In chart_weekly, a week with days < 7 is partial (the "
                                     "data starts on a Thursday, 1 Jan 2026): plot it, but don't "
                                     "read it as a full week."],
         sources=sources)
