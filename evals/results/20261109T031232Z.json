@@ -1,0 +1,127 @@
+{
+  "run": "20261109T031232Z",
+  "model": "gpt-4o-mini",
+  "cases_file": "/home/hakngrow/Projects/sctp/module5/jurong-marine/evals/cases.yaml",
+  "repeat": 1,
+  "summary": "Cases: 1  passed 1  failed 0  errors 0  skipped 0\nModel calls: 2 (gpt-4o-mini)  tokens: 6557 in + 184 out  time: 7 s\nSpend: $0.0006 as charged by the proxy (x-litellm-response-cost); $0.0011 at list price",
+  "results": [
+    {
+      "id": "sop-blasting-chamber",
+      "status": "PASS",
+      "turns": [
+        {
+          "question": "What do I need to do before entering the blasting chamber?",
+          "answer": "Before entering the blasting chamber, you need to follow these steps from SOP-CONFINED-03 (rev 2, Sep 2025):\n\n- An entry permit is required from the WSH officer, valid for a maximum of 8 hours.\n- Conduct a gas test before entry and every 2 hours thereafter: O2 levels must be between 19.5-23.5%, LEL must be less than 10%, H2S must be less than 10ppm, and CO must be less than 30ppm.\n- An attendant must be stationed outside at all times with communication.\n- Notification to the Ministry of Manpower is required for vessel tank entry (as per shipyard regulations).\n\n[Source: SOP-CONFINED-03, lines 3-6]",
+          "sources": [
+            "SOP-CONFINED-03 rev 2, Sep 2025: SOP-CONFINED-03.txt, lines 3-6 (sop_steps_audit), SHA-256 74fd13cfdb93…"
+          ],
+          "notes": [
+            "Step 1 refers to the entry permit, which isn't in the data.",
+            "Quote the SOP whole, with its revision; it is the only revision in the data (trap list D9)."
+          ],
+          "tools": [
+            {
+              "name": "find_sop",
+              "arguments": {
+                "question": "What do I need to do before entering the blasting chamber?"
+              },
+              "sent": {
+                "question": "What do I need to do before entering the blasting chamber?"
+              },
+              "ok": true,
+              "error_code": null,
+              "result": {
+                "tool": "find_sop",
+                "ok": true,
+                "data": {
+                  "found": true,
+                  "doc_no": "SOP-CONFINED-03",
+                  "revision": 2,
+                  "score": 5.0,
+                  "quote_whole": "SOP-CONFINED-03 — CONFINED SPACE ENTRY (rev 2, Sep 2025)\nApplies to: blasting chamber (BLAST-01), ballast tanks on client vessels, test pump sump.\n- Entry permit required from WSH officer. Valid 8 hours max.\n- Gas test before entry AND every 2 hours: O2 19.5-23.5%, LEL <10%, H2S <10ppm, CO <30ppm.\n- Attendant stationed outside at all times with communication.\n- MOM notification required for vessel tank entry (Shipyard regs).\n[Source: SOP-CONFINED-03, lines 3-6]",
+                  "other_matches": []
+                },
+                "sources": [
+                  {
+                    "kind": "sop",
+                    "object": "sop_steps_audit",
+                    "file": "SOP-CONFINED-03.txt",
+                    "locator": "lines 3-6",
+                    "sha256": "74fd13cfdb939d805234ca616dbc1ae5e2c8d18faf34a21ce0bf2c01b16ba066",
+                    "what": "SOP-CONFINED-03 rev 2, Sep 2025",
+                    "label": "SOP-CONFINED-03 rev 2, Sep 2025: SOP-CONFINED-03.txt, lines 3-6 (sop_steps_audit), SHA-256 74fd13cfdb93…"
+                  }
+                ],
+                "notes": [
+                  "Step 1 refers to the entry permit, which isn't in the data.",
+                  "Quote the SOP whole, with its revision; it is the only revision in the data (trap list D9)."
+                ],
+                "error": null,
+                "ms": 449
+              }
+            }
+          ],
+          "events": [
+            {
+              "ts": "2026-11-09T03:12:35.400+00:00",
+              "event": "chat_call",
+              "round": 1,
+              "model": "gpt-4o-mini",
+              "prompt_tokens": 3072,
+              "completion_tokens": 26,
+              "tool_calls": [
+                "find_sop"
+              ],
+              "ms": 3035.0
+            },
+            {
+              "ts": "2026-11-09T03:12:35.850+00:00",
+              "event": "tool_call",
+              "round": 1,
+              "tool": "find_sop",
+              "arguments": "{\"question\":\"What do I need to do before entering the blasting chamber?\"}",
+              "ok": true,
+              "error_code": null,
+              "n_sources": 1,
+              "ms": 449.4
+            },
+            {
+              "ts": "2026-11-09T03:12:39.724+00:00",
+              "event": "chat_call",
+              "round": 2,
+              "model": "gpt-4o-mini",
+              "prompt_tokens": 3485,
+              "completion_tokens": 158,
+              "tool_calls": [],
+              "ms": 3873.3
+            },
+            {
+              "ts": "2026-11-09T03:12:39.727+00:00",
+              "event": "turn",
+              "question": "What do I need to do before entering the blasting chamber?",
+              "tools_called": [
+                "find_sop"
+              ],
+              "n_sources": 1
+            }
+          ],
+          "seconds": 7.4,
+          "prompt_tokens": 6557,
+          "completion_tokens": 184,
+          "proxy_cost": 0.0006235500000000001,
+          "model_calls": 2,
+          "oracle": {},
+          "failures": [],
+          "warnings": []
+        }
+      ],
+      "failures": [],
+      "warnings": [],
+      "seconds": 7.4,
+      "prompt_tokens": 6557,
+      "completion_tokens": 184,
+      "proxy_cost": 0.0006235500000000001,
+      "model_calls": 2
+    }
+  ]
+}

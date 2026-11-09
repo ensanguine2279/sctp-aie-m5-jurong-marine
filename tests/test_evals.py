@@ -492,3 +492,23 @@ def test_the_runner_wont_start_without_the_guards_name_list(monkeypatch, capsys)
     monkeypatch.setattr(app.at, "connect", lambda *a, **k: pytest.fail("connected anyway"))
     assert ev.main(["--only", "oil-cnc03", "--log-file", ""]) == 2
     assert "guard_names.py" in capsys.readouterr().err
+
+
+def test_the_app_and_the_runner_both_see_the_proxys_cost():
+    """agent_app.complete() reads the header through with_raw_response; the runner's
+    wrapper passes that through and records the same call."""
+    class Raw:
+        headers = {"x-litellm-response-cost": "0.0003"}
+
+        def parse(self):
+            return Resp(Msg(content="ok"))
+
+    class Inner:
+        class with_raw_response:
+            @staticmethod
+            def create(**kw):
+                return Raw()
+
+    client = ev.CostTrackingClient(type("Cl", (), {"chat": type("Ch", (), {"completions": Inner})()})())
+    r = app.complete(client, "m", [], [])
+    assert r.cost_usd == 0.0003 and client.costs == [0.0003]

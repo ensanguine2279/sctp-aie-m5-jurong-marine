@@ -93,7 +93,7 @@ including the PDPA one, and a
 New conversation button. Its trace comes from the same events as the log, collected per
 question, and the page also appends them to `logs/agent_app.jsonl` (run from the folder
 you start Streamlit in), so the file has the same lines as the table. `tests/test_agent_ui.py`
-(13 tests, no Streamlit needed) covers the trace table; the page itself is checked by
+(15 tests, no Streamlit needed) covers the trace table; the page itself is checked by
 running it. Setting `APP_PASSWORD` puts a password box in front of the page, and
 `AGENT_LOG_FILE=off` stops it writing the file (it still logs to stderr). To host it, see
 [`agent_ui.md`](agent_ui.md#deploying-on-google-cloud-run).
@@ -108,7 +108,7 @@ Every line carries a UTC `ts` (ISO 8601, milliseconds):
   `needs_clarification`), number of sources, and how long the tool took. This is how you
   see what the model actually asked for.
 - `chat_call`: round number, model, prompt/completion tokens, which tools were
-  requested, and how long the call took.
+  requested, how long the call took, and `cost_usd`, what the proxy charged for it.
 - `chat_error`: a failed chat call and why.
 - `scale_guess_blocked`: the model gave a severity scale the user never stated; it was removed before the tool ran.
 - `clarification_returned`: a tool asked a question and the loop passed it on.
@@ -120,7 +120,7 @@ Every line carries a UTC `ts` (ISO 8601, milliseconds):
 - `guard_not_ready`: the guardrail's staff name list isn't loaded, so the question was
   refused without a model call (fail closed; the CLI and the page don't start in that state).
 - `turn`: one line per question — the question (truncated), every tool called, how
-  many sources came back. A refused question has `refused` set, and a PDPA one is logged as
+  many sources came back, `model_calls` and the question's `cost_usd`. A refused question has `refused` set, and a PDPA one is logged as
   `[withheld: pdpa]`, never its text (it may hold a name).
 - `eval_case`: written by `run_evals.py` before each eval turn (case id and turn), so an
   eval run can be replayed from the same file.
@@ -130,10 +130,33 @@ instead). Per-tool detail (the actual SQL, row counts, timing) is already logged
 separately by `agent_tools.run_tool` on the `agent_tools` logger — the two logs
 together give the full per-request trace the checklist asks for. **Logs stay in a file, not the database:** `agent_ro` is read-only by design, and logging
 to the DB would need a second writable account and a retention decision for the user's
-questions. **Not yet done:**
-tracking cumulative spend against the team budget from this log (the llm proxy's
-own `spend_report.py` / dashboard covers this today; a running total from the app's
-own logs would close the gap for weekly reporting).
+questions.
+
+### Spend: what each question cost, and the budget (#7)
+
+The LiteLLM proxy already records every call and its cost, so the app reads the proxy's own
+figures rather than estimating from tokens:
+
+| What | Where it comes from | How current |
+|---|---|---|
+| **Cost of each model call** | The `x-litellm-response-cost` header the proxy puts on every response. `complete()` reads it through the OpenAI SDK's raw-response API and logs it on the `chat_call` line as `cost_usd` | Immediate, exact as charged |
+| **Cost of each question** | The sum, on the `turn` line (`model_calls`, `cost_usd`), and in the `usage` dict `ask()` fills for the caller. `cost_usd` is null if any call came back without a cost; a refused question costs 0, with 0 model calls | Immediate |
+| **The key's spend against its cap** | `GET /key/info` on the proxy, asked with the app's own key: `scripts/spend.py`. The same figure the proxy blocks the key on. No admin key is used | About a minute behind (the proxy writes spend in batches) |
+
+```bash
+python scripts/spend.py          # Key capstone: $3.42 of $10.00 (34%), resets 2026-12-01
+python scripts/spend.py --json   # with uv: uv run python scripts/spend.py
+```
+
+On the page, each answer has a line such as "2 model calls, 9,936 tokens, $0.0012", each
+model row in **What happened** shows its cost, and the sidebar shows the session's total and
+the key's spend against its budget, re-read from the proxy after every answer. From 80% of the
+budget the sidebar shows a warning, so a nearly spent key is seen before the demo rather than
+as a budget error during it. Team-wide spend stays with the proxy's own tools
+(`spend_report.py`, `daily_report.py`, the `/ui` dashboard; see
+[llm-budget-proxy-setup.md](llm-budget-proxy-setup.md#4-watch-spending-admin)); the app never
+holds an admin key. `spend.py` never raises: a down proxy or a refused request comes back as
+"Spend not available: ...".
 
 ### Reading the log of one question: a working example
 
@@ -211,7 +234,7 @@ unchanged. See the task list for when it gets built.
 
 ## Tests
 
-`tests/test_agent_app.py` (28 tests, no database, no real LLM call): the loop's own
+`tests/test_agent_app.py` (33 tests, no database, no real LLM call): the loop's own
 logic only — `agent_tools.run_tool` and the chat call are both stubbed, since tool
 correctness is already covered by `tests/test_agent_tools.py`. Covers: a plain
 text answer needing no tool; one tool call round-tripping into the next model call;
@@ -221,7 +244,7 @@ with an honest message rather than looping forever; the assistant-message shape
 matching what the API expects, with and without tool calls; source label
 deduplication, keeping first-seen order; a new conversation starting with only the
 system prompt; and `ask()` appending the question, returning formatted sources, and
-a severity scale the user never named (no quote, an invented quote, a quote naming no scale) being stripped so the tool asks, and one the user did name passing; a clarification going straight to the user with no further model call; logging one `turn` summary line; every log line carrying a timestamp and each tool call logging its arguments and refusal code. **The guardrail in `ask()`:** a refused question never reaching the model; the question kept out of `messages` and a PDPA one out of the log; the conversation carrying on after a refusal with nothing of the refused question in the next prompt; an answer with personal data replaced, in `messages` too, and absent from the log; an ordinary answer passing unchanged; without the staff name list, every question refused with no model call and the app refusing to start. The guard's own rules are tested in `tests/test_guardrail.py` ([`guardrail.md`](guardrail.md#tests)). One test documents, rather than hides, that a bug
+a severity scale the user never named (no quote, an invented quote, a quote naming no scale) being stripped so the tool asks, and one the user did name passing; a clarification going straight to the user with no further model call; logging one `turn` summary line; every log line carrying a timestamp and each tool call logging its arguments and refusal code. **The guardrail in `ask()`:** a refused question never reaching the model; the question kept out of `messages` and a PDPA one out of the log; the conversation carrying on after a refusal with nothing of the refused question in the next prompt; an answer with personal data replaced, in `messages` too, and absent from the log; an ordinary answer passing unchanged; without the staff name list, every question refused with no model call and the app refusing to start. **Spend:** the proxy's cost header read on each call, an unknown cost kept as unknown (never 0), each call's and question's cost logged and handed out of `ask()`, a call without a cost making the question total unknown, a refused question costing nothing. `tests/test_spend.py` (10 tests, no network, and no settings from your shell) covers `spend.py`: the proxy's reply as returned for the app's key on 9 Nov 2026, the percentage and the 80% warning, a key with no cap, the request going to `/key/info` with the app's key, and a down proxy, a refused key or a bad reply never raising. The guard's own rules are tested in `tests/test_guardrail.py` ([`guardrail.md`](guardrail.md#tests)). One test documents, rather than hides, that a bug
 in `run_tool` itself (not a normal tool error) still propagates today — a deliberate
 choice to surface in a test, not a gap to silently paper over.
 

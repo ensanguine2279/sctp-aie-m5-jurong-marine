@@ -442,3 +442,83 @@ def test_the_app_wont_start_without_the_name_list(monkeypatch, capsys):
     with pytest.raises(SystemExit) as e:
         app.main()
     assert "guard_names.py" in str(e.value.code) and "build-names" in str(e.value.code)
+
+
+# --------------------------------------------- what each call cost (#7, the proxy) ---
+
+class _Raw:
+    def __init__(self, resp, cost):
+        self._resp = resp
+        self.headers = {} if cost is None else {"x-litellm-response-cost": cost}
+
+    def parse(self):
+        return self._resp
+
+
+def _proxy_client(*replies):
+    """A client shaped like the OpenAI SDK behind LiteLLM: with_raw_response gives the
+    headers. replies: (FakeResponse, cost header or None), one per call."""
+    it = iter(replies)
+
+    class RawApi:
+        @staticmethod
+        def create(**kw):
+            resp, cost = next(it)
+            return _Raw(resp, cost)
+
+    class Completions:
+        with_raw_response = RawApi
+
+        @staticmethod
+        def create(**kw):
+            raise AssertionError("the raw API should be used")
+
+    return type("Client", (), {"chat": type("Chat", (), {"completions": Completions})()})()
+
+
+def test_complete_reads_the_cost_the_proxy_charged():
+    r = app.complete(_proxy_client((FakeResponse(FakeMessage(content="hi")), "0.000412")),
+                     "m", [], [])
+    assert r.cost_usd == 0.000412 and r.choices[0].message.content == "hi"
+
+
+def test_without_the_header_or_the_raw_api_the_cost_is_unknown_not_zero():
+    assert app.complete(_proxy_client((FakeResponse(FakeMessage(content="x")), None)),
+                        "m", [], []).cost_usd is None
+    plain = type("C", (), {"chat": type("Ch", (), {"completions": type("Co", (), {
+        "create": staticmethod(lambda **kw: FakeResponse(FakeMessage(content="y")))})()})()})()
+    r = app.complete(plain, "m", [], [])
+    assert r.cost_usd is None and r.choices[0].message.content == "y"
+
+
+def test_each_call_and_each_question_logs_its_cost_and_ask_hands_it_out(monkeypatch, caplog):
+    call = FakeToolCall("c1", "list_machines", "{}")
+    client = _proxy_client((FakeResponse(FakeMessage(content=None, tool_calls=[call])), "0.0004"),
+                           (FakeResponse(FakeMessage(content="12 machines.")), "0.0002"))
+    monkeypatch.setattr(app.at, "run_tool", lambda db, name, args: FakeToolResult())
+    usage = {"stale": 1}
+    with caplog.at_level("INFO", logger="agent_app"):
+        app.ask(None, client, app.new_conversation(), "how many machines?", usage=usage)
+    lines = [json.loads(r.message) for r in caplog.records]
+    assert [x["cost_usd"] for x in lines if x["event"] == "chat_call"] == [0.0004, 0.0002]
+    turn = [x for x in lines if x["event"] == "turn"][0]
+    assert turn["model_calls"] == 2 and turn["cost_usd"] == pytest.approx(0.0006)
+    assert usage["model_calls"] == 2 and usage["cost_usd"] == pytest.approx(0.0006)
+    assert usage["prompt_tokens"] == 20 and usage["cost_complete"] is True and "stale" not in usage
+
+
+def test_a_call_without_a_cost_makes_the_question_total_unknown(monkeypatch, caplog):
+    client = _proxy_client((FakeResponse(FakeMessage(content="hi")), None))
+    usage = {}
+    with caplog.at_level("INFO", logger="agent_app"):
+        app.ask(None, client, app.new_conversation(), "hello", usage=usage)
+    turn = [json.loads(r.message) for r in caplog.records if '"turn"' in r.message][0]
+    assert turn["cost_usd"] is None and usage["cost_complete"] is False
+
+
+def test_a_refused_question_costs_nothing(monkeypatch):
+    monkeypatch.setattr(app, "complete", _never)
+    usage = {}
+    app.ask(None, client=None, messages=app.new_conversation(), question="Who is EMP026?",
+            usage=usage)
+    assert usage["model_calls"] == 0 and usage["cost_usd"] == 0 and usage["cost_complete"]

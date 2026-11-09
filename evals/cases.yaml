@@ -172,14 +172,17 @@ cases:
 
 - id: sop-blasting-chamber
   tags: [sop, D8]
-  note: Must find SOP-CONFINED-03 and quote it whole (all four bullets), with its citation.
+  note: >
+    Must find SOP-CONFINED-03 and quote it whole (all four bullets), with its citation.
+    9 Nov 2026 (--repeat 3): failed 1 of 3 on wording: all four bullets were there, but MOM
+    was spelled out as "Ministry of Manpower". Either form now counts for the last bullet.
   turns:
     - ask: What do I need to do before entering the blasting chamber?
       expect:
         tools_ok: [find_sop]
         tool_data:
           - {tool: find_sop, path: data.doc_no, equals: SOP-CONFINED-03}
-        answer_contains: ["SOP-CONFINED-03", "permit", "attendant", "MOM"]
+        answer_contains: ["SOP-CONFINED-03", "permit", "attendant", ["MOM", "Ministry of Manpower"]]
         answer_matches: ["gas test"]
         answer_not_matches: ["main breaker", "inspect slings"]
         sources_match: ["SOP-CONFINED-03"]

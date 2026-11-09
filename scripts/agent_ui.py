@@ -154,6 +154,24 @@ def show_photos(st, items: list[dict]) -> None:
                 st.caption(it["note"])
 
 
+def cost_line(usage: dict) -> str:
+    """Under each answer: what the question took. The cost is what the LiteLLM proxy
+    charged (x-litellm-response-cost); 'at least' when a call came back without one."""
+    n = usage.get("model_calls", 0)
+    if not n:
+        return "No model calls: answered in code."
+    calls = f"{n} model call{'s' if n != 1 else ''}"
+    tokens = f"{usage.get('prompt_tokens', 0) + usage.get('completion_tokens', 0):,} tokens"
+    cost = usage.get("cost_usd") or 0.0
+    if not usage.get("cost_complete", True):
+        return f"{calls}, {tokens}, at least ${cost:.4f} (a call came back without a cost)"
+    return f"{calls}, {tokens}, ${cost:.4f}"
+
+
+def session_line(spent: float, questions: int) -> str:
+    return f"This session: ${spent:.4f} over {questions} question{'s' if questions != 1 else ''}"
+
+
 def password_ok(typed: str, expected: str) -> bool:
     """Constant-time check of the page password."""
     return hmac.compare_digest(typed.encode(), expected.encode())
@@ -166,7 +184,10 @@ def trace_rows(events: list[dict]) -> list[dict]:
         kind = e.get("event")
         if kind == "chat_call":
             tools = ", ".join(e.get("tool_calls") or []) or "(answered)"
-            rows.append({"step": f"model, round {e['round']}", "detail": f"asked for: {tools}",
+            cost = e.get("cost_usd")
+            rows.append({"step": f"model, round {e['round']}",
+                         "detail": f"asked for: {tools}"
+                                   + (f" (${cost:.4f})" if cost is not None else ""),
                          "seconds": round(e["ms"] / 1000, 1)})
         elif kind == "tool_call":
             state = "ok" if e.get("ok") else f"refused: {e.get('error_code')}"
@@ -234,6 +255,12 @@ def main() -> None:
         st.error(f"Couldn't connect as the agent user: {e}")
         st.stop()
 
+    import spend
+
+    @st.cache_data(ttl=30, show_spinner=False)
+    def key_budget():
+        return spend.key_spend()                   # never raises; cached 30 s
+
     if "messages" not in st.session_state:
         st.session_state.messages = app.new_conversation()
         st.session_state.shown = []   # what to draw: role, text, sources, trace
@@ -247,12 +274,28 @@ def main() -> None:
         if st.button("New conversation", use_container_width=True):
             st.session_state.messages = app.new_conversation()
             st.session_state.shown = []
+            st.session_state.spent, st.session_state.questions = 0.0, 0
             st.rerun()
         st.caption(f"Model: {app.MODEL}")
+        # Spend (#7): this session from each call's cost header, exact and immediate; the
+        # key's total against its cap from the proxy (about a minute behind).
+        st.subheader("Spend")
+        spend_box = st.empty()                     # filled now, and again after an answer
+
+    def show_spend():
+        with spend_box.container():
+            st.caption(session_line(st.session_state.get("spent", 0.0),
+                                    st.session_state.get("questions", 0)))
+            ks = key_budget()
+            (st.warning if ks.warn or not ks.ok else st.caption)(spend.budget_line(ks))
+
+    show_spend()
 
     for m in st.session_state.shown:
         with st.chat_message(m["role"]):
             st.write(m["text"])
+            if m.get("cost"):
+                st.caption(m["cost"])
             if m.get("sources"):
                 st.markdown("**Sources**\n" + "\n".join(f"- {s}" for s in m["sources"]))
             show_notes(st, m.get("notes") or [])
@@ -272,13 +315,21 @@ def main() -> None:
         lg, handler = trace_logger(log_to_file=True)
         raw: list[dict] = []
         tool_notes: list[str] = []
+        usage: dict = {}
         with st.spinner("Asking the model and checking the data..."):
             answer, sources = app.ask(db, client, st.session_state.messages, question,
-                                      logger=lg, raw_sources=raw, notes=tool_notes)
+                                      logger=lg, raw_sources=raw, notes=tool_notes,
+                                      usage=usage)
             photos = photo_items(db, raw)
             notes = app.format_notes(tool_notes)
+        st.session_state.spent = st.session_state.get("spent", 0.0) + (usage.get("cost_usd") or 0)
+        st.session_state.questions = st.session_state.get("questions", 0) + 1
+        key_budget.clear()                         # re-read the key's spend from the proxy
+        show_spend()                               # and redraw the sidebar with this question
         rows = trace_rows(handler.events)
+        cost = cost_line(usage)
         st.write(answer)
+        st.caption(cost)
         if sources:
             st.markdown("**Sources**\n" + "\n".join(f"- {s}" for s in sources))
         show_notes(st, notes)
@@ -288,7 +339,7 @@ def main() -> None:
                 st.table(rows)
     st.session_state.shown.append({"role": "assistant", "text": answer,
                                    "sources": sources, "notes": notes, "photos": photos,
-                                   "trace": rows})
+                                   "trace": rows, "cost": cost})
 
 
 if __name__ == "__main__":

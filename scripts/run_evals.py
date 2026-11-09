@@ -441,9 +441,31 @@ class EventCapture(logging.Handler):
             pass
 
 
+class _RawCompletions:
+    """with_raw_response, passed through and recorded: agent_app.complete() reads the cost
+    header itself (for its log and the page), and the runner records the same call."""
+
+    def __init__(self, inner_raw, costs: list):
+        self._inner_raw, self._costs = inner_raw, costs
+
+    def create(self, **kw):
+        raw = self._inner_raw.create(**kw)
+        h = raw.headers.get("x-litellm-response-cost")
+        try:
+            self._costs.append(float(h) if h is not None else None)
+        except ValueError:
+            self._costs.append(None)
+        return raw
+
+
 class _Completions:
     def __init__(self, inner, costs: list):
         self._inner, self._costs = inner, costs
+
+    @property
+    def with_raw_response(self):
+        raw_api = getattr(self._inner, "with_raw_response", None)
+        return None if raw_api is None else _RawCompletions(raw_api, self._costs)
 
     def create(self, **kw):
         raw_api = getattr(self._inner, "with_raw_response", None)
