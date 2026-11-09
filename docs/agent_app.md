@@ -38,11 +38,13 @@ just asked for in the prompt:
 | C1 (severity scale) | The model can't pick a severity scale for the user | `count_incidents` / `list_incidents` take a `scale_quote`: the user's own words naming the scale. `scale_guessed()` checks the quote is really in a user message and names a scale ("5 is worst", "the current scale", "the old scale"; "severity 4 or worse" names none). If not, the scale is removed before the tool runs, so the tool returns `needs_clarification` and the user is asked. Found on the real run, 5 Nov 2026: gpt-4o-mini sent `"severity_scale":"5_is_worst"` on its own. Logged as `scale_guess_blocked` |
 | 4 (honest degradation) | A failure never becomes an invented value | A tool that asks for a clarification (`needs_clarification`, `ambiguous_machine`, e.g. a severity number with no scale) has its message returned to the user **in code**; the model is not called again, so it can't answer over the question (found on the real run, 5 Nov 2026: gpt-4o-mini invented a count after the tool refused). A failed chat-API call (budget cap, network, timeout) is caught as `ChatError` and gives a plain "I couldn't reach the language model" — never a guess. A tool error (`needs_clarification`, `no_data`, `tool_failed`, ...) goes back to the model as the tool's own message, and the system prompt tells it to say so, not paper over it. A model that keeps calling tools past `MAX_TOOL_ROUNDS` (6) gets stopped with an honest "try a narrower question" instead of looping forever |
 
-What it does **not** yet do, by design (see the capstone task list, not an oversight):
+Cross-restart state (#5) is the page's job, not the loop's: `ask()` works on a plain list of
+messages, and the page saves that list after every answer and loads it back from the link
+(`scripts/sessions.py`, [`sessions.md`](sessions.md)). The loop itself keeps nothing between
+processes.
 
-- **No cross-restart state (#5).** `messages` lives in one Python process; closing the
-  app loses the conversation. A checkpointer (SQLite, the NB 03 pattern) is a
-  LangGraph-shaped problem, not this loop's.
+What it does **not** do, by design (see the capstone task list, not an oversight):
+
 - **No human-in-the-loop gate (#6).** Not needed: every tool is read-only.
 
 The eval suite (#8) runs this loop against the real model and database:
@@ -227,7 +229,7 @@ demo or a local run this doesn't matter; adding a turn id to every event would f
 A plain function-calling loop was built first because it's the smallest thing that
 answers a question end to end, grounded and cited — nothing else in the checklist
 (evals, guardrails) has anything to run against until this exists. LangGraph adds
-real value on top (a checkpointer for #5, explicit guardrail nodes for #3), but none
+real value on top (a checkpointer for #5, which `sessions.py` now does in a table, explicit guardrail nodes for #3), but none
 of that is needed to get a working demo; it's the next layer, not a prerequisite for
 this one. The guardrail is two function calls in `ask()`, so it would become two nodes
 unchanged. See the task list for when it gets built.

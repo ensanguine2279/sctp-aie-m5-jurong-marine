@@ -14,6 +14,7 @@ flowchart LR
     A -->|"chat calls"| M["LLM<br/>(via proxy)"]
     A -->|"tool calls"| T["agent_tools<br/>(agent_ro on MySQL)"]
     A -.->|"JSON events"| U
+    U <-->|"load / save"| S["sessions.py<br/>(agent_sessions on MySQL)"]
 ```
 
 You can run it on your laptop (below) or host it on Google Cloud Run
@@ -26,10 +27,13 @@ You can run it on your laptop (below) or host it on Google Cloud Run
 - **Password box.** This appears only if `APP_PASSWORD` is set. Nothing connects until the
   password is right. The check is constant-time, using `hmac.compare_digest`.
 - **Sidebar.**
-  - Five example questions you can click: CNC-02 behaviour, CNC-03 oil, blasting-chamber
-    entry, welding SOP, and the count of 2025 incidents at severity 4 or worse.
+  - Six example questions you can click: CNC-02 behaviour, CNC-03 oil, blasting-chamber
+    entry, welding SOP, the count of 2025 incidents at severity 4 or worse, and an employee's
+    name (refused by the guardrail).
   - A **New conversation** button.
-  - The model in use (`agent_app.MODEL`).
+  - The model in use (`agent_app.MODEL`), and whether this conversation is being saved
+    ([below](#the-conversation-survives-a-restart)).
+  - **Spend**: this session's cost and the key's spend against its budget.
 - **Chat.** Each answer has a **Sources** list, a closed **Caveats from the data** expander
   (the tools' notes, below) and, when a tool cited a scan, a **Photo** expander showing it. It also has a **What happened** expander, which
   is open for the latest answer and closed for earlier ones. The expander's table has one row
@@ -41,6 +45,18 @@ You can run it on your laptop (below) or host it on Google Cloud Run
 | `tool, round N` | Tool name, the arguments the model sent, `ok` or `refused: <error_code>`, plus the seconds taken |
 | `model, round N` (failed) | The model call's error |
 | `app` | A tool asked a clarifying question that was passed to the user, or the app stopped after too many tool calls |
+
+## The conversation survives a restart
+
+The page's link carries the conversation's id (`?session=...`). After every answer the page
+saves the conversation through [`sessions.py`](sessions.md), to a table only the
+`agent_sessions` user can touch. When the page starts (a refresh, a redeploy, Cloud Run
+starting a new container, another device) it loads the conversation for the link's id, draws the
+answers again and hands the model the earlier messages, so a follow-up keeps its context.
+
+If `AGENT_SESSION_DB_PASSWORD` isn't set, or MySQL is down, the sidebar says the conversation
+isn't being saved, and the page carries on in memory as before. Details, setup and the check in
+[`sessions.md`](sessions.md).
 
 ## Notes from the data
 
@@ -77,6 +93,8 @@ image source.
   happened on the live page on 7 Nov 2026 (CNC-03's nameplate).
 - A source whose photo isn't stored (a form that couldn't be redacted, a load with
   `--no-photos`) gets "photo not available here" instead.
+- Photos are not saved with the conversation, so an answer reloaded after a restart shows its
+  text, sources and caveats without the photo.
 
 ## Run it locally
 
@@ -103,6 +121,8 @@ All settings come from environment variables, or from `.env` when you run locall
 |---|---|
 | `DB_HOST`, `DB_PORT`, `DB_NAME` | The MySQL database (Aiven) |
 | `AGENT_DB_USERNAME`, `AGENT_DB_PASSWORD` | The read-only `agent_ro` user. `agent_tools.connect()` refuses the owner account (`DB_USERNAME`/`DB_PASSWORD`) |
+| `AGENT_SESSION_DB_USERNAME`, `AGENT_SESSION_DB_PASSWORD` | The `agent_sessions` user, for saved conversations ([`sessions.md`](sessions.md)). Username defaults to `agent_sessions`. Without the password, conversations aren't saved and the sidebar says so |
+| `AGENT_SESSION_DAYS` | How long a saved conversation is kept after its last answer (default 7) |
 | `OPENAI_API_KEY` | Your LiteLLM proxy member key |
 | `OPENAI_BASE_URL` | The proxy URL |
 | `APP_PASSWORD` | Optional page password. If it is unset, there is no password box |
@@ -131,15 +151,19 @@ The **What happened** table is built from these same events.
 | `password_ok()` | Constant-time password check |
 | `show_notes()` | The tools' caveats under the answer, from `agent_app.ask(..., notes=...)` |
 | `photo_items()`, `show_photos()`, `img_html()` | The photos behind an answer's image sources, fetched and hash-checked, with captions; drawn in a **Photo** expander as `<img>` tags with the bytes inside (caption HTML-escaped) |
-| `main()` | The Streamlit page: password gate, the cached `connect()` (one DB connection and LLM client per process, through `st.cache_resource`), sidebar, chat history and one question per run |
+| `cost_line()`, `session_line()` | The cost under each answer and the session total in the sidebar |
+| `display_copy()`, `restored()`, `save_line()` | What is saved of the display (no photos, no trace), a loaded conversation turned back into `messages` and `shown`, and the sidebar's saved / not saved line |
+| `main()` | The Streamlit page: password gate, the cached `connect()` (one DB connection and LLM client per process, through `st.cache_resource`), the cached session store (purges old conversations once per process), the conversation loaded from `?session=`, sidebar, chat history, one question per run, then the save |
 
-Conversation state lives in `st.session_state`, in memory and per browser session:
+Conversation state lives in `st.session_state` while the page is open, and in the
+`agent_sessions` table between page loads:
 
 - `messages` holds the model's conversation, from `agent_app.new_conversation()`.
 - `shown` holds what is drawn on screen.
+- `sid` is the conversation's id, also in the link.
 
-Because the state is in memory, the hosted version needs a single instance with session
-affinity.
+The hosted version still runs a single instance with session affinity, because Streamlit's
+websocket needs it; a restart or a new container no longer loses the conversation.
 
 ---
 
@@ -147,12 +171,14 @@ affinity.
 
 This runs `scripts/agent_ui.py` as a container on Cloud Run, next to the
 [LiteLLM proxy](https://github.com/ensanguine2279/sctp-aie-m5-jurong-marine-llm-proxy). The database stays on Aiven. The page connects to
-it as the read-only `agent_ro` user, and reaches the LLM through the proxy.
+it as the read-only `agent_ro` user, keeps conversations as the `agent_sessions` user, and
+reaches the LLM through the proxy.
 
 ```mermaid
 flowchart LR
     P["Person<br/>browser"] -->|HTTPS| R["Cloud Run<br/>agent_ui.py"]
     R -->|"agent_ro, TLS"| A[("Aiven MySQL")]
+    R -->|"agent_sessions, TLS"| A
     R -->|"member key"| L["LLM proxy<br/>(VM, sslip.io)"]
     S["Secret Manager"] -.-> R
     R -->|stderr| G["Cloud Logging"]
@@ -228,20 +254,23 @@ gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
     artifactregistry.googleapis.com secretmanager.googleapis.com
 
 # secrets (printf, so no trailing newline is stored)
-printf '%s' 'THE_AGENT_RO_PASSWORD' | gcloud secrets create agent-db-password --data-file=-
-printf '%s' 'YOUR_PROXY_MEMBER_KEY'  | gcloud secrets create openai-api-key    --data-file=-
-printf '%s' 'A_PAGE_PASSWORD'        | gcloud secrets create app-password      --data-file=-
+printf '%s' 'THE_AGENT_RO_PASSWORD'      | gcloud secrets create agent-db-password         --data-file=-
+printf '%s' 'THE_SESSION_USER_PASSWORD'  | gcloud secrets create agent-session-db-password --data-file=-
+printf '%s' 'YOUR_PROXY_MEMBER_KEY'      | gcloud secrets create openai-api-key            --data-file=-
+printf '%s' 'A_PAGE_PASSWORD'            | gcloud secrets create app-password              --data-file=-
 
 # let the service read them (default Compute Engine service account)
 SA=$(gcloud projects describe $PROJECT --format='value(projectNumber)')-compute@developer.gserviceaccount.com
-for s in agent-db-password openai-api-key app-password; do
+for s in agent-db-password agent-session-db-password openai-api-key app-password; do
   gcloud secrets add-iam-policy-binding $s --member=serviceAccount:$SA \
       --role=roles/secretmanager.secretAccessor
 done
 ```
 
 Use the **agent_ro** password, never the owner's. `DB_USERNAME` and `DB_PASSWORD` are not set
-on Cloud Run, and `connect()` refuses the owner account anyway.
+on Cloud Run, and `connect()` refuses the owner account anyway. The session password is the one
+you gave `AGENT_SESSION_DB_PASSWORD` when you ran `python scripts/sessions.py setup` against
+Aiven from your computer; run that (and `check`) before the first deploy.
 
 ## 2. Deploy (from the folder with the `Dockerfile`, section 0)
 
@@ -249,8 +278,8 @@ on Cloud Run, and `connect()` refuses the owner account anyway.
 gcloud run deploy jme-agent --source . --region $REGION \
   --allow-unauthenticated --session-affinity \
   --min-instances 0 --max-instances 1 --memory 1Gi --timeout 600 \
-  --set-env-vars "DB_HOST=YOUR-SERVICE.aivencloud.com,DB_PORT=12345,DB_NAME=defaultdb,AGENT_DB_USERNAME=agent_ro,OPENAI_BASE_URL=https://35-240-177-226.sslip.io,AGENT_LOG_FILE=off" \
-  --set-secrets "AGENT_DB_PASSWORD=agent-db-password:latest,OPENAI_API_KEY=openai-api-key:latest,APP_PASSWORD=app-password:latest"
+  --set-env-vars "DB_HOST=YOUR-SERVICE.aivencloud.com,DB_PORT=12345,DB_NAME=defaultdb,AGENT_DB_USERNAME=agent_ro,AGENT_SESSION_DB_USERNAME=agent_sessions,OPENAI_BASE_URL=https://35-240-177-226.sslip.io,AGENT_LOG_FILE=off" \
+  --set-secrets "AGENT_DB_PASSWORD=agent-db-password:latest,AGENT_SESSION_DB_PASSWORD=agent-session-db-password:latest,OPENAI_API_KEY=openai-api-key:latest,APP_PASSWORD=app-password:latest"
 ```
 
 Fill in the Aiven host, port and database name.
@@ -266,9 +295,9 @@ To make the page private to Google accounts instead:
 3. Each person opens it with `gcloud run services proxy jme-agent --region $REGION`. This means
    every viewer needs `gcloud` installed.
 
-`--max-instances 1 --session-affinity` keeps a single container and one conversation per
-browser. This matters because Streamlit uses a websocket and keeps each session's state in
-memory (see [How the code is laid out](#how-the-code-is-laid-out)).
+`--max-instances 1 --session-affinity` keeps a single container and one websocket per
+browser, which Streamlit needs. Conversations themselves no longer depend on it: they are
+saved in MySQL after every answer.
 
 `AGENT_LOG_FILE=off` stops the page writing the log file. The container's disk is temporary, so
 the file would be lost anyway, and the same lines already go to Cloud Logging through stderr.
@@ -281,6 +310,9 @@ the file would be lost anyway, and the same lines already go to Cloud Logging th
   afterwards, because an idle instance still costs money.
 - **Run the kill-shot questions once on the hosted page.** The What happened table should match
   what you see on your laptop.
+- **Prove the restart.** Ask a question, copy the link, run
+  `gcloud run services update jme-agent --region $REGION --update-env-vars RESTART=$(date +%s)`
+  (a new revision: a new container with empty memory), open the link and ask a follow-up.
 - **Check the logs** under **Cloud Run → jme-agent → Logs**. Each line is one JSON event: model
   calls, tool calls with their arguments, and `scale_guess_blocked`.
 - **To update the service**, change the code and run the same `gcloud run deploy` command again.
@@ -296,6 +328,9 @@ the file would be lost anyway, and the same lines already go to Cloud Logging th
 | The connection error mentions secure transport / SSL | Both | Aiven requires TLS, and `db_config.py` has no SSL option yet. Add a `DB_SSL_CA` setting (a small change, with a test) |
 | `cryptography` error at login | Both | `cryptography` is missing from `requirements-app.txt` |
 | "Set OPENAI_API_KEY" | Both | The key isn't set. On Cloud Run, either the secret isn't attached or the service account can't read it |
+| Sidebar: "Conversations aren't being saved (AGENT_SESSION_DB_PASSWORD isn't set)" | Both | Set it in `.env`, or attach the `agent-session-db-password` secret on Cloud Run |
+| Sidebar: "This conversation isn't being saved right now" | Both | The session user can't reach or use its table: `setup` not run, a wrong password, or the table missing. Run `python scripts/sessions.py check` |
+| The link opens an empty conversation | Both | The conversation is older than `AGENT_SESSION_DAYS`, was never saved (no answer yet), or the link was cut short |
 | What happened table is empty | Both | `agent_app.ask()` didn't log JSON events to the logger it was given |
 | A **broken** image icon under an answer | Cloud Run | An older page that used `st.image`: the browser's second request for `/media/...` missed. Deploy the current `agent_ui.py`, then hard-refresh |
 | "photo not available here" under an answer | Both | The images were loaded with `--no-photos` or before photos were stored, the form couldn't be redacted (`form_image_not_stored`), or `agent_ro` lacks `img_files_public` (re-run `agent_user.py`) |

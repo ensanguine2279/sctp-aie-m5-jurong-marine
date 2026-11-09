@@ -22,9 +22,9 @@ harness checklist, enforced in code rather than hoped for from the prompt:
        replaced before the user sees it. Neither leaves the offending text in `messages`,
        so it never reaches a later prompt either.
 
-What this script does NOT do yet (by design, not oversight - see the capstone task
-list): no cross-restart conversation state (#5), and no human-in-the-loop gate (#6: this
-app is read-only, so none is needed). The eval suite (#8) is separate:
+Cross-restart state (#5) is kept by the page, not here: `messages` is a plain list that
+agent_ui.py saves after every answer and loads back (scripts/sessions.py). No
+human-in-the-loop gate (#6): this app is read-only, so none is needed. The eval suite (#8) is separate:
 `scripts/run_evals.py` over `evals/cases.yaml`.
 
 Usage

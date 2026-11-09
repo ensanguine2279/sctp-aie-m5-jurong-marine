@@ -9,6 +9,12 @@ way: each model call (with its time) and each tool call (with the arguments the 
 sent, whether the tool refused, and how long it took). That expander is the live view of
 the path a question takes.
 
+The conversation survives a restart (#5): its id is in the page's link (?session=...), and
+after every answer it is saved through sessions.py (a table only the agent_sessions user can
+touch). Opening the link again, after a redeploy or on another device, reloads it, so a
+follow-up still has the earlier context. If the store isn't set up or is down, the sidebar
+says conversations aren't being saved and the page carries on in memory.
+
 Usage
     streamlit run scripts/agent_ui.py
 
@@ -172,6 +178,34 @@ def session_line(spent: float, questions: int) -> str:
     return f"This session: ${spent:.4f} over {questions} question{'s' if questions != 1 else ''}"
 
 
+DISPLAY_KEYS = ("role", "text", "sources", "notes", "cost")   # no photos, no trace
+
+
+def display_copy(shown: list[dict]) -> list[dict]:
+    """What is saved of the page's display: the text and what was shown under it. Photos
+    are left out (large, and re-fetchable from the database), and so is the trace."""
+    return [{k: m[k] for k in DISPLAY_KEYS if m.get(k) not in (None, [], "")} for m in shown]
+
+
+def restored(loaded) -> tuple[list[dict], list[dict]] | None:
+    """(messages, shown) for a conversation loaded by sessions.SessionStore, the system
+    prompt fresh from code; None if nothing was found."""
+    if not (loaded.ok and loaded.found):
+        return None
+    shown = [m for m in loaded.display if isinstance(m, dict) and m.get("role") in
+             ("user", "assistant") and isinstance(m.get("text"), str)]
+    return app.new_conversation() + loaded.messages, shown
+
+
+def save_line(store_on: bool, why: str | None, save_error: str | None) -> tuple[bool, str]:
+    """(ok, sidebar text) for whether this conversation is being kept."""
+    if not store_on:
+        return False, f"Conversations aren't being saved ({why}). This one lasts until the page closes."
+    if save_error:
+        return False, f"This conversation isn't being saved right now: {save_error}."
+    return True, "Saved after every answer. Keep this page's link to come back to it."
+
+
 def password_ok(typed: str, expected: str) -> bool:
     """Constant-time check of the page password."""
     return hmac.compare_digest(typed.encode(), expected.encode())
@@ -261,9 +295,36 @@ def main() -> None:
     def key_budget():
         return spend.key_spend()                   # never raises; cached 30 s
 
-    if "messages" not in st.session_state:
+    import sessions
+
+    @st.cache_resource
+    def session_store():
+        store, why = sessions.store_from_env()    # never raises
+        if store:
+            store.purge()                          # retention, once per process start
+        return store, why
+
+    store, store_why = session_store()
+
+    def start_fresh():
         st.session_state.messages = app.new_conversation()
         st.session_state.shown = []   # what to draw: role, text, sources, trace
+        st.session_state.sid = sessions.new_session_id()
+        st.session_state.save_error = None
+        st.query_params["session"] = st.session_state.sid
+
+    if "messages" not in st.session_state:        # a new page load, or the app restarted
+        sid = st.query_params.get("session")      # read before start_fresh replaces it
+        start_fresh()                             # a new id, unless the link's loads below:
+        if store and sessions.valid_id(sid):
+            loaded = store.load(sid)
+            back = restored(loaded)
+            if back:
+                st.session_state.messages, st.session_state.shown = back
+                st.session_state.sid = sid
+                st.query_params["session"] = sid
+            elif not loaded.ok:
+                st.session_state.save_error = loaded.error
 
     with st.sidebar:
         st.subheader("Try")
@@ -272,11 +333,18 @@ def main() -> None:
             if st.button(q, use_container_width=True):
                 picked = q
         if st.button("New conversation", use_container_width=True):
-            st.session_state.messages = app.new_conversation()
-            st.session_state.shown = []
+            start_fresh()
             st.session_state.spent, st.session_state.questions = 0.0, 0
             st.rerun()
         st.caption(f"Model: {app.MODEL}")
+        save_box = st.empty()                      # is this conversation being kept (#5)
+
+    def show_saved():
+        ok, text = save_line(store is not None, store_why, st.session_state.get("save_error"))
+        (save_box.caption if ok else save_box.warning)(text)
+
+    show_saved()
+    with st.sidebar:
         # Spend (#7): this session from each call's cost header, exact and immediate; the
         # key's total against its cap from the proxy (about a minute behind).
         st.subheader("Spend")
@@ -340,6 +408,11 @@ def main() -> None:
     st.session_state.shown.append({"role": "assistant", "text": answer,
                                    "sources": sources, "notes": notes, "photos": photos,
                                    "trace": rows, "cost": cost})
+    if store:                                      # keep it for a restart (#5); never raises
+        _, st.session_state.save_error = store.save(
+            st.session_state.sid, st.session_state.messages,
+            display_copy(st.session_state.shown))
+        show_saved()
 
 
 if __name__ == "__main__":

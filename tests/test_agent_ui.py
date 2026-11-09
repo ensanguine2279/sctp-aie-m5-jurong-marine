@@ -192,3 +192,34 @@ def test_the_session_total_and_each_model_rows_cost():
                           {"event": "chat_call", "round": 2, "tool_calls": [], "ms": 900}])
     assert rows[0]["detail"] == "asked for: find_sop ($0.0004)"
     assert rows[1]["detail"] == "asked for: (answered)"                  # no cost header: none
+
+
+# ------------------------------------------- the conversation kept (#5) ---
+
+def test_the_saved_display_leaves_out_photos_and_the_trace():
+    shown = [{"role": "user", "text": "q"},
+             {"role": "assistant", "text": "a", "sources": ["CMMS"], "notes": [],
+              "photos": [{"b64": "x" * 1000}], "trace": [{"step": "model"}], "cost": "$0.0004"}]
+    assert ui.display_copy(shown) == [{"role": "user", "text": "q"},
+                                      {"role": "assistant", "text": "a", "sources": ["CMMS"],
+                                       "cost": "$0.0004"}]
+
+
+def test_a_loaded_conversation_gets_a_fresh_system_prompt_and_only_drawable_rows():
+    import sessions as ss
+    loaded = ss.Loaded(True, True, [{"role": "user", "content": "q"}],
+                       [{"role": "user", "text": "q"}, {"role": "system", "text": "x"},
+                        {"role": "assistant"}, "junk"])
+    messages, shown = ui.restored(loaded)
+    assert messages == app.new_conversation() + [{"role": "user", "content": "q"}]
+    assert shown == [{"role": "user", "text": "q"}]
+    assert ui.restored(ss.Loaded(True)) is None
+    assert ui.restored(ss.Loaded(False, error="down")) is None
+
+
+def test_the_sidebar_says_honestly_whether_the_conversation_is_kept():
+    assert ui.save_line(True, None, None)[0]
+    ok, text = ui.save_line(False, "AGENT_SESSION_DB_PASSWORD isn't set", None)
+    assert not ok and "aren't being saved" in text and "AGENT_SESSION_DB_PASSWORD" in text
+    ok, text = ui.save_line(True, None, "couldn't save the conversation (OperationalError)")
+    assert not ok and "isn't being saved right now" in text
