@@ -41,7 +41,7 @@ One row per conversation:
 |---|---|
 | `session_id` | 32 random hex characters (`secrets.token_hex(16)`), the id in the link |
 | `messages` | The model's conversation as JSON, **without the system prompt**. The system prompt always comes fresh from code, so a prompt change applies to old conversations too, and a tampered row can't add one: a stored `system` message makes the row unreadable, and the page starts afresh |
-| `display` | A light copy of what the page drew: each question and answer, its sources, caveats and cost. No photos (large, and in the database already) and no "What happened" table |
+| `display` | A light copy of what the page drew: each question and answer, its sources, caveats and cost (the cost line, and since 10 Nov 2026 the cost as a number, `cost_usd` and `cost_complete`, for the sidebar's total). No photos (large, and in the database already) and no "What happened" table |
 | `turns`, `created_at`, `updated_at` | Question count and UTC timestamps |
 
 **A refused question is stored only as a placeholder.** In `messages`, `ask()` keeps a refused
@@ -140,6 +140,10 @@ shop table counts as blocked; any other error is a FAIL. Run it live on demo day
   Keep this page's link to come back to it."
 - **New conversation.** A new id goes in the link. The old conversation stays saved under its
   own link until the retention deletes it.
+- **Spend.** The sidebar's "This conversation: $0.0023 over 2 questions" is added up from the
+  answers on the page (`agent_ui.conversation_spend`), so a conversation reopened from its link
+  or from the list shows what it has cost, and a new one shows $0
+  ([below](#the-conversations-spend-after-a-reload)).
 - **Honest degradation (#4).** If the store isn't configured, the sidebar warns "Conversations
   aren't being saved (AGENT_SESSION_DB_PASSWORD isn't set). This one lasts until the page
   closes." If MySQL is down or refuses, it warns "This conversation isn't being saved right
@@ -164,9 +168,8 @@ Recent conversations
   question shows only as its placeholder, never as typed. Cut to 60 characters. Markdown
   characters are escaped, so a title shows exactly as stored (Streamlit reads `$...$` as maths).
 - **Clicking one** opens it on the page, as opening its link would: the answers are drawn again,
-  the model gets its messages, the link changes to its id, and the "this session" spend starts
-  from zero, as with **New conversation**. If it can't be loaded, the sidebar says why and the
-  page stays as it was.
+  the model gets its messages, the link changes to its id, and the sidebar's spend shows that
+  conversation's total. If it can't be loaded, the sidebar says why and the page stays as it was.
 - **Which rows.** `SessionStore.recent(n)` reads only rows inside the retention, newest
   `updated_at` first, at most 10. A row that `load()` would refuse (unreadable, a stored `system`
   message, a bad id) isn't listed.
@@ -175,10 +178,35 @@ Recent conversations
 - **Store down:** "Couldn't list saved conversations right now." No store configured: the
   section isn't shown (the line above already says conversations aren't saved).
 
+### The conversation's spend after a reload
+
+> **Fixed 10 Nov 2026.** The sidebar's spend was a counter in the page's memory ("This session:
+> ..."), started at $0 on every page load and reset when a conversation was opened from the
+> list. So a conversation reopened after a restart, or picked from **Recent conversations**,
+> showed "$0.0000 over 0 questions" above answers that each showed their cost.
+
+The sidebar now shows **"This conversation: $X over N questions"**, added up from the
+conversation itself every time it is drawn (`agent_ui.conversation_spend`): N is the questions
+on the page, $X the sum of each answer's cost. There is no counter to keep in step, so a reload,
+a restart, opening a link or picking from the list all show the same figure, and **New
+conversation** shows $0.
+
+- **Each answer's cost** is the proxy's `x-litellm-response-cost` for its model calls, kept with
+  the answer as a number (`cost_usd`, `cost_complete`) and saved with the display copy.
+- **Conversations saved before the fix** have only the cost line under each answer ("2 model
+  calls, 9,936 tokens, $0.0012"), so their cost is read back from that line, to its 4 decimal
+  places. A refusal ("No model calls: answered in code.") costs $0.
+- **"at least $X"** when any answer's cost isn't known (a call came back without the cost
+  header, or an old answer has no cost line): the total is then a lower bound, as under the
+  answer itself.
+- A stored `cost_usd` that isn't a plain non-negative number (a tampered row) is ignored and the
+  cost line used instead.
+- The **key's** spend against its budget, under it, is unchanged: it comes from the proxy
+  (`spend.py`, about a minute behind) and covers every conversation on the key.
+
 **Limits.**
 - Restored answers show their text, sources, caveats and cost, but not their photos or "What
   happened" table.
-- The sidebar's "this session" spend counts from the page load, or from opening a conversation.
 - Two tabs on the same link both save to one row, and the last answer saved wins.
 - Everyone behind the page password sees the same list (above).
 
@@ -200,6 +228,7 @@ A save is an `UPDATE`, then an `INSERT` if no row matched. Timestamps come from 
 | `setup_statements()`, `check()` | The table, user and grant; the probes, classified by MySQL error code |
 | `agent_ui.display_copy()`, `restored()`, `kept_question()`, `save_line()` | What the page saves (refused questions as placeholders), how it comes back (cleaned again), what the sidebar says |
 | `agent_ui.recent_label()`, `ago()`, `md_plain()` | One line of the sidebar list: title, question count, how long ago or "open now", escaped |
+| `agent_ui.conversation_spend()`, `conversation_line()` | The sidebar's spend for the conversation on the page, added up from its answers (old rows from their cost line) |
 
 ## Cloud Run
 
@@ -222,10 +251,11 @@ the hosted page since 9 Nov 2026.
 2. Run `gcloud run services update jme-agent --region $REGION --update-env-vars RESTART=$(date +%s)`. This starts a new revision, so a new container with empty memory.
 3. Open the link and ask a follow-up ("and what about CNC-03?"). It is answered in context.
    Or open the page without a link and pick the conversation from **Recent conversations**.
+   The sidebar's spend shows the conversation's total, not $0.
 
 ## Tests
 
-`tests/test_sessions.py` (44 tests, sqlite3, no MySQL) and 6 in `tests/test_agent_ui.py`:
+`tests/test_sessions.py` (44 tests, sqlite3, no MySQL) and 10 in `tests/test_agent_ui.py`:
 
 - **Ids.** Random, 32 hex characters; anything else, an injection attempt included, never reaches
   the database.
@@ -260,3 +290,7 @@ the hosted page since 9 Nov 2026.
   the page's own copy untouched, a row saved before the fix cleaned when drawn); how long ago,
   from a datetime or sqlite's text; each list line, the open one marked, Markdown and `$`
   escaped.
+- **The conversation's spend (10 Nov 2026).** A reopened conversation shows what it cost, not $0,
+  through the save and load; an answer with an unknown cost makes the total "at least"; rows
+  saved before the fix read from their cost line, a refusal costing $0; a new conversation $0;
+  a tampered `cost_usd` never trusted.

@@ -22,32 +22,50 @@ You can run it on your laptop (below) or host it on Google Cloud Run
 
 ## What the page shows
 
-- **Title and caption.** The title is "JME maintenance assistant". The caption says that answers
-  come only from the shop's own data, through fixed tools, with sources shown.
+Each part of the page has one place (layout reworked 10 Nov 2026; until then the sidebar
+held the examples, the recent conversations and the spend together, and was congested). The
+page uses Streamlit's wide layout.
+
 - **Password box.** This appears only if `APP_PASSWORD` is set. Nothing connects until the
   password is right. The check is constant-time, using `hmac.compare_digest`.
-- **Sidebar.**
-  - Six example questions you can click: CNC-02 behaviour, CNC-03 oil, blasting-chamber
-    entry, welding SOP, the count of 2025 incidents at severity 4 or worse, and an employee's
-    name (refused by the guardrail).
+- **Sidebar: conversations only.**
   - A **New conversation** button.
-  - The model in use (`agent_app.MODEL`), and whether this conversation is being saved
-    ([below](#the-conversation-survives-a-restart)).
-  - **Recent conversations**: the three saved conversations answered most recently, each
-    titled by its first question, with how many questions and how long ago. Click one to
-    open it here; the one on the page is greyed out ("open now").
-  - **Spend**: this session's cost and the key's spend against its budget.
-- **Chat.** Each answer has a **Sources** list, a closed **Caveats from the data** expander
-  (the tools' notes, below) and, when a tool cited a scan, a **Photo** expander showing it. It also has a **What happened** expander, which
-  is open for the latest answer and closed for earlier ones. The expander's table has one row
-  per step:
+  - **Recent**: the eight saved conversations answered most recently, each titled by its
+    first question, with how many questions and how long ago. Click one to open it here;
+    the one on the page is greyed out ("open now").
+  - Whether this conversation is being saved
+    ([below](#the-conversation-survives-a-restart)): a quiet line when it is, a warning when
+    it isn't.
+- **Top bar.**
+  - The title, "JME maintenance assistant", and a caption saying that answers come only from
+    the shop's own data, through fixed tools, with sources shown.
+  - **Examples**, a popover with the six example questions, once a conversation has started.
+  - The **usage** popover, labelled with the model and this conversation's cost
+    (`gpt-4o-mini · $0.0031`). Open it for the model, "This conversation: $X over N
+    questions" (added up from the answers on the page, so it is the same after a reload or
+    reopening a saved conversation), and the key's spend against its budget, from the proxy.
+  - When the key is near or over its cap, or the proxy can't be reached, a warning also shows
+    across the page, under the top bar, so it can't be missed inside a closed popover.
+- **A new conversation** opens on the six example questions as a grid of buttons: CNC-02
+  behaviour, CNC-03 oil, blasting-chamber entry, welding SOP, the count of 2025 incidents at
+  severity 4 or worse, and an employee's name. The last one is refused by the guardrail on
+  purpose, and its tooltip says so. The grid goes once a question is asked.
+- **Each answer**: its text, one line with what it cost, then tabs for what it rests on, only
+  for what it has, each with a count:
+  - **Sources**: the sources the tools cited.
+  - **Caveats**: the tools' notes ([below](#notes-from-the-data)).
+  - **Photos**: the scans the tools cited ([below](#photos-under-the-answer)).
+  - **What happened**: one row per step, as below. On the **newest** answer this is the
+    first tab, so it is the one open (Streamlit always opens a tab group on its first tab);
+    on earlier answers it is last.
 
 | Step | Detail shown |
 |---|---|
-| `model, round N` | Which tools the model asked for, or `(answered)`, plus the seconds taken |
+| `model, round N` | Which tools the model asked for, or `(answered)`, the call's cost when the proxy gave one, plus the seconds taken |
 | `tool, round N` | Tool name, the arguments the model sent, `ok` or `refused: <error_code>`, plus the seconds taken |
 | `model, round N` (failed) | The model call's error |
 | `app` | A tool asked a clarifying question that was passed to the user, or the app stopped after too many tool calls |
+| `guardrail` | The question was refused in code before the model was called, the staff name list wasn't loaded (fail closed), or the answer was replaced before it was shown |
 
 ## The conversation survives a restart
 
@@ -57,11 +75,16 @@ saves the conversation through [`sessions.py`](sessions.md), to a table only the
 starting a new container, another device) it loads the conversation for the link's id, draws the
 answers again and hands the model the earlier messages, so a follow-up keeps its context.
 
-The sidebar's **Recent conversations** lists the three newest saved conversations, so one can
-be reopened without its link. Clicking one does what opening its link would. A title is the
+The sidebar's **Recent** list shows the eight newest saved conversations, so one can be
+reopened without its link. Clicking one does what opening its link would. A title is the
 first question as `messages` keeps it, so a question the guardrail refused shows only as its
 placeholder. Everyone behind the page password sees the same list: the page has no user
 accounts. Details in [`sessions.md`](sessions.md#recent-conversations-in-the-sidebar).
+
+The conversation's spend in the usage popover is its own total, added up from its answers
+(`conversation_spend`), not a counter in page memory. Until 10 Nov 2026 it was a counter,
+which started at $0 on every load, so a reopened conversation showed "$0.0000 over 0
+questions" ([`sessions.md`](sessions.md#the-conversations-spend-after-a-reload)).
 
 A question the guardrail refuses is saved, and drawn again after a reload, only as its
 placeholder (`kept_question()`), the same as in `messages`. Before 9 Nov 2026 the saved
@@ -78,17 +101,18 @@ a person, an OCR value not reliably read, a description that doesn't fit its mac
 severity converted between scales). The system prompt tells the model to carry each one, but
 on 7 Nov 2026 the live page answered incident 911 without its note that the form's severity
 was read by a person. So the page also shows the tools' notes itself, once each, under every
-answer (`agent_app.ask(..., notes=[...])`, `format_notes`, `show_notes`), in a **closed**
-expander, "Caveats from the data (N), as the tools gave them". Closed, because with the
-prompt rule the answer usually says them already in plainer words, and showing both
-repeated them; the tools' wording is written for the model and names the trap-list item,
-which is what an auditor wants. One click away whether or not the model said them.
+answer (`agent_app.ask(..., notes=[...])`, `format_notes`, `show_notes`), in the answer's
+**Caveats** tab. It is not the tab that opens by default, because with the prompt rule the
+answer usually says them already in plainer words, and showing both repeated them; the tools'
+wording is written for the model and names the trap-list item, which is what an auditor
+wants. One click away whether or not the model said them. (Until 10 Nov 2026 this was a
+closed expander, "Caveats from the data (N), as the tools gave them".)
 
 ## Photos under the answer
 
 When a tool cites a scan (a nameplate photo or an incident form), the page shows the photo
-under the answer, so "check the photo" in an answer is something the user can do there and
-then. The model never handles images or links: `agent_app.ask(..., raw_sources=[...])`
+in the answer's **Photos** tab, so "check the photo" in an answer is something the user can do
+there and then. The model never handles images or links: `agent_app.ask(..., raw_sources=[...])`
 hands back the tools' source records, and `photo_items()` fetches the photo behind each
 image source.
 
@@ -107,7 +131,7 @@ image source.
 - A source whose photo isn't stored (a form that couldn't be redacted, a load with
   `--no-photos`) gets "photo not available here" instead.
 - Photos are not saved with the conversation, so an answer reloaded after a restart shows its
-  text, sources and caveats without the photo.
+  text, sources and caveats without the photo (and without its Photos tab).
 
 ## Run it locally
 
@@ -116,7 +140,7 @@ This lives in the team repo, so it uses pip. Work from the repo root:
 ```bash
 python -m venv .venv
 source .venv/bin/activate            # Windows: .venv\Scripts\activate
-pip install -r requirements-app.txt  # includes streamlit
+pip install -r requirements-app.txt  # includes streamlit (1.36 or later)
 streamlit run scripts/agent_ui.py
 ```
 
@@ -124,6 +148,10 @@ With uv (personal repo): `uv pip install -r requirements-app.txt`, then
 `uv run streamlit run scripts/agent_ui.py`.
 
 Streamlit opens the page at <http://localhost:8501>.
+
+The page needs Streamlit 1.36 or later (`st.popover`, and `st.columns` with
+`vertical_alignment`); `requirements-app.txt` says so. An older one stops with a
+`TypeError` or `AttributeError` naming one of those.
 
 The page needs the same `.env` as `agent_app.py`. Set at least the agent database settings,
 `OPENAI_API_KEY` and `OPENAI_BASE_URL` (see [Configuration](#configuration)). Leave
@@ -163,23 +191,27 @@ The **What happened** table is built from these same events.
 
 | Piece | What it does |
 |---|---|
-| `EXAMPLES` | The sidebar questions |
+| `TITLE`, `CAPTION`, `EXAMPLES` | The top bar's text, and the example questions (the new conversation's grid and the Examples popover) |
+| `example_help()` | The tooltip on an example button: only the one the guardrail refuses gets one |
 | `TraceHandler` | A logging handler that collects the JSON events of one question for the on-page table |
 | `trace_logger()` | Makes a fresh logger for each question (no propagation). It attaches the trace handler, the shared stderr handler and, if enabled, the shared file handler |
 | `trace_rows()` | Turns the events into the table rows |
 | `password_ok()` | Constant-time password check |
-| `show_notes()` | The tools' caveats under the answer, from `agent_app.ask(..., notes=...)` |
-| `photo_items()`, `show_photos()`, `img_html()` | The photos behind an answer's image sources, fetched and hash-checked, with captions; drawn in a **Photo** expander as `<img>` tags with the bytes inside (caption HTML-escaped) |
-| `cost_line()`, `session_line()` | The cost under each answer and the session total in the sidebar |
-| `display_copy()`, `restored()`, `kept_question()`, `save_line()` | What is saved of the display (no photos, no trace, a refused question only as its placeholder), a loaded conversation turned back into `messages` and `shown` (questions checked again), and the sidebar's saved / not saved line |
-| `RECENT`, `recent_label()`, `ago()`, `md_plain()` | The sidebar's list of saved conversations: how many, one line each (title, questions, how long ago or "open now"), Markdown escaped |
-| `main()` | The Streamlit page: password gate, the cached `connect()` (one DB connection and LLM client per process, through `st.cache_resource`), the cached session store (purges old conversations once per process), the conversation loaded from `?session=`, sidebar (with `open_saved()` behind the recent list), chat history, one question per run, then the save |
+| `render_answer()`, `evidence_tabs()`, `last_answer()` | One answer: text, cost line, then its tabs. `evidence_tabs()` decides which tabs it gets and their labels, What happened first on the newest answer (`last_answer()`) |
+| `show_notes()` | The tools' caveats, in the Caveats tab, from `agent_app.ask(..., notes=...)` |
+| `photo_items()`, `show_photos()`, `img_html()` | The photos behind an answer's image sources, fetched and hash-checked, with captions; drawn in the Photos tab as `<img>` tags with the bytes inside (caption HTML-escaped) |
+| `cost_line()` | The cost under each answer |
+| `conversation_spend()`, `conversation_line()`, `usage_label()` | The conversation's spend: the sum of its answers' costs (`cost_usd`, or read back from the cost line of an answer saved before 10 Nov 2026), "at least" when one isn't known; the usage popover's label, escaped for Markdown |
+| `display_copy()`, `restored()`, `kept_question()`, `save_line()` | What is saved of the display (no photos, no trace, a refused question only as its placeholder, each answer's cost as a number), a loaded conversation turned back into `messages` and `shown` (questions checked again), and the sidebar's saved / not saved line |
+| `RECENT`, `recent_label()`, `ago()`, `md_plain()` | The sidebar's list of saved conversations: how many (8), one line each (title, questions, how long ago or "open now"), Markdown escaped |
+| `main()` | The Streamlit page: password gate, the cached `connect()` (one DB connection and LLM client per process, through `st.cache_resource`), the cached session store (purges old conversations once per process), the conversation loaded from `?session=`, the sidebar (with `open_saved()` behind the recent list), the top bar, the examples grid on a new conversation, the chat, one question per run, then the save |
 
 Conversation state lives in `st.session_state` while the page is open, and in the
 `agent_sessions` table between page loads:
 
 - `messages` holds the model's conversation, from `agent_app.new_conversation()`.
-- `shown` holds what is drawn on screen.
+- `shown` holds what is drawn on screen, each answer with its cost; the conversation's
+  spend is added up from it.
 - `sid` is the conversation's id, also in the link.
 
 The hosted version still runs a single instance with session affinity, because Streamlit's
@@ -364,7 +396,8 @@ the file would be lost anyway, and the same lines already go to Cloud Logging th
   what you see on your laptop.
 - **Prove the restart.** Ask a question, copy the link, run
   `gcloud run services update jme-agent --region $REGION --update-env-vars RESTART=$(date +%s)`
-  (a new revision: a new container with empty memory), open the link and ask a follow-up.
+  (a new revision: a new container with empty memory), open the link and ask a follow-up. The
+  usage popover should show the conversation's total, not $0.
 - **Check the logs** under **Cloud Run → jme-agent → Logs**. Each line is one JSON event: model
   calls, tool calls with their arguments, and `scale_guess_blocked`.
 - **To update the service**, change the code and run the same `gcloud run deploy` command again.
@@ -381,6 +414,7 @@ For the MySQL error code, search Cloud Run → jme-agent → Logs for the error 
 | Symptom | Where | Likely cause |
 |---|---|---|
 | `ModuleNotFoundError: streamlit` | Local | Run `pip install -r requirements-app.txt` in the active venv |
+| `TypeError` mentioning `vertical_alignment`, or `AttributeError: ... has no attribute 'popover'` | Local | Streamlit is older than 1.36. Run `pip install -U -r requirements-app.txt` |
 | No password box | Both | `APP_PASSWORD` is not set (or, on Cloud Run, the secret isn't attached) |
 | "Wrong password." when the password is right | Cloud Run | The secret was stored with a trailing newline. Recreate it with `printf '%s'` |
 | Page shows "Couldn't connect as the agent user" | Both | One of these: wrong `DB_HOST`/`DB_PORT`; Aiven's allow-list blocks Cloud Run (Cloud Run has no fixed IP, so allow all addresses or add a static egress IP); or Aiven is powered off |
@@ -391,11 +425,12 @@ For the MySQL error code, search Cloud Run → jme-agent → Logs for the error 
 | "Set OPENAI_API_KEY" | Both | The key isn't set. On Cloud Run, either the secret isn't attached or the service account can't read it |
 | Sidebar: "Conversations aren't being saved (AGENT_SESSION_DB_PASSWORD isn't set)" | Both | Set it in `.env` and restart Streamlit (a browser refresh isn't enough), or attach the `agent-session-db-password` secret on Cloud Run |
 | Sidebar: "This conversation isn't being saved right now" | Both | The session user can't reach or use its table: `setup` not run, a wrong password, a wrong `DB_HOST`, or the table missing. Run `python scripts/sessions.py check`, and on Cloud Run read the MySQL error code in the logs |
+| Spend says "This session: $0.0000 over 0 questions" on a reopened conversation | Both | The page is older than 10 Nov 2026: its spend was a counter in page memory. Deploy the current `agent_ui.py`; it shows "This conversation: ..." added up from the answers |
 | The link opens an empty conversation | Both | The conversation is older than `AGENT_SESSION_DAYS`, was never saved (no answer yet), or the link was cut short |
 | Deploy: `Permission denied on secret: .../secrets/<name>/versions/latest for Revision service account ...` | Cloud Run | The service account can't read that secret, or the deploy names a secret that differs from the one granted (underscores vs hyphens). Check `gcloud secrets list`, then run the grant loop in section 1 for the names in `--set-secrets` |
-| What happened table is empty | Both | `agent_app.ask()` didn't log JSON events to the logger it was given |
+| No What happened tab under an answer | Both | A reloaded answer: the trace isn't saved with the conversation. On a new answer, `agent_app.ask()` didn't log JSON events to the logger it was given |
 | A **broken** image icon under an answer | Cloud Run | An older page that used `st.image`: the browser's second request for `/media/...` missed. Deploy the current `agent_ui.py`, then hard-refresh |
-| "photo not available here" under an answer | Both | The images were loaded with `--no-photos` or before photos were stored, the form couldn't be redacted (`form_image_not_stored`), or `agent_ro` lacks `img_files_public` (re-run `agent_user.py`) |
+| "photo not available here" in the Photos tab | Both | The images were loaded with `--no-photos` or before photos were stored, the form couldn't be redacted (`form_image_not_stored`), or `agent_ro` lacks `img_files_public` (re-run `agent_user.py`) |
 | Page loads, then keeps reconnecting | Cloud Run | `--session-affinity` is missing, or more than one instance is running |
 | Build fails in a step named `universal_builder` (exit status 51), log ends with "provide a main.py or app.py" | Cloud Run | Cloud Run found no `Dockerfile` in the folder you deployed from and tried to guess the language. Usually the deploy ran from the home folder (Cloud Shell opens there after a reconnect), or the `Dockerfile` sits in a subfolder or has another name (`Dockerfile.txt`). `cd ~/jme-agent` and run the `ls -la` check in section 0 |
 | Deploy fails while building | Cloud Run | To see the error, run `docker build -t jme-agent .` locally. Or run `gcloud builds list --limit=1`, then `gcloud builds log <ID> --region $REGION \| tail -40` |

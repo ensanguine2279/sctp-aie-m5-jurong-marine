@@ -2,31 +2,45 @@
 """A chat front end for the agent, for the demo: person -> app -> LLM -> tools -> back.
 
 A thin Streamlit page over `agent_app.py`; it adds no logic of its own. Under every
-answer it shows the sources the tools cited, the photo behind each scanned source (from
-the database, hash-checked; incident forms only with the person and signature removed),
-and an expander with what happened on the
-way: each model call (with its time) and each tool call (with the arguments the model
-sent, whether the tool refused, and how long it took). That expander is the live view of
-the path a question takes.
+answer it shows what the answer rests on, in tabs: the sources the tools cited, the tools'
+caveats, the photo behind each scanned source (from the database, hash-checked; incident
+forms only with the person and signature removed), and what happened on the way: each model
+call (with its time) and each tool call (with the arguments the model sent, whether the tool
+refused, and how long it took). That table is the live view of the path a question takes.
+
+Layout (10 Nov 2026: the sidebar held examples, recent conversations and spend, and was
+congested). Each part has one place:
+- sidebar: conversations only (New conversation, the newest saved ones, whether this one
+  is saved);
+- top bar: the title, an Examples popover once a conversation has started, and a usage
+  popover (model, this conversation's cost, the key's spend against its cap). Near or over
+  the cap, or with the proxy unreachable, a warning also shows across the page;
+- a new conversation opens on the example questions as a grid, which goes once one is asked;
+- each answer: its text, one cost line, then tabs (Sources, Caveats, Photos, What happened).
+  On the newest answer What happened is the first tab, so it is open for the demo.
 
 The conversation survives a restart (#5): its id is in the page's link (?session=...), and
 after every answer it is saved through sessions.py (a table only the agent_sessions user can
 touch). Opening the link again, after a redeploy or on another device, reloads it, so a
 follow-up still has the earlier context. If the store isn't set up or is down, the sidebar
-says conversations aren't being saved and the page carries on in memory. The sidebar also
-lists the newest saved conversations (RECENT), above Spend; clicking one opens it here.
+says conversations aren't being saved and the page carries on in memory.
+
+The conversation's spend is added up from the answers on the page (conversation_spend), so a
+conversation reopened from its link or from the list shows what it cost, not $0.
 
 Usage
     streamlit run scripts/agent_ui.py
 
 Needs the same .env as agent_app.py (AGENT_DB_*, OPENAI_API_KEY, OPENAI_BASE_URL) and
-`streamlit` (pip install streamlit; with uv: uv add streamlit).
+`streamlit` 1.36 or later (st.popover, and st.columns' vertical_alignment).
+Team repo: pip install -r requirements-app.txt.
 """
 from __future__ import annotations
 
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -36,6 +50,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import agent_app as app  # noqa: E402
+
+TITLE = "JME maintenance assistant"
+CAPTION = "Answers come only from the shop's own data, through fixed tools, with the sources shown."
 
 EXAMPLES = [
     "Is CNC-02 running differently now?",
@@ -121,14 +138,13 @@ def photo_items(db, raw_sources: list[dict], fetch=None) -> list[dict]:
 
 
 def show_notes(st, notes: list[str]) -> None:
-    """The tools' caveats, under every answer, in a closed expander: one click away even
-    when the model leaves them out (7 Nov 2026: incident 911's 'read off the scan by a
-    person' was dropped once). Closed because the answer usually says them already, in
-    plainer words; the tools' wording is written for the model and names the trap-list
-    item, which is what an auditor wants to see."""
+    """The tools' caveats, as a list. They sit in their own Caveats tab under every answer:
+    one click away even when the model leaves them out (7 Nov 2026: incident 911's 'read off
+    the scan by a person' was dropped once). Not open by default, because the answer usually
+    says them already, in plainer words; the tools' wording is written for the model and
+    names the trap-list item, which is what an auditor wants to see."""
     if notes:
-        with st.expander(f"Caveats from the data ({len(notes)}), as the tools gave them"):
-            st.markdown("\n".join(f"- {n}" for n in notes))
+        st.markdown("\n".join(f"- {n}" for n in notes))
 
 
 def img_html(item: dict) -> str:
@@ -153,14 +169,67 @@ def img_html(item: dict) -> str:
 
 
 def show_photos(st, items: list[dict]) -> None:
-    if not items:
+    """The photos, one after another (inside the answer's Photos tab)."""
+    for it in items or []:
+        if "bytes" in it:
+            st.markdown(img_html(it), unsafe_allow_html=True)
+        else:
+            st.caption(it["note"])
+
+
+def evidence_tabs(m: dict, latest: bool = False) -> list[tuple[str, str]]:
+    """(kind, label) of the tabs under one answer, only for what it has: Sources,
+    Caveats, Photos, What happened, each with a count. On the newest answer What happened
+    comes first: Streamlit opens the first tab, and the demo shows the path a question took
+    (it used to be an open expander)."""
+    tabs = []
+    for kind, label in (("sources", "Sources"), ("notes", "Caveats"), ("photos", "Photos")):
+        if m.get(kind):
+            tabs.append((kind, f"{label} ({len(m[kind])})"))
+    trace = m.get("trace")
+    if trace:
+        tab = ("trace", f"What happened ({len(trace)} step{'s' if len(trace) != 1 else ''})")
+        if latest:
+            tabs.insert(0, tab)
+        else:
+            tabs.append(tab)
+    return tabs
+
+
+def last_answer(shown: list[dict]) -> int | None:
+    """Index of the newest answer on the page, or None."""
+    for i in range(len(shown) - 1, -1, -1):
+        if isinstance(shown[i], dict) and shown[i].get("role") == "assistant":
+            return i
+    return None
+
+
+def render_answer(st, m: dict, latest: bool = False) -> None:
+    """One answer: its text, what it cost, then its evidence in tabs."""
+    st.write(m["text"])
+    if m.get("cost"):
+        st.caption(m["cost"])
+    tabs = evidence_tabs(m, latest)
+    if not tabs:
         return
-    with st.expander(f"Photo{'s' if len(items) > 1 else ''} ({len(items)})", expanded=True):
-        for it in items:
-            if "bytes" in it:
-                st.markdown(img_html(it), unsafe_allow_html=True)
-            else:
-                st.caption(it["note"])
+    for (kind, _), tab in zip(tabs, st.tabs([label for _, label in tabs])):
+        with tab:
+            if kind == "sources":
+                st.markdown("\n".join(f"- {s}" for s in m["sources"]))
+            elif kind == "notes":
+                show_notes(st, m["notes"])
+            elif kind == "photos":
+                show_photos(st, m["photos"])
+            elif kind == "trace":
+                st.table(m["trace"])
+
+
+def example_help(question: str) -> str | None:
+    """Tooltip for an example button: only the one the guardrail refuses gets one, so the
+    audience knows the refusal is the point."""
+    if app.guardrail.check_input(question).allowed:
+        return None
+    return "Refused in code by the guardrail, before the model is called (PDPA)."
 
 
 def cost_line(usage: dict) -> str:
@@ -177,11 +246,62 @@ def cost_line(usage: dict) -> str:
     return f"{calls}, {tokens}, ${cost:.4f}"
 
 
-def session_line(spent: float, questions: int) -> str:
-    return f"This session: ${spent:.4f} over {questions} question{'s' if questions != 1 else ''}"
+_DOLLARS = re.compile(r"\$(\d+(?:\.\d+)?)")
 
 
-DISPLAY_KEYS = ("role", "text", "sources", "notes", "cost")   # no photos, no trace
+def _cost_of(m: dict) -> tuple[float, bool]:
+    """(cost, known) of one answer on the page. An answer from 10 Nov 2026 on carries its
+    cost as a number (cost_usd, cost_complete). One saved before that has it only in its
+    cost line ('2 model calls, 9,936 tokens, $0.0012'), so it is read back from there, to
+    the line's 4 decimal places. A line with no figure leaves the total a lower bound."""
+    c = m.get("cost_usd")
+    if isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c) and c >= 0:
+        return float(c), m.get("cost_complete") is not False
+    line = m.get("cost")
+    if not isinstance(line, str):
+        return 0.0, False
+    if line.startswith("No model calls"):
+        return 0.0, True                                  # refused or answered in code
+    found = _DOLLARS.findall(line)
+    if not found:
+        return 0.0, False
+    return float(found[-1]), "at least" not in line
+
+
+def conversation_spend(shown: list[dict]) -> tuple[float, int, bool]:
+    """(cost in USD, questions, complete) of the conversation on the page, added up from
+    what each answer recorded. Derived from the conversation itself, so a conversation
+    reopened from its link or from Recent conversations shows what it has cost, and
+    New conversation shows $0, with no separate counter to keep in step (10 Nov 2026: the
+    old counter lived in page memory and started at $0 on every load).
+    complete is False when any answer's cost wasn't known: the total is then a lower bound."""
+    total, questions, complete = 0.0, 0, True
+    for m in shown:
+        if not isinstance(m, dict):
+            continue
+        if m.get("role") == "user":
+            questions += 1
+        elif m.get("role") == "assistant":
+            cost, known = _cost_of(m)
+            total += cost
+            complete = complete and known
+    return total, questions, complete
+
+
+def conversation_line(cost: float, questions: int, complete: bool = True) -> str:
+    q = f"{questions} question{'s' if questions != 1 else ''}"
+    return f"This conversation: {'' if complete else 'at least '}${cost:.4f} over {q}"
+
+
+def usage_label(model: str, cost: float, complete: bool = True) -> str:
+    """The top bar's usage button: the model and this conversation's cost, escaped for a
+    Streamlit label (which reads Markdown, and $...$ as maths)."""
+    return md_plain(f"{model} · {'at least ' if not complete else ''}${cost:.4f}")
+
+
+# What is saved of each message: no photos, no trace. cost_usd and cost_complete let the
+# page add up a reopened conversation's spend exactly (conversation_spend).
+DISPLAY_KEYS = ("role", "text", "sources", "notes", "cost", "cost_usd", "cost_complete")
 
 
 def kept_question(text: str) -> str:
@@ -218,7 +338,7 @@ def restored(loaded) -> tuple[list[dict], list[dict]] | None:
     return app.new_conversation() + loaded.messages, shown
 
 
-RECENT = 3                       # saved conversations listed in the sidebar
+RECENT = 8                       # saved conversations listed in the sidebar
 
 
 def ago(when, now: datetime | None = None) -> str:
@@ -314,13 +434,11 @@ def trace_rows(events: list[dict]) -> list[dict]:
 def main() -> None:
     import streamlit as st
 
-    st.set_page_config(page_title="JME maintenance assistant", page_icon=None)
-    st.title("JME maintenance assistant")
-    st.caption("Answers come only from the shop's own data, through fixed tools, "
-               "with the sources shown.")
+    st.set_page_config(page_title=TITLE, page_icon=None, layout="wide")
 
     expected = os.environ.get("APP_PASSWORD")
     if expected and not st.session_state.get("authed"):
+        st.title(TITLE)
         typed = st.text_input("Password", type="password")
         if typed and password_ok(typed, expected):
             st.session_state.authed = True
@@ -369,7 +487,7 @@ def main() -> None:
 
     def start_fresh():
         st.session_state.messages = app.new_conversation()
-        st.session_state.shown = []   # what to draw: role, text, sources, trace
+        st.session_state.shown = []   # what to draw: role, text, sources, trace, cost
         st.session_state.sid = sessions.new_session_id()
         st.session_state.save_error = None
         st.query_params["session"] = st.session_state.sid
@@ -387,25 +505,6 @@ def main() -> None:
             elif not loaded.ok:
                 st.session_state.save_error = loaded.error
 
-    with st.sidebar:
-        st.subheader("Try")
-        picked = None
-        for q in EXAMPLES:
-            if st.button(q, use_container_width=True):
-                picked = q
-        if st.button("New conversation", use_container_width=True):
-            start_fresh()
-            st.session_state.spent, st.session_state.questions = 0.0, 0
-            st.rerun()
-        st.caption(f"Model: {app.MODEL}")
-        save_box = st.empty()                      # is this conversation being kept (#5)
-
-    def show_saved():
-        ok, text = save_line(store is not None, store_why, st.session_state.get("save_error"))
-        (save_box.caption if ok else save_box.warning)(text)
-
-    show_saved()
-
     def open_saved(sid: str) -> None:
         """Switch the page to a saved conversation, as if its link had been opened."""
         loaded = store.load(sid)
@@ -415,17 +514,20 @@ def main() -> None:
             st.session_state.sid = sid
             st.session_state.save_error = None
             st.query_params["session"] = sid
-            st.session_state.spent, st.session_state.questions = 0.0, 0
         else:
             st.session_state.save_error = loaded.error or "that conversation is no longer saved"
         st.rerun()
 
-    if store:
-        with st.sidebar:
+    # ---- sidebar: conversations only ------------------------------------------------
+    with st.sidebar:
+        if st.button("New conversation", use_container_width=True, type="primary"):
+            start_fresh()
+            st.rerun()
+        if store:
             # The newest saved conversations (#5). Titles come from `messages`, where a
             # refused question is only its placeholder. Read once per run: one that is
             # saved by this run's answer shows from the next click on.
-            st.subheader("Recent conversations")
+            st.caption("Recent")
             recent = store.recent(RECENT)          # never raises
             if recent is None:
                 st.caption("Couldn't list saved conversations right now.")
@@ -436,38 +538,75 @@ def main() -> None:
                 if st.button(recent_label(r, st.session_state.sid), key=f"recent_{r.sid}",
                              use_container_width=True, disabled=here):
                     open_saved(r.sid)
-    with st.sidebar:
-        # Spend (#7): this session from each call's cost header, exact and immediate; the
-        # key's total against its cap from the proxy (about a minute behind).
-        st.subheader("Spend")
-        spend_box = st.empty()                     # filled now, and again after an answer
+        st.divider()
+        save_box = st.empty()                      # is this conversation being kept (#5)
+
+    def show_saved():
+        ok, text = save_line(store is not None, store_why, st.session_state.get("save_error"))
+        (save_box.caption if ok else save_box.warning)(text)
+
+    show_saved()
+
+    # ---- top bar: title, examples (once started), usage ------------------------------
+    picked = None
+    head, ex_col, use_col = st.columns([6, 1.2, 2], vertical_alignment="center")
+    with head:
+        st.subheader(TITLE)
+        st.caption(CAPTION)
+    if st.session_state.shown:
+        with ex_col, st.popover("Examples", use_container_width=True):
+            for i, q in enumerate(EXAMPLES):
+                if st.button(q, key=f"ex_pop_{i}", use_container_width=True,
+                             help=example_help(q)):
+                    picked = q
+    with use_col:
+        usage_box = st.empty()                     # filled now, and again after an answer
+    warn_box = st.empty()                          # the key near or over its cap (#7)
 
     def show_spend():
-        with spend_box.container():
-            st.caption(session_line(st.session_state.get("spent", 0.0),
-                                    st.session_state.get("questions", 0)))
-            ks = key_budget()
-            (st.warning if ks.warn or not ks.ok else st.caption)(spend.budget_line(ks))
+        # Spend (#7): this conversation's cost, added up from each answer's cost header
+        # (exact and immediate, and the same after a reload or reopening it); the key's
+        # total against its cap from the proxy (about a minute behind).
+        cost, questions, complete = conversation_spend(st.session_state.shown)
+        ks = key_budget()
+        with usage_box.container(), st.popover(usage_label(app.MODEL, cost, complete),
+                                               use_container_width=True):
+            st.caption(f"Model: {app.MODEL}")
+            st.markdown(conversation_line(cost, questions, complete))
+            st.markdown(spend.budget_line(ks))
+        if ks.warn or not ks.ok:
+            warn_box.warning(spend.budget_line(ks))
+        else:
+            warn_box.empty()
 
     show_spend()
 
-    for m in st.session_state.shown:
+    # ---- a new conversation opens on the examples -----------------------------------
+    grid_box = st.empty()
+    if not st.session_state.shown:
+        with grid_box.container():
+            st.caption("Try one of these, or ask your own below.")
+            cols = st.columns(3)
+            for i, q in enumerate(EXAMPLES):
+                with cols[i % 3]:
+                    if st.button(q, key=f"ex_grid_{i}", use_container_width=True,
+                                 help=example_help(q)):
+                        picked = q
+
+    # ---- the conversation -----------------------------------------------------------
+    newest = last_answer(st.session_state.shown)
+    for i, m in enumerate(st.session_state.shown):
         with st.chat_message(m["role"]):
-            st.write(m["text"])
-            if m.get("cost"):
-                st.caption(m["cost"])
-            if m.get("sources"):
-                st.markdown("**Sources**\n" + "\n".join(f"- {s}" for s in m["sources"]))
-            show_notes(st, m.get("notes") or [])
-            show_photos(st, m.get("photos") or [])
-            if m.get("trace"):
-                with st.expander("What happened"):
-                    st.table(m["trace"])
+            if m["role"] == "assistant":
+                render_answer(st, m, latest=(i == newest))
+            else:
+                st.write(m["text"])
 
     question = st.chat_input("Ask about a machine, an incident or an SOP") or picked
     if not question:
         return
 
+    grid_box.empty()                               # the examples go once one is asked
     st.session_state.shown.append({"role": "user", "text": question})
     with st.chat_message("user"):
         st.write(question)
@@ -482,24 +621,15 @@ def main() -> None:
                                       usage=usage)
             photos = photo_items(db, raw)
             notes = app.format_notes(tool_notes)
-        st.session_state.spent = st.session_state.get("spent", 0.0) + (usage.get("cost_usd") or 0)
-        st.session_state.questions = st.session_state.get("questions", 0) + 1
+        # On the page before the top bar is redrawn, so the conversation's total includes it.
+        st.session_state.shown.append({
+            "role": "assistant", "text": answer, "sources": sources, "notes": notes,
+            "photos": photos, "trace": trace_rows(handler.events), "cost": cost_line(usage),
+            "cost_usd": float(usage.get("cost_usd") or 0.0),
+            "cost_complete": bool(usage.get("cost_complete", True))})
         key_budget.clear()                         # re-read the key's spend from the proxy
-        show_spend()                               # and redraw the sidebar with this question
-        rows = trace_rows(handler.events)
-        cost = cost_line(usage)
-        st.write(answer)
-        st.caption(cost)
-        if sources:
-            st.markdown("**Sources**\n" + "\n".join(f"- {s}" for s in sources))
-        show_notes(st, notes)
-        show_photos(st, photos)
-        if rows:
-            with st.expander("What happened", expanded=True):
-                st.table(rows)
-    st.session_state.shown.append({"role": "assistant", "text": answer,
-                                   "sources": sources, "notes": notes, "photos": photos,
-                                   "trace": rows, "cost": cost})
+        show_spend()                               # and redraw the top bar with this question
+        render_answer(st, st.session_state.shown[-1], latest=True)
     if store:                                      # keep it for a restart (#5); never raises
         _, st.session_state.save_error = store.save(
             st.session_state.sid, st.session_state.messages,
