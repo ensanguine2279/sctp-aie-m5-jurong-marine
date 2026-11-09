@@ -18,8 +18,13 @@ Who can touch it (PDPA, the same idea as agent_user.py):
 What is stored: the messages without the system prompt (always loaded fresh from code), and
 a light copy of what the page shows under each answer (text, sources, caveats, cost; no
 photos). A question the guardrail refused is already only a placeholder in the messages,
-and an answer it blocked is already replaced, so neither is ever stored. Conversations not
-touched for AGENT_SESSION_DAYS days (default 7) are deleted.
+and an answer it blocked is already replaced. The page puts the same placeholder in its
+display copy (agent_ui.kept_question), so a refused question is never stored as typed.
+Conversations not touched for AGENT_SESSION_DAYS days (default 7) are deleted.
+
+The page's sidebar lists the newest conversations (SessionStore.recent). Each is titled by
+its first question as the MESSAGES keep it, so a refused question shows only as its
+placeholder there too.
 
 Settings (the same .env as the app):
 
@@ -81,6 +86,28 @@ def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)   # DATETIME, UTC
 
 
+def messages_ok(messages) -> bool:
+    """A stored message list the app may use: a list of dicts, each user, assistant or tool.
+    A stored system message makes it unusable (the prompt only ever comes from code)."""
+    return isinstance(messages, list) and all(
+        isinstance(m, dict) and m.get("role") in ROLES for m in messages)
+
+
+TITLE_CHARS = 60
+RECENT_MAX = 10
+
+
+def title_of(messages: list[dict]) -> str:
+    """A conversation's title: its first question as the messages keep it. A question the
+    guardrail refused is only its placeholder there, so a name typed into it never shows."""
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "user":
+            t = " ".join(str(m.get("content") or "").split())
+            if t:
+                return t if len(t) <= TITLE_CHARS else t[:TITLE_CHARS - 1].rstrip() + "…"
+    return "(no question yet)"
+
+
 # ============================================================== the store ===
 
 @dataclass
@@ -90,6 +117,15 @@ class Loaded:
     messages: list[dict] = field(default_factory=list)   # without the system prompt
     display: list[dict] = field(default_factory=list)
     error: str | None = None
+
+
+@dataclass
+class Recent:
+    """One saved conversation in the sidebar's list."""
+    sid: str
+    title: str
+    turns: int
+    updated_at: datetime | str | None          # UTC; a string on sqlite (the tests)
 
 
 class SessionStore:
@@ -114,8 +150,7 @@ class SessionStore:
         try:
             messages = json.loads(rows[0]["messages"])
             display = json.loads(rows[0]["display"])
-            if not (isinstance(messages, list) and all(
-                    isinstance(m, dict) and m.get("role") in ROLES for m in messages)):
+            if not messages_ok(messages):
                 raise ValueError("bad messages")
             if not isinstance(display, list):
                 raise ValueError("bad display")
@@ -141,6 +176,33 @@ class SessionStore:
         except Exception as e:
             return False, f"couldn't save the conversation ({type(e).__name__})"
         return True, None
+
+    def recent(self, n: int = 3, now: datetime | None = None) -> list[Recent] | None:
+        """The n conversations answered most recently (at most RECENT_MAX), newest first,
+        within the retention; None if the store can't be read. A row that couldn't be
+        loaded (corrupt or tampered) isn't listed. Never raises."""
+        n = max(0, min(int(n), RECENT_MAX))
+        if not n:
+            return []
+        cutoff = (now or _now()) - timedelta(days=self.days)
+        try:
+            rows, _ = self._run(f"SELECT session_id, messages, turns, updated_at "
+                                f"FROM {self.table} WHERE updated_at >= :cutoff "
+                                f"ORDER BY updated_at DESC, session_id LIMIT {n}",
+                                {"cutoff": cutoff})
+        except Exception:
+            return None
+        out = []
+        for r in rows:
+            try:
+                messages = json.loads(r["messages"])
+            except (ValueError, TypeError, KeyError):
+                continue
+            if not (valid_id(r.get("session_id")) and messages_ok(messages)):
+                continue
+            out.append(Recent(r["session_id"], title_of(messages), int(r.get("turns") or 0),
+                              r.get("updated_at")))
+        return out
 
     def purge(self, now: datetime | None = None) -> int | None:
         """Delete conversations not touched for `days` days. How many, or None on error."""

@@ -13,7 +13,8 @@ The conversation survives a restart (#5): its id is in the page's link (?session
 after every answer it is saved through sessions.py (a table only the agent_sessions user can
 touch). Opening the link again, after a redeploy or on another device, reloads it, so a
 follow-up still has the earlier context. If the store isn't set up or is down, the sidebar
-says conversations aren't being saved and the page carries on in memory.
+says conversations aren't being saved and the page carries on in memory. The sidebar also
+lists the newest saved conversations (RECENT), above Spend; clicking one opens it here.
 
 Usage
     streamlit run scripts/agent_ui.py
@@ -27,7 +28,9 @@ import hmac
 import json
 import logging
 import os
+import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -181,20 +184,78 @@ def session_line(spent: float, questions: int) -> str:
 DISPLAY_KEYS = ("role", "text", "sources", "notes", "cost")   # no photos, no trace
 
 
+def kept_question(text: str) -> str:
+    """A question as it may be stored or redrawn: as typed, or, if the guardrail refuses it,
+    only the placeholder ask() puts in `messages`. A refused question can hold a staff name
+    or an injection; the page used to save it as typed in the display copy (found 9 Nov
+    2026, while adding the sidebar's list of saved conversations)."""
+    v = app.guardrail.check_input(text)
+    return text if v.allowed else f"[question withheld by the guardrail: {v.rule}]"
+
+
+def _kept(m: dict) -> dict:
+    if m.get("role") == "user" and isinstance(m.get("text"), str):
+        return {**m, "text": kept_question(m["text"])}
+    return m
+
+
 def display_copy(shown: list[dict]) -> list[dict]:
     """What is saved of the page's display: the text and what was shown under it. Photos
-    are left out (large, and re-fetchable from the database), and so is the trace."""
-    return [{k: m[k] for k in DISPLAY_KEYS if m.get(k) not in (None, [], "")} for m in shown]
+    are left out (large, and re-fetchable from the database), and so is the trace. A
+    question the guardrail refuses is saved only as its placeholder (kept_question)."""
+    return [{k: m[k] for k in DISPLAY_KEYS if m.get(k) not in (None, [], "")}
+            for m in map(_kept, shown)]
 
 
 def restored(loaded) -> tuple[list[dict], list[dict]] | None:
     """(messages, shown) for a conversation loaded by sessions.SessionStore, the system
-    prompt fresh from code; None if nothing was found."""
+    prompt fresh from code; None if nothing was found. Questions go through kept_question
+    again, so a row saved before that existed is cleaned when it is drawn."""
     if not (loaded.ok and loaded.found):
         return None
-    shown = [m for m in loaded.display if isinstance(m, dict) and m.get("role") in
+    shown = [_kept(m) for m in loaded.display if isinstance(m, dict) and m.get("role") in
              ("user", "assistant") and isinstance(m.get("text"), str)]
     return app.new_conversation() + loaded.messages, shown
+
+
+RECENT = 3                       # saved conversations listed in the sidebar
+
+
+def ago(when, now: datetime | None = None) -> str:
+    """'just now', '5 min ago', '3 h ago', '2 d ago' for a UTC time from the store."""
+    if isinstance(when, str):
+        try:
+            when = datetime.fromisoformat(when)
+        except ValueError:
+            return ""
+    if not isinstance(when, datetime):
+        return ""
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    s = (now - when.replace(tzinfo=None)).total_seconds()
+    if s < 60:
+        return "just now"
+    if s < 3600:
+        return f"{int(s // 60)} min ago"
+    if s < 86400:
+        return f"{int(s // 3600)} h ago"
+    return f"{int(s // 86400)} d ago"
+
+
+_MD = re.compile(r"([\\`*_{}\[\]<>()#+\-.!|~$])")
+
+
+def md_plain(text: str) -> str:
+    """Text for a Streamlit label, which reads Markdown (and $...$ as maths): escaped, so
+    a title shows exactly as stored."""
+    return _MD.sub(r"\\\1", text)
+
+
+def recent_label(r, current_sid: str | None, now: datetime | None = None) -> str:
+    """One line in the sidebar's list: the first question, how many, and when (or that it
+    is the conversation on the page)."""
+    when = "open now" if r.sid == current_sid else ago(r.updated_at, now)
+    n = f"{r.turns} question{'s' if r.turns != 1 else ''}"
+    return md_plain(f"{r.title} ({n}, {when})" if when else f"{r.title} ({n})")
 
 
 def save_line(store_on: bool, why: str | None, save_error: str | None) -> tuple[bool, str]:
@@ -344,6 +405,37 @@ def main() -> None:
         (save_box.caption if ok else save_box.warning)(text)
 
     show_saved()
+
+    def open_saved(sid: str) -> None:
+        """Switch the page to a saved conversation, as if its link had been opened."""
+        loaded = store.load(sid)
+        back = restored(loaded)
+        if back:
+            st.session_state.messages, st.session_state.shown = back
+            st.session_state.sid = sid
+            st.session_state.save_error = None
+            st.query_params["session"] = sid
+            st.session_state.spent, st.session_state.questions = 0.0, 0
+        else:
+            st.session_state.save_error = loaded.error or "that conversation is no longer saved"
+        st.rerun()
+
+    if store:
+        with st.sidebar:
+            # The newest saved conversations (#5). Titles come from `messages`, where a
+            # refused question is only its placeholder. Read once per run: one that is
+            # saved by this run's answer shows from the next click on.
+            st.subheader("Recent conversations")
+            recent = store.recent(RECENT)          # never raises
+            if recent is None:
+                st.caption("Couldn't list saved conversations right now.")
+            elif not recent:
+                st.caption("No saved conversations yet.")
+            for r in recent or []:
+                here = r.sid == st.session_state.sid
+                if st.button(recent_label(r, st.session_state.sid), key=f"recent_{r.sid}",
+                             use_container_width=True, disabled=here):
+                    open_saved(r.sid)
     with st.sidebar:
         # Spend (#7): this session from each call's cost header, exact and immediate; the
         # key's total against its cap from the proxy (about a minute behind).
