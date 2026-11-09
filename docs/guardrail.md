@@ -174,7 +174,8 @@ Before the guard (8 Nov 2026, run through the real loop and runner with the mode
 
 ## Tests
 
-`tests/test_guardrail.py` (116 tests, no model, no database; the ones that need the real staff
+`tests/test_guardrail.py` (117 tests: one per in-scope eval question, so the count grows
+with `cases.yaml`; no model, no database; the ones that need the real staff
 names read them from `data/sql/jurongmarine_cmms.sql` and skip without it, the rest use made-up
 names): out of scope, injection and PDPA each refused in 11-13 phrasings; a staff name typed in
 a question refused (two words of it, any case, curly apostrophe, an `--extra` name), one common

@@ -1135,6 +1135,9 @@ def get_incident(db: Db, a: IncidentArgs) -> ToolResult:
 # ============================================================= work orders ===
 
 class WorkOrderArgs(Args):
+    wo_id: int | None = Field(None, ge=1, description="One work order by its number, e.g. 11570. "
+                                                       "Use this, not description_contains, "
+                                                       "when the user gives a work order number.")
     machine: str | None = Field(None, max_length=60, description="Machine id or name.")
     date_from: date | None = None
     date_to: date | None = None
@@ -1142,19 +1145,52 @@ class WorkOrderArgs(Args):
     status: Literal["any", "open", "closed"] = Field(
         "any", description="open = anything not closed (OPEN, AWAITING PARTS).")
     description_contains: str | None = Field(None, max_length=60)
+    newest_first: bool = Field(True, description="Order the listed work orders by date, newest "
+                                                 "first. `earliest` and `latest` cover every match "
+                                                 "either way.")
 
 
 _TYPES = {"preventive": {"pm", "preventive"}, "corrective": {"corrective"},
           "breakdown": {"breakdown"}}
 
 
-@tool("list_work_orders", """Work orders from the CMMS for a machine and/or period: counts
+def _wo_row(r: dict) -> dict:
+    w = {"wo_id": int(r["wo_id"]), "wo_date": r["wo_date"], "machine_id": r["machine_id"],
+         "wo_type": r["wo_type"], "description": r["description"], "hours": r["duration_hrs"],
+         "cost_sgd": r["cost_sgd"], "status": r["status"], "dump_line": r["source_line"]}
+    # 8 Nov 2026: asked what WO 11570 waits for, the model dropped the general C11 note.
+    # The gap now sits on the row itself, next to the status it explains.
+    if "await" in str(w["status"]).lower() and "part" in str(w["status"]).lower():
+        w["part_awaited"] = "not recorded in the CMMS (trap list C11)"
+    return w
+
+
+# A work order number typed into the description search: "11570", "WO 11570", "#11570".
+_WO_NUMBER = re.compile(r"^\s*(?:w\.?\s*o\.?|work\s*order|#)?\s*#?\s*(\d{4,6})\s*$", re.I)
+
+
+@tool("list_work_orders", """One work order by its number (wo_id), or the work orders
+from the CMMS for a machine and/or period: counts
 by type, hours, costs (closed and not-closed kept apart, because open ones carry
-estimates), possible double entries, and the newest 50 with their dump lines.""",
+estimates), possible double entries, and up to 50 with their dump lines (newest first
+unless newest_first is false). Totals cover every match. `earliest` and `latest` are the
+first and last matching work orders by date, over ALL matches, even when only 50 are
+listed: use them for 'the first / oldest / last / most recent work order'.""",
       WorkOrderArgs)
 def list_work_orders(db: Db, a: WorkOrderArgs) -> ToolResult:
+    # Eval run 9 Nov 2026 (wo-11570-parts-not-recorded): with no way to ask for one work
+    # order, the model searched the descriptions for "11570", matched nothing, and told the
+    # user the work order doesn't exist. A number there is refused, so the model retries.
+    if a.description_contains and (m := _WO_NUMBER.match(a.description_contains)):
+        raise ToolError("bad_arguments",
+                        f"description_contains searches the description text, not work order "
+                        f"numbers. For work order {m.group(1)}, call list_work_orders with "
+                        f"wo_id={m.group(1)}.")
     mid = machine_arg(db, a.machine)
     where, params = [], {}
+    if a.wo_id is not None:
+        where.append("w.wo_id = :wo")
+        params["wo"] = a.wo_id
     if mid:
         where.append("w.machine_id = :m")
         params["m"] = mid
@@ -1180,6 +1216,11 @@ def list_work_orders(db: Db, a: WorkOrderArgs) -> ToolResult:
         df = df[keep].copy()
         for c in ("duration_hrs", "cost_sgd"):
             df[c] = pd.to_numeric(df[c], errors="coerce")
+    if a.wo_id is not None and not len(df):
+        raise ToolError("no_data", f"There is no work order {a.wo_id} in the CMMS"
+                                   + (" matching the other filters." if mid or a.date_from or
+                                      a.date_to or a.wo_type != "any" or a.status != "any" or
+                                      a.description_contains else "."))
     notes = []
     data = {"machine_id": mid, "count": len(df)}
     if len(df):
@@ -1199,20 +1240,22 @@ def list_work_orders(db: Db, a: WorkOrderArgs) -> ToolResult:
         if (~closed).any():
             notes.append("Work orders that aren't closed already carry hours and costs; treat "
                          "those as estimates (trap list C10).")
-        newest = df.sort_values(["wo_date", "wo_id"], ascending=False).head(MAX_ROWS)
-        data["work_orders"] = [{"wo_id": int(r["wo_id"]), "wo_date": r["wo_date"],
-                                "machine_id": r["machine_id"], "wo_type": r["wo_type"],
-                                "description": r["description"], "hours": r["duration_hrs"],
-                                "cost_sgd": r["cost_sgd"], "status": r["status"],
-                                "dump_line": r["source_line"]} for r in newest.to_dict("records")]
-        # 8 Nov 2026: asked what WO 11570 waits for, the model dropped the general C11 note.
-        # The gap now sits on the row itself, next to the status it explains.
-        awaiting = [w for w in data["work_orders"]
-                    if "await" in str(w["status"]).lower() and "part" in str(w["status"]).lower()]
-        for w in awaiting:
-            w["part_awaited"] = "not recorded in the CMMS (trap list C11)"
+        shown = df.sort_values(["wo_date", "wo_id"], ascending=not a.newest_first).head(MAX_ROWS)
+        data["work_orders"] = [_wo_row(r) for r in shown.to_dict("records")]
+        # Over every match, not the page: the list_incidents trap (eval run 9 Nov 2026,
+        # incident-earliest-917), where the page's last row was taken as the earliest.
+        by_date = df.sort_values(["wo_date", "wo_id"])
+        data["earliest"] = _wo_row(by_date.iloc[0].to_dict())
+        data["latest"] = _wo_row(by_date.iloc[-1].to_dict())
+        awaiting = [w for w in data["work_orders"] if "part_awaited" in w]
         if len(df) > MAX_ROWS:
-            notes.append(f"Newest {MAX_ROWS} of {len(df)} listed; the totals cover all of them.")
+            end = "newest" if a.newest_first else "oldest"
+            e, l = data["earliest"], data["latest"]
+            notes.append(f"{len(df)} work orders match; only the {end} {MAX_ROWS} are listed, so "
+                         f"the list's last row is NOT the "
+                         f"{'earliest' if a.newest_first else 'latest'} work order. The earliest "
+                         f"of all {len(df)} is {e['wo_id']} ({e['wo_date']}); the latest is "
+                         f"{l['wo_id']} ({l['wo_date']}). The totals cover all of them.")
         if awaiting:
             notes.append(f"Work order(s) {', '.join(str(w['wo_id']) for w in awaiting)} are "
                          f"awaiting parts, but the CMMS doesn't record which part (trap list "
