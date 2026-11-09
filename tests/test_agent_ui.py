@@ -170,3 +170,25 @@ def test_a_question_refused_because_the_name_list_is_missing_shows_in_the_rows()
     assert ui.trace_rows([{"event": "guard_not_ready"}]) == [
         {"step": "guardrail", "seconds": None,
          "detail": "refused: the staff name list isn't loaded (fail closed)"}]
+
+
+# ------------------------------------------------------- spend on the page (#7) ---
+
+def test_each_answer_says_what_it_cost():
+    assert ui.cost_line({"model_calls": 2, "prompt_tokens": 9843, "completion_tokens": 93,
+                         "cost_usd": 0.0012, "cost_complete": True}) == \
+        "2 model calls, 9,936 tokens, $0.0012"
+    assert ui.cost_line({"model_calls": 1, "prompt_tokens": 10, "completion_tokens": 5,
+                         "cost_usd": 0.0, "cost_complete": False}).endswith(
+        "at least $0.0000 (a call came back without a cost)")
+    assert ui.cost_line({"model_calls": 0}) == "No model calls: answered in code."   # a refusal
+
+
+def test_the_session_total_and_each_model_rows_cost():
+    assert ui.session_line(0.0123, 3) == "This session: $0.0123 over 3 questions"
+    assert ui.session_line(0.0, 1) == "This session: $0.0000 over 1 question"
+    rows = ui.trace_rows([{"event": "chat_call", "round": 1, "tool_calls": ["find_sop"],
+                           "ms": 1500, "cost_usd": 0.0004},
+                          {"event": "chat_call", "round": 2, "tool_calls": [], "ms": 900}])
+    assert rows[0]["detail"] == "asked for: find_sop ($0.0004)"
+    assert rows[1]["detail"] == "asked for: (answered)"                  # no cost header: none

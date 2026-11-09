@@ -138,12 +138,40 @@ class ChatError(Exception):
     """A chat-completion call failed: API error, budget cap, network, timeout."""
 
 
+COST_HEADER = "x-litellm-response-cost"   # what the LiteLLM proxy charged for the call
+
+
+class Priced:
+    """A chat response with the cost the proxy charged for it (USD, or None when the proxy
+    didn't say). Reads like the response itself: resp.choices, resp.usage, ..."""
+
+    def __init__(self, resp, cost_usd: float | None):
+        self._resp, self.cost_usd = resp, cost_usd
+
+    def __getattr__(self, name):
+        return getattr(self._resp, name)
+
+
+def _cost(headers) -> float | None:
+    try:
+        v = headers.get(COST_HEADER) if headers is not None else None
+        return None if v is None else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def complete(client, model, messages, tools):
     """One call to the chat API. Wraps SDK/network errors as ChatError, so a failed
-    call degrades honestly (#4) instead of raising out of the loop."""
+    call degrades honestly (#4) instead of raising out of the loop. Returns the response
+    with the proxy's cost for it (#7): the SDK's raw-response API gives the headers, and a
+    client without it (a stand-in, another provider) just gives cost None."""
+    kw = dict(model=model, messages=messages, tools=tools, tool_choice="auto", temperature=0)
     try:
-        return client.chat.completions.create(
-            model=model, messages=messages, tools=tools, tool_choice="auto", temperature=0)
+        raw_api = getattr(client.chat.completions, "with_raw_response", None)
+        if raw_api is None:
+            return Priced(client.chat.completions.create(**kw), None)
+        raw = raw_api.create(**kw)
+        return Priced(raw.parse(), _cost(getattr(raw, "headers", None)))
     except Exception as e:   # openai.APIError and friends, plus plain network errors
         raise ChatError(str(e)) from e
 
@@ -178,8 +206,13 @@ def format_sources(sources: list[dict]) -> list[str]:
     return labels
 
 
+def _new_usage() -> dict:
+    return {"model_calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0,
+            "cost_complete": True}
+
+
 def run_turn(db, client, messages, *, model=MODEL, max_rounds=MAX_TOOL_ROUNDS,
-             complete_fn=None, logger=log, notes_out=None):
+             complete_fn=None, logger=log, notes_out=None, usage_out=None):
     """Run one user turn to completion: call the model, run any tools it picks, feed
     the results back, repeat until it answers in plain text or `max_rounds` is hit.
     Returns (answer_text, sources, tool_names_called). Mutates `messages` in place, so
@@ -193,6 +226,7 @@ def run_turn(db, client, messages, *, model=MODEL, max_rounds=MAX_TOOL_ROUNDS,
                                              # monkeypatched module-level `complete` is honoured
     sources: list[dict] = []
     tool_names: list[str] = []
+    tally = usage_out if usage_out is not None else _new_usage()   # (`usage` is the API's)
     for round_no in range(1, max_rounds + 1):
         t0 = time.monotonic()
         try:
@@ -206,11 +240,19 @@ def run_turn(db, client, messages, *, model=MODEL, max_rounds=MAX_TOOL_ROUNDS,
         usage = getattr(resp, "usage", None)
         messages.append(_assistant_message(msg))
         calls = getattr(msg, "tool_calls", None) or []
+        cost = getattr(resp, "cost_usd", None)
+        pt, ct = getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None)
         _emit(logger, "chat_call", round=round_no, model=model,
-              prompt_tokens=getattr(usage, "prompt_tokens", None),
-              completion_tokens=getattr(usage, "completion_tokens", None),
+              prompt_tokens=pt, completion_tokens=ct,
               tool_calls=[c.function.name for c in calls],
-              ms=round((time.monotonic() - t0) * 1000, 1))
+              cost_usd=cost, ms=round((time.monotonic() - t0) * 1000, 1))
+        tally["model_calls"] += 1
+        tally["prompt_tokens"] += pt or 0
+        tally["completion_tokens"] += ct or 0
+        if cost is None:
+            tally["cost_complete"] = False         # a call the proxy didn't price
+        else:
+            tally["cost_usd"] += cost
 
         if not calls:
             return msg.content, sources, tool_names
@@ -260,12 +302,15 @@ def new_conversation() -> list[dict]:
 
 
 def ask(db, client, messages, question, *, model=MODEL, logger=log, raw_sources=None,
-        notes=None):
+        notes=None, usage=None):
     """Append the user's question, run it to completion, return (answer, source
     labels). `messages` is mutated in place so the caller can keep the conversation.
     raw_sources: a list to extend with the tools' source records (agent_ui.py shows the
     photo behind each image source from them). notes: a list to extend with the tools'
     notes, the caveats the page shows under the answer whether or not the model said them.
+    usage: a dict to fill with this question's model_calls, prompt_tokens, completion_tokens
+    and cost_usd (as the LiteLLM proxy charged it; cost_complete is False if any call came
+    back without a cost, so the total is then a lower bound).
 
     The guardrail (#3) runs here, on both sides of the model, so every caller (the CLI, the
     page, the eval suite) gets it:
@@ -275,6 +320,11 @@ def ask(db, client, messages, question, *, model=MODEL, logger=log, raw_sources=
         question's text for the same reason.
       - output: an answer with personal data is replaced, in `messages` too, so the next
         turn's prompt doesn't carry it either."""
+    tally = _new_usage()                       # this question's model calls, tokens, cost
+    if usage is not None:                      # usage: a dict for the caller (the page shows
+        usage.clear()                          # it under the answer); filled even on a refusal
+        usage.update(tally)
+        tally = usage
     if not guardrail.names_loaded():           # fail closed: no name list, no answers
         _emit(logger, "guard_not_ready")
         _emit(logger, "turn", question="[withheld: guard not ready]", tools_called=[],
@@ -292,7 +342,7 @@ def ask(db, client, messages, question, *, model=MODEL, logger=log, raw_sources=
 
     messages.append({"role": "user", "content": question})
     answer, sources, tool_names = run_turn(db, client, messages, model=model, logger=logger,
-                                           notes_out=notes)
+                                           notes_out=notes, usage_out=tally)
     out = guardrail.check_output(answer or "")
     if not out.allowed:
         _emit(logger, "output_blocked", rule=out.rule, reason=out.reason)   # never the text
@@ -302,7 +352,8 @@ def ask(db, client, messages, question, *, model=MODEL, logger=log, raw_sources=
                 m["content"] = answer
                 break
     _emit(logger, "turn", question=question[:200],
-          tools_called=tool_names, n_sources=len(sources))
+          tools_called=tool_names, n_sources=len(sources), model_calls=tally["model_calls"],
+          cost_usd=round(tally["cost_usd"], 6) if tally["cost_complete"] else None)
     if raw_sources is not None:
         raw_sources.extend(sources)
     return answer, format_sources(sources)
