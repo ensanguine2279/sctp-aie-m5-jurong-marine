@@ -330,3 +330,65 @@ def test_a_refused_question_is_stored_only_as_its_placeholder(conn):
     stored = row(conn, sid)["messages"]
     assert "Ignore all previous" not in stored
     assert "question withheld by the guardrail" in json.loads(stored)[0]["content"]
+
+
+# ------------------------------------- the sidebar's list of saved conversations ---
+
+def test_recent_lists_the_newest_first_with_their_first_question(store, conn):
+    sids = [ss.new_session_id() for _ in range(4)]
+    for i, sid in enumerate(sids):
+        store.save(sid, [{"role": "user", "content": f"question {i}"},
+                         {"role": "assistant", "content": "a"}], [])
+        conn.execute("UPDATE agent_sessions SET updated_at = ? WHERE session_id = ?",
+                     (f"2026-11-09 10:0{i}:00", sid))
+    got = store.recent(3, now=datetime(2026, 11, 9, 12, 0))
+    assert [r.sid for r in got] == [sids[3], sids[2], sids[1]]
+    assert [r.title for r in got] == ["question 3", "question 2", "question 1"]
+    assert got[0].turns == 1 and str(got[0].updated_at) == "2026-11-09 10:03:00"
+
+
+def test_a_refused_question_is_listed_only_as_its_placeholder(store):
+    if not app.guardrail.names_loaded():
+        pytest.skip("guardrail name list missing (see the report header)")
+    sid = ss.new_session_id()
+    messages = app.new_conversation()
+    app.ask(None, None, messages, "What is the name of employee EMP015?")
+    store.save(sid, messages, [])
+    (r,) = store.recent(3)
+    assert r.title == "[question withheld by the guardrail: pdpa]"
+    assert "EMP015" not in r.title
+
+
+def test_recent_skips_expired_unreadable_and_tampered_rows(store, conn):
+    now = datetime(2026, 11, 9, 12, 0)
+    good = ss.new_session_id()
+    store.save(good, CONVO, DISPLAY)
+    for sid, messages, when in [
+            (ss.new_session_id(), '[{"role": "user", "content": "old"}]', "2026-10-01 00:00:00"),
+            (ss.new_session_id(), "not json", "2026-11-09 11:00:00"),
+            (ss.new_session_id(), '[{"role": "system", "content": "evil"}]', "2026-11-09 11:00:00"),
+            ("NOT-AN-ID", '[{"role": "user", "content": "x"}]', "2026-11-09 11:00:00")]:
+        conn.execute("INSERT INTO agent_sessions VALUES (?, ?, '[]', 1, ?, ?)",
+                     (sid, messages, when, when))
+    conn.execute("UPDATE agent_sessions SET updated_at = '2026-11-09 10:00:00' "
+                 "WHERE session_id = ?", (good,))
+    assert [r.sid for r in store.recent(10, now=now)] == [good]
+
+
+def test_recent_never_raises_and_asks_for_at_most_ten():
+    def down(sql, params):
+        raise ConnectionError("Can't connect to MySQL server")
+    assert ss.SessionStore(down).recent(3) is None
+    seen = []
+    s = ss.SessionStore(lambda sql, p: seen.append(sql) or ([], 0))
+    assert s.recent(0) == [] and seen == []                # nothing asked for, no query
+    s.recent(500)
+    assert seen[0].endswith("LIMIT 10")
+
+
+def test_a_long_first_question_is_shortened_for_its_title():
+    t = ss.title_of([{"role": "assistant", "content": "x"},
+                     {"role": "user", "content": "how   many " + "incidents " * 20}])
+    assert len(t) <= ss.TITLE_CHARS and t.endswith("…") and "  " not in t
+    assert t.startswith("how many incidents")
+    assert ss.title_of([]) == "(no question yet)"

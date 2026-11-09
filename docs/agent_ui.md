@@ -33,6 +33,9 @@ You can run it on your laptop (below) or host it on Google Cloud Run
   - A **New conversation** button.
   - The model in use (`agent_app.MODEL`), and whether this conversation is being saved
     ([below](#the-conversation-survives-a-restart)).
+  - **Recent conversations**: the three saved conversations answered most recently, each
+    titled by its first question, with how many questions and how long ago. Click one to
+    open it here; the one on the page is greyed out ("open now").
   - **Spend**: this session's cost and the key's spend against its budget.
 - **Chat.** Each answer has a **Sources** list, a closed **Caveats from the data** expander
   (the tools' notes, below) and, when a tool cited a scan, a **Photo** expander showing it. It also has a **What happened** expander, which
@@ -53,6 +56,16 @@ saves the conversation through [`sessions.py`](sessions.md), to a table only the
 `agent_sessions` user can touch. When the page starts (a refresh, a redeploy, Cloud Run
 starting a new container, another device) it loads the conversation for the link's id, draws the
 answers again and hands the model the earlier messages, so a follow-up keeps its context.
+
+The sidebar's **Recent conversations** lists the three newest saved conversations, so one can
+be reopened without its link. Clicking one does what opening its link would. A title is the
+first question as `messages` keeps it, so a question the guardrail refused shows only as its
+placeholder. Everyone behind the page password sees the same list: the page has no user
+accounts. Details in [`sessions.md`](sessions.md#recent-conversations-in-the-sidebar).
+
+A question the guardrail refuses is saved, and drawn again after a reload, only as its
+placeholder (`kept_question()`), the same as in `messages`. Before 9 Nov 2026 the saved
+display copy kept it as typed ([`sessions.md`](sessions.md#what-is-stored)).
 
 If `AGENT_SESSION_DB_PASSWORD` isn't set, or MySQL is down, the sidebar says the conversation
 isn't being saved, and the page carries on in memory as before. Details, setup and the check in
@@ -107,11 +120,17 @@ pip install -r requirements-app.txt  # includes streamlit
 streamlit run scripts/agent_ui.py
 ```
 
+With uv (personal repo): `uv pip install -r requirements-app.txt`, then
+`uv run streamlit run scripts/agent_ui.py`.
+
 Streamlit opens the page at <http://localhost:8501>.
 
 The page needs the same `.env` as `agent_app.py`. Set at least the agent database settings,
 `OPENAI_API_KEY` and `OPENAI_BASE_URL` (see [Configuration](#configuration)). Leave
 `APP_PASSWORD` unset if you don't want a password box on your own machine.
+
+Settings are read once per Streamlit process (`st.cache_resource`). After changing `.env`,
+stop Streamlit (Ctrl+C) and start it again; refreshing the browser is not enough.
 
 ## Configuration
 
@@ -152,8 +171,9 @@ The **What happened** table is built from these same events.
 | `show_notes()` | The tools' caveats under the answer, from `agent_app.ask(..., notes=...)` |
 | `photo_items()`, `show_photos()`, `img_html()` | The photos behind an answer's image sources, fetched and hash-checked, with captions; drawn in a **Photo** expander as `<img>` tags with the bytes inside (caption HTML-escaped) |
 | `cost_line()`, `session_line()` | The cost under each answer and the session total in the sidebar |
-| `display_copy()`, `restored()`, `save_line()` | What is saved of the display (no photos, no trace), a loaded conversation turned back into `messages` and `shown`, and the sidebar's saved / not saved line |
-| `main()` | The Streamlit page: password gate, the cached `connect()` (one DB connection and LLM client per process, through `st.cache_resource`), the cached session store (purges old conversations once per process), the conversation loaded from `?session=`, sidebar, chat history, one question per run, then the save |
+| `display_copy()`, `restored()`, `kept_question()`, `save_line()` | What is saved of the display (no photos, no trace, a refused question only as its placeholder), a loaded conversation turned back into `messages` and `shown` (questions checked again), and the sidebar's saved / not saved line |
+| `RECENT`, `recent_label()`, `ago()`, `md_plain()` | The sidebar's list of saved conversations: how many, one line each (title, questions, how long ago or "open now"), Markdown escaped |
+| `main()` | The Streamlit page: password gate, the cached `connect()` (one DB connection and LLM client per process, through `st.cache_resource`), the cached session store (purges old conversations once per process), the conversation loaded from `?session=`, sidebar (with `open_saved()` behind the recent list), chat history, one question per run, then the save |
 
 Conversation state lives in `st.session_state` while the page is open, and in the
 `agent_sessions` table between page loads:
@@ -184,8 +204,8 @@ flowchart LR
     R -->|stderr| G["Cloud Logging"]
 ```
 
-**Not tested end to end yet.** The Dockerfile and the commands below were written but never
-run. Build the service and open it once before you rely on it.
+**Deployed end to end on 9 Nov 2026**, with conversations saved to `agent_sessions` from the
+hosted page. The problems hit on the way are in [Troubleshooting](#troubleshooting).
 
 ## Files
 
@@ -194,9 +214,23 @@ run. Build the service and open it once before you rely on it.
 | `Dockerfile` | Python 3.12 slim. Installs `requirements-app.txt`, copies `scripts/` and starts Streamlit on `$PORT` |
 | `requirements-app.txt` | Only what the page needs. **Pin the versions** from your working environment before the demo |
 | `.dockerignore` | Keeps `.env`, `data/`, `docs/`, `tests/` and `logs/` out of the image |
+| `.gcloudignore` | Keeps `.env` and `.git` out of the **upload** (below) |
 
 The image holds no secrets and no data. Settings come from the environment and data comes from
 Aiven.
+
+`.dockerignore` keeps `.env` out of the image, but `gcloud run deploy --source .` first uploads
+the whole folder to a Cloud Build bucket. Keep no `.env` in the deploy folder, or add a
+`.gcloudignore` containing:
+
+```
+.env
+.git
+__pycache__/
+```
+
+The hosted page never reads a `.env`: every setting comes from `--set-env-vars` and
+`--set-secrets`.
 
 ## 0. Get the files into Cloud Shell
 
@@ -232,7 +266,7 @@ ls -la Dockerfile .dockerignore requirements-app.txt scripts/agent_ui.py   # all
 ```
 
 **Option B: git.** This works if the team repo on GitHub holds the `Dockerfile` and
-`requirements-app.txt` (commit them first):
+`requirements-app.txt` at the repo root (commit them first):
 
 ```bash
 git clone <repo-url> && cd <repo>
@@ -242,7 +276,9 @@ git clone <repo-url> && cd <repo>
 section 2 from the repo root on your computer and skip the upload.
 
 Whichever option you use, stay in that folder for section 2. The deploy command ends with
-`--source .`, which means the current folder.
+`--source .`, which means the current folder. **Cloud Shell opens in your home folder after a
+reconnect**, so `cd ~/jme-agent` (or your clone) again before every deploy, and run the `ls -la`
+check.
 
 ## 1. One-off setup (Cloud Shell)
 
@@ -267,10 +303,18 @@ for s in agent-db-password agent-session-db-password openai-api-key app-password
 done
 ```
 
+The secret names use **hyphens**, exactly as above, and the deploy command refers to them by
+these names. Check with `gcloud secrets list --format='value(name)'`; a secret made with
+underscores (`agent_session_db_password`) is a different secret, and the grant above doesn't
+cover it.
+
 Use the **agent_ro** password, never the owner's. `DB_USERNAME` and `DB_PASSWORD` are not set
 on Cloud Run, and `connect()` refuses the owner account anyway. The session password is the one
 you gave `AGENT_SESSION_DB_PASSWORD` when you ran `python scripts/sessions.py setup` against
-Aiven from your computer; run that (and `check`) before the first deploy.
+Aiven from your computer; run that (and `check`) before the first deploy. To confirm the secret
+holds the same password without printing either, compare
+`gcloud secrets versions access latest --secret=agent-session-db-password | sha256sum` with the
+SHA-256 of the `.env` value.
 
 ## 2. Deploy (from the folder with the `Dockerfile`, section 0)
 
@@ -282,7 +326,15 @@ gcloud run deploy jme-agent --source . --region $REGION \
   --set-secrets "AGENT_DB_PASSWORD=agent-db-password:latest,AGENT_SESSION_DB_PASSWORD=agent-session-db-password:latest,OPENAI_API_KEY=openai-api-key:latest,APP_PASSWORD=app-password:latest"
 ```
 
-Fill in the Aiven host, port and database name.
+**Replace `YOUR-SERVICE.aivencloud.com` and `12345`** with the `DB_HOST` and `DB_PORT` from your
+`.env`. The deploy succeeds with the placeholders, but the page then can't reach MySQL. Keep
+the filled-in command in a script in Cloud Shell (it holds no passwords) so every redeploy uses
+the same values. To fix only the settings on a running service, without a rebuild:
+
+```bash
+gcloud run services update jme-agent --region $REGION \
+  --update-env-vars "DB_HOST=...,DB_PORT=...,DB_NAME=..."
+```
 
 `--allow-unauthenticated` makes the URL public, so **`APP_PASSWORD` is what protects the page**.
 The page shows a password box first, and nothing connects until the password is right. If the
@@ -316,8 +368,15 @@ the file would be lost anyway, and the same lines already go to Cloud Logging th
 - **Check the logs** under **Cloud Run → jme-agent → Logs**. Each line is one JSON event: model
   calls, tool calls with their arguments, and `scale_guess_blocked`.
 - **To update the service**, change the code and run the same `gcloud run deploy` command again.
+- **Failed revisions** can be listed with
+  `gcloud run revisions list --service jme-agent --region $REGION` and removed with
+  `gcloud run revisions delete <name> --region $REGION`. The revision serving traffic can't be
+  deleted. A failed build never creates a revision.
 
 ## Troubleshooting
+
+The page shows only the error type (for example `OperationalError`), never the server's text.
+For the MySQL error code, search Cloud Run → jme-agent → Logs for the error type.
 
 | Symptom | Where | Likely cause |
 |---|---|---|
@@ -325,15 +384,18 @@ the file would be lost anyway, and the same lines already go to Cloud Logging th
 | No password box | Both | `APP_PASSWORD` is not set (or, on Cloud Run, the secret isn't attached) |
 | "Wrong password." when the password is right | Cloud Run | The secret was stored with a trailing newline. Recreate it with `printf '%s'` |
 | Page shows "Couldn't connect as the agent user" | Both | One of these: wrong `DB_HOST`/`DB_PORT`; Aiven's allow-list blocks Cloud Run (Cloud Run has no fixed IP, so allow all addresses or add a static egress IP); or Aiven is powered off |
+| Log: `(2003, "Can't connect to MySQL server on 'YOUR-SERVICE.aivencloud.com' ([Errno -2] Name or service not known)")` | Cloud Run | The deploy went out with the placeholder host. Set the real `DB_HOST`/`DB_PORT` with `gcloud run services update ... --update-env-vars` (section 2). Happened 9 Nov 2026 |
+| Log: `(1045, "Access denied for user 'agent_sessions'...")` | Cloud Run | The `agent-session-db-password` secret differs from the password `sessions.py setup` used. Compare SHA-256s (section 1), add a corrected version, then start a new revision |
 | The connection error mentions secure transport / SSL | Both | Aiven requires TLS, and `db_config.py` has no SSL option yet. Add a `DB_SSL_CA` setting (a small change, with a test) |
 | `cryptography` error at login | Both | `cryptography` is missing from `requirements-app.txt` |
 | "Set OPENAI_API_KEY" | Both | The key isn't set. On Cloud Run, either the secret isn't attached or the service account can't read it |
-| Sidebar: "Conversations aren't being saved (AGENT_SESSION_DB_PASSWORD isn't set)" | Both | Set it in `.env`, or attach the `agent-session-db-password` secret on Cloud Run |
-| Sidebar: "This conversation isn't being saved right now" | Both | The session user can't reach or use its table: `setup` not run, a wrong password, or the table missing. Run `python scripts/sessions.py check` |
+| Sidebar: "Conversations aren't being saved (AGENT_SESSION_DB_PASSWORD isn't set)" | Both | Set it in `.env` and restart Streamlit (a browser refresh isn't enough), or attach the `agent-session-db-password` secret on Cloud Run |
+| Sidebar: "This conversation isn't being saved right now" | Both | The session user can't reach or use its table: `setup` not run, a wrong password, a wrong `DB_HOST`, or the table missing. Run `python scripts/sessions.py check`, and on Cloud Run read the MySQL error code in the logs |
 | The link opens an empty conversation | Both | The conversation is older than `AGENT_SESSION_DAYS`, was never saved (no answer yet), or the link was cut short |
+| Deploy: `Permission denied on secret: .../secrets/<name>/versions/latest for Revision service account ...` | Cloud Run | The service account can't read that secret, or the deploy names a secret that differs from the one granted (underscores vs hyphens). Check `gcloud secrets list`, then run the grant loop in section 1 for the names in `--set-secrets` |
 | What happened table is empty | Both | `agent_app.ask()` didn't log JSON events to the logger it was given |
 | A **broken** image icon under an answer | Cloud Run | An older page that used `st.image`: the browser's second request for `/media/...` missed. Deploy the current `agent_ui.py`, then hard-refresh |
 | "photo not available here" under an answer | Both | The images were loaded with `--no-photos` or before photos were stored, the form couldn't be redacted (`form_image_not_stored`), or `agent_ro` lacks `img_files_public` (re-run `agent_user.py`) |
 | Page loads, then keeps reconnecting | Cloud Run | `--session-affinity` is missing, or more than one instance is running |
-| Build fails in a step named `universal_builder` (exit status 51) | Cloud Run | Cloud Run found no `Dockerfile` and tried to guess the language, which means the files aren't in the folder you deployed from. Run the `ls -la` check in section 0 |
-| Deploy fails while building | Cloud Run | To see the error, run `docker build -t jme-agent .` locally. Or run `gcloud builds list --limit=1`, then `gcloud builds log <ID> \| tail -40` |
+| Build fails in a step named `universal_builder` (exit status 51), log ends with "provide a main.py or app.py" | Cloud Run | Cloud Run found no `Dockerfile` in the folder you deployed from and tried to guess the language. Usually the deploy ran from the home folder (Cloud Shell opens there after a reconnect), or the `Dockerfile` sits in a subfolder or has another name (`Dockerfile.txt`). `cd ~/jme-agent` and run the `ls -la` check in section 0 |
+| Deploy fails while building | Cloud Run | To see the error, run `docker build -t jme-agent .` locally. Or run `gcloud builds list --limit=1`, then `gcloud builds log <ID> --region $REGION \| tail -40` |
