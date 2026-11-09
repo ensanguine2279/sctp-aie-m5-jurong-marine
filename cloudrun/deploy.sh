@@ -6,3 +6,4 @@
 #
 rm -rf jme-agent && mkdir jme-agent && unzip -o jme-agent.zip -d jme-agent && cd jme-agent
 gcloud run deploy jme-agent --source . --region asia-southeast1
+rm ../jme-agent.zip
