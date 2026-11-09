@@ -36,7 +36,9 @@ You can run it on your laptop (below) or host it on Google Cloud Run
   - **Recent conversations**: the three saved conversations answered most recently, each
     titled by its first question, with how many questions and how long ago. Click one to
     open it here; the one on the page is greyed out ("open now").
-  - **Spend**: this session's cost and the key's spend against its budget.
+  - **Spend**: "This conversation: $X over N questions", added up from the answers on the
+    page, so it is the same after a reload or reopening a saved conversation; and the key's
+    spend against its budget, from the proxy.
 - **Chat.** Each answer has a **Sources** list, a closed **Caveats from the data** expander
   (the tools' notes, below) and, when a tool cited a scan, a **Photo** expander showing it. It also has a **What happened** expander, which
   is open for the latest answer and closed for earlier ones. The expander's table has one row
@@ -62,6 +64,11 @@ be reopened without its link. Clicking one does what opening its link would. A t
 first question as `messages` keeps it, so a question the guardrail refused shows only as its
 placeholder. Everyone behind the page password sees the same list: the page has no user
 accounts. Details in [`sessions.md`](sessions.md#recent-conversations-in-the-sidebar).
+
+The sidebar's spend is the conversation's own total, added up from its answers
+(`conversation_spend`), not a counter in page memory. Until 10 Nov 2026 it was a counter,
+which started at $0 on every load, so a reopened conversation showed "$0.0000 over 0
+questions" ([`sessions.md`](sessions.md#the-conversations-spend-after-a-reload)).
 
 A question the guardrail refuses is saved, and drawn again after a reload, only as its
 placeholder (`kept_question()`), the same as in `messages`. Before 9 Nov 2026 the saved
@@ -170,8 +177,9 @@ The **What happened** table is built from these same events.
 | `password_ok()` | Constant-time password check |
 | `show_notes()` | The tools' caveats under the answer, from `agent_app.ask(..., notes=...)` |
 | `photo_items()`, `show_photos()`, `img_html()` | The photos behind an answer's image sources, fetched and hash-checked, with captions; drawn in a **Photo** expander as `<img>` tags with the bytes inside (caption HTML-escaped) |
-| `cost_line()`, `session_line()` | The cost under each answer and the session total in the sidebar |
-| `display_copy()`, `restored()`, `kept_question()`, `save_line()` | What is saved of the display (no photos, no trace, a refused question only as its placeholder), a loaded conversation turned back into `messages` and `shown` (questions checked again), and the sidebar's saved / not saved line |
+| `cost_line()` | The cost under each answer |
+| `conversation_spend()`, `conversation_line()` | The sidebar's spend for the conversation on the page: the sum of its answers' costs (`cost_usd`, or read back from the cost line of an answer saved before 10 Nov 2026), "at least" when one isn't known |
+| `display_copy()`, `restored()`, `kept_question()`, `save_line()` | What is saved of the display (no photos, no trace, a refused question only as its placeholder, each answer's cost as a number), a loaded conversation turned back into `messages` and `shown` (questions checked again), and the sidebar's saved / not saved line |
 | `RECENT`, `recent_label()`, `ago()`, `md_plain()` | The sidebar's list of saved conversations: how many, one line each (title, questions, how long ago or "open now"), Markdown escaped |
 | `main()` | The Streamlit page: password gate, the cached `connect()` (one DB connection and LLM client per process, through `st.cache_resource`), the cached session store (purges old conversations once per process), the conversation loaded from `?session=`, sidebar (with `open_saved()` behind the recent list), chat history, one question per run, then the save |
 
@@ -179,7 +187,8 @@ Conversation state lives in `st.session_state` while the page is open, and in th
 `agent_sessions` table between page loads:
 
 - `messages` holds the model's conversation, from `agent_app.new_conversation()`.
-- `shown` holds what is drawn on screen.
+- `shown` holds what is drawn on screen, each answer with its cost; the sidebar's spend is
+  added up from it.
 - `sid` is the conversation's id, also in the link.
 
 The hosted version still runs a single instance with session affinity, because Streamlit's
@@ -364,7 +373,8 @@ the file would be lost anyway, and the same lines already go to Cloud Logging th
   what you see on your laptop.
 - **Prove the restart.** Ask a question, copy the link, run
   `gcloud run services update jme-agent --region $REGION --update-env-vars RESTART=$(date +%s)`
-  (a new revision: a new container with empty memory), open the link and ask a follow-up.
+  (a new revision: a new container with empty memory), open the link and ask a follow-up. The
+  sidebar's spend should show the conversation's total, not $0.
 - **Check the logs** under **Cloud Run → jme-agent → Logs**. Each line is one JSON event: model
   calls, tool calls with their arguments, and `scale_guess_blocked`.
 - **To update the service**, change the code and run the same `gcloud run deploy` command again.
@@ -391,6 +401,7 @@ For the MySQL error code, search Cloud Run → jme-agent → Logs for the error 
 | "Set OPENAI_API_KEY" | Both | The key isn't set. On Cloud Run, either the secret isn't attached or the service account can't read it |
 | Sidebar: "Conversations aren't being saved (AGENT_SESSION_DB_PASSWORD isn't set)" | Both | Set it in `.env` and restart Streamlit (a browser refresh isn't enough), or attach the `agent-session-db-password` secret on Cloud Run |
 | Sidebar: "This conversation isn't being saved right now" | Both | The session user can't reach or use its table: `setup` not run, a wrong password, a wrong `DB_HOST`, or the table missing. Run `python scripts/sessions.py check`, and on Cloud Run read the MySQL error code in the logs |
+| Sidebar spend says "This session: $0.0000 over 0 questions" on a reopened conversation | Both | The page is older than 10 Nov 2026: its spend was a counter in page memory. Deploy the current `agent_ui.py`; it shows "This conversation: ..." added up from the answers |
 | The link opens an empty conversation | Both | The conversation is older than `AGENT_SESSION_DAYS`, was never saved (no answer yet), or the link was cut short |
 | Deploy: `Permission denied on secret: .../secrets/<name>/versions/latest for Revision service account ...` | Cloud Run | The service account can't read that secret, or the deploy names a secret that differs from the one granted (underscores vs hyphens). Check `gcloud secrets list`, then run the grant loop in section 1 for the names in `--set-secrets` |
 | What happened table is empty | Both | `agent_app.ask()` didn't log JSON events to the logger it was given |

@@ -184,9 +184,11 @@ def test_each_answer_says_what_it_cost():
     assert ui.cost_line({"model_calls": 0}) == "No model calls: answered in code."   # a refusal
 
 
-def test_the_session_total_and_each_model_rows_cost():
-    assert ui.session_line(0.0123, 3) == "This session: $0.0123 over 3 questions"
-    assert ui.session_line(0.0, 1) == "This session: $0.0000 over 1 question"
+def test_the_conversation_total_and_each_model_rows_cost():
+    assert ui.conversation_line(0.0123, 3) == "This conversation: $0.0123 over 3 questions"
+    assert ui.conversation_line(0.0, 1) == "This conversation: $0.0000 over 1 question"
+    assert ui.conversation_line(0.0004, 2, complete=False) == \
+        "This conversation: at least $0.0004 over 2 questions"
     rows = ui.trace_rows([{"event": "chat_call", "round": 1, "tool_calls": ["find_sop"],
                            "ms": 1500, "cost_usd": 0.0004},
                           {"event": "chat_call", "round": 2, "tool_calls": [], "ms": 900}])
@@ -194,15 +196,84 @@ def test_the_session_total_and_each_model_rows_cost():
     assert rows[1]["detail"] == "asked for: (answered)"                  # no cost header: none
 
 
+def _answer(cost_usd, complete=True, usage_calls=2):
+    usage = {"model_calls": usage_calls, "prompt_tokens": 100, "completion_tokens": 10,
+             "cost_usd": cost_usd, "cost_complete": complete}
+    return {"role": "assistant", "text": "a", "cost": ui.cost_line(usage),
+            "cost_usd": cost_usd, "cost_complete": complete}
+
+
+def test_a_reopened_conversation_shows_what_it_cost_not_zero():
+    """10 Nov 2026: the sidebar's spend was a counter in page memory, so a conversation
+    opened from its link (after a restart) or from Recent conversations showed '$0.0000 over
+    0 questions' above answers that each showed a cost. Now it is added up from the
+    conversation, and survives the save and load."""
+    import sessions as ss
+    shown = [{"role": "user", "text": "What oil does CNC-03 take?"}, _answer(0.00123456),
+             {"role": "user", "text": "and CNC-02?"}, _answer(0.0007),
+             {"role": "user", "text": "Who is EMP026?"},                 # refused in code
+             {"role": "assistant", "text": "I can't...", "cost": "No model calls: answered in code.",
+              "cost_usd": 0.0, "cost_complete": True}]
+    total, questions, complete = ui.conversation_spend(shown)
+    assert (round(total, 8), questions, complete) == (0.00193456, 3, True)
+    saved = ui.display_copy(shown)
+    assert saved[-1]["cost_usd"] == 0.0 and saved[-1]["cost_complete"] is True   # 0 and True kept
+    _, back = ui.restored(ss.Loaded(True, True, [], saved))
+    total, questions, complete = ui.conversation_spend(back)
+    assert (round(total, 8), questions, complete) == (0.00193456, 3, True)
+    assert ui.conversation_line(total, questions, complete) == \
+        "This conversation: $0.0019 over 3 questions"
+
+
+def test_an_answer_without_a_known_cost_makes_the_total_a_lower_bound():
+    shown = [{"role": "user", "text": "q"}, _answer(0.0003, complete=False),
+             {"role": "user", "text": "q2"}, _answer(0.0002)]
+    total, n, complete = ui.conversation_spend(shown)
+    assert round(total, 6) == 0.0005 and n == 2 and complete is False
+    saved = ui.display_copy(shown)
+    assert saved[1]["cost_complete"] is False                            # False is kept too
+
+
+def test_rows_saved_before_the_number_was_kept_are_read_from_their_cost_line():
+    """Conversations saved before 10 Nov 2026 have only the cost line, to 4 decimals."""
+    old = [{"role": "user", "text": "q1"},
+           {"role": "assistant", "text": "a", "cost": "2 model calls, 9,936 tokens, $0.0012"},
+           {"role": "user", "text": "q2"},
+           {"role": "assistant", "text": "b", "cost": "No model calls: answered in code."}]
+    total, n, complete = ui.conversation_spend(old)
+    assert (round(total, 4), n, complete) == (0.0012, 2, True)
+    lower = old[:2] + [{"role": "user", "text": "q"},
+                       {"role": "assistant", "text": "x",
+                        "cost": "1 model call, 15 tokens, at least $0.0003 (a call came back "
+                                "without a cost)"}]
+    total, _, complete = ui.conversation_spend(lower)
+    assert round(total, 4) == 0.0015 and complete is False
+    no_line = old[:2] + [{"role": "user", "text": "q"}, {"role": "assistant", "text": "x"}]
+    assert ui.conversation_spend(no_line)[2] is False               # unknown: a lower bound
+
+
+def test_a_new_conversation_is_zero_and_odd_rows_are_never_trusted():
+    assert ui.conversation_spend([]) == (0.0, 0, True)
+    assert ui.conversation_line(*ui.conversation_spend([])) == \
+        "This conversation: $0.0000 over 0 questions"
+    line = "1 model call, 15 tokens, $0.0002"
+    for bad in ("0.5", True, -1.0, float("nan"), float("inf"), None):   # tampered or missing
+        m = {"role": "assistant", "text": "x", "cost": line, "cost_usd": bad}
+        assert ui.conversation_spend([m]) == (0.0002, 0, True), bad     # falls back to the line
+    assert ui.conversation_spend(["junk", {"role": "system", "cost_usd": 9.0}]) == (0.0, 0, True)
+
+
 # ------------------------------------------- the conversation kept (#5) ---
 
 def test_the_saved_display_leaves_out_photos_and_the_trace():
     shown = [{"role": "user", "text": "q"},
              {"role": "assistant", "text": "a", "sources": ["CMMS"], "notes": [],
-              "photos": [{"b64": "x" * 1000}], "trace": [{"step": "model"}], "cost": "$0.0004"}]
+              "photos": [{"b64": "x" * 1000}], "trace": [{"step": "model"}], "cost": "$0.0004",
+              "cost_usd": 0.0004, "cost_complete": True}]
     assert ui.display_copy(shown) == [{"role": "user", "text": "q"},
                                       {"role": "assistant", "text": "a", "sources": ["CMMS"],
-                                       "cost": "$0.0004"}]
+                                       "cost": "$0.0004", "cost_usd": 0.0004,
+                                       "cost_complete": True}]
 
 
 def test_a_loaded_conversation_gets_a_fresh_system_prompt_and_only_drawable_rows():

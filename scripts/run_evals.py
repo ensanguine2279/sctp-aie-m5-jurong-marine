@@ -12,7 +12,8 @@ each turn checks, from what actually happened (not from what the model says happ
     sources    how many source labels came back, and which ones
     grounding  nothing in the answer that no tool returned: every number, date and
                id-like token (CNC-02, BRG-6310, SOP-CONFINED-03) must appear in a tool result
-               of this conversation or in the user's own words
+               of this conversation, in the dates the app gave the model (where the data
+               ends, what "last month" is: agent_app.dates_note), or in the user's own words
     events     log events that must or must not happen (e.g. scale_guess_blocked)
     calls      how many model calls the turn may make (max_model_calls; 0 = answered in
                code, e.g. a guardrail refusal), counted from the chat_call events
@@ -33,6 +34,11 @@ Usage
     python scripts/run_evals.py --only severity-current-scale,cnc02-running-differently
     python scripts/run_evals.py --tag killshot          # one group
     python scripts/run_evals.py --repeat 3 --tag severity   # same cases 3 times: flaky?
+    python scripts/run_evals.py --today 2026-12-15      # run as if today were that day
+
+The clock is frozen for a run: "today" is `today:` at the top of cases.yaml (or --today),
+passed to the app as AGENT_TODAY, so "last month" means the same month in every run and
+the expected dates in the cases don't go stale as the calendar moves.
 
 With uv (personal repo): `uv run python scripts/run_evals.py ...`.
 Exit code 0 when every case passed, 1 otherwise.
@@ -132,6 +138,23 @@ def load_cases(path: Path | str) -> list[dict]:
     return cases
 
 
+def case_file_today(path: Path | str) -> str | None:
+    """`today:` at the top of cases.yaml, as YYYY-MM-DD; None if there isn't one. The date
+    the run treats as today (AGENT_TODAY). CaseError if it isn't a date."""
+    import yaml
+
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    v = raw.get("today") if isinstance(raw, dict) else None
+    if v is None:
+        return None
+    s = v.isoformat() if isinstance(v, date) else str(v).strip()
+    try:
+        date.fromisoformat(s)
+    except ValueError:
+        raise CaseError(f"{path}: 'today' must be a date (YYYY-MM-DD), got {v!r}") from None
+    return s
+
+
 def select(cases: list[dict], only: str | None = None, tag: str | None = None) -> list[dict]:
     out = cases
     if only:
@@ -229,7 +252,8 @@ def _decimals(tok: str) -> int:
 
 class Evidence:
     """Everything a grounded answer may draw on: the tool results of this conversation,
-    the source labels, and the user's own messages."""
+    the source labels, the dates the app gave the model in its system prompt (where the
+    data ends, what "last month" is), and the user's own messages."""
 
     def __init__(self, texts: list[str]):
         self.text = "\n".join(t for t in texts if t)
@@ -540,9 +564,12 @@ def _as_list(x):
 
 
 def evidence_for(messages: list[dict]) -> Evidence:
+    """The tool results and the user's words, plus the system prompt: its only numbers are
+    the dates agent_app.dates_note() gives the model (today, what "last month" is, where the
+    data ends), so "no data for October 2026; it runs to 30 Jun 2026" is grounded."""
     texts = []
     for m in messages:
-        if m.get("role") in ("tool", "user"):
+        if m.get("role") in ("tool", "user", "system"):
             texts.append(str(m.get("content") or ""))
     return Evidence(texts)
 
@@ -843,6 +870,9 @@ def main(argv=None) -> int:
     ap.add_argument("--list", action="store_true", help="list the cases and exit (free)")
     ap.add_argument("--check", action="store_true", help="validate cases.yaml and exit (free)")
     ap.add_argument("--repeat", type=int, default=1, help="run each case N times (flakiness)")
+    ap.add_argument("--today", default=None,
+                    help="the date the run treats as today (YYYY-MM-DD); default: 'today:' "
+                         "in cases.yaml")
     ap.add_argument("--max-usd", type=float, default=0.50,
                     help="stop starting new cases once the run has spent this much (default 0.50)")
     ap.add_argument("--model", default=app.MODEL)
@@ -858,14 +888,21 @@ def main(argv=None) -> int:
 
     try:
         cases = select(load_cases(a.cases), a.only, a.tag)
-    except CaseError as e:
+        today = a.today or case_file_today(a.cases)
+        if today:
+            date.fromisoformat(today)
+    except (CaseError, ValueError) as e:
         print(f"cases.yaml has problems:\n{e}", file=sys.stderr)
         return 2
     if a.list or a.check:
         for c in cases:
             print(f"{c['id']:38} {len(c['turns'])} turn(s)  [{', '.join(c.get('tags') or [])}]")
-        print(f"{len(cases)} case(s), {sum(len(c['turns']) for c in cases)} turn(s): OK")
+        print(f"{len(cases)} case(s), {sum(len(c['turns']) for c in cases)} turn(s), "
+              f"today {today or 'not frozen (the real date)'}: OK")
         return 0
+    if today:
+        import os
+        os.environ["AGENT_TODAY"] = today         # agent_app.today() reads it: a frozen clock
     if not cases:
         print("No cases selected.", file=sys.stderr)
         return 2
@@ -913,7 +950,7 @@ def main(argv=None) -> int:
 
     tee = Tee()
     print(f"Eval run {stamp}: {len(cases)} case(s) x {a.repeat}, model {a.model}, "
-          f"stop at ${a.max_usd:g}\n", file=tee)
+          f"stop at ${a.max_usd:g}, today {app.today()}\n", file=tee)
     results: list[CaseResult] = []
     t0 = time.monotonic()
     for rep in range(a.repeat):

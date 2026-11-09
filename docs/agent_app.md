@@ -37,8 +37,9 @@ just asked for in the prompt:
 | 3 (guardrails) | Policy is enforced between the user and the model, and between the model and the user | `ask()` runs [`guardrail.py`](guardrail.md) on both sides. A prompt injection, a request for a person's name or personal details (PDPA, trap C16) or a plainly out-of-scope request is refused in code with its own message, **before any model call** (`input_refused`); only a placeholder goes into `messages`, so the question never reaches a later prompt. An answer carrying a staff name, an NRIC, a phone number or an e-mail address is replaced before it is shown, in `messages` too (`output_blocked`). Found on the eval run, 8 Nov 2026: "What is the name of employee EMP015?" got "I could not check that", which read like an outage |
 | C1 (severity scale) | The model can't pick a severity scale for the user | `count_incidents` / `list_incidents` take a `scale_quote`: the user's own words naming the scale. `scale_guessed()` checks the quote is really in a user message and names a scale ("5 is worst", "the current scale", "the old scale"; "severity 4 or worse" names none). If not, the scale is removed before the tool runs, so the tool returns `needs_clarification` and the user is asked. Found on the real run, 5 Nov 2026: gpt-4o-mini sent `"severity_scale":"5_is_worst"` on its own. Logged as `scale_guess_blocked` |
 | 4 (honest degradation) | A failure never becomes an invented value | A tool that asks for a clarification (`needs_clarification`, `ambiguous_machine`, e.g. a severity number with no scale) has its message returned to the user **in code**; the model is not called again, so it can't answer over the question (found on the real run, 5 Nov 2026: gpt-4o-mini invented a count after the tool refused). A failed chat-API call (budget cap, network, timeout) is caught as `ChatError` and gives a plain "I couldn't reach the language model" — never a guess. A tool error (`needs_clarification`, `no_data`, `tool_failed`, ...) goes back to the model as the tool's own message, and the system prompt tells it to say so, not paper over it. A model that keeps calling tools past `MAX_TOOL_ROUNDS` (6) gets stopped with an honest "try a narrower question" instead of looping forever |
+| 5 (state) | A follow-up resolves against the earlier turns, and "last month" is the calendar's last month, never the model's guess | The whole conversation (questions, answers, tool results) goes back to the model with every follow-up. Relative periods are resolved in code: `ask()` puts today's date (Singapore) and where the data ends, read from the database, into the system prompt; a period with no data is said to have none, then answered for the latest full month the data has ([below](#relative-dates-and-follow-ups-5)) |
 
-Cross-restart state (#5) is the page's job, not the loop's: `ask()` works on a plain list of
+Cross-restart state is the page's job, not the loop's: `ask()` works on a plain list of
 messages, and the page saves that list after every answer and loads it back from the link
 (`scripts/sessions.py`, [`sessions.md`](sessions.md)). The loop itself keeps nothing between
 processes.
@@ -68,8 +69,9 @@ for s in sources:
 answer2, sources2 = app.ask(db, client, messages, "and what about CNC-03?")
 ```
 
-`ask()` is the entry point every caller uses: it runs the input guardrail, then `run_turn`,
-then the output guardrail ([`guardrail.md`](guardrail.md)). `run_turn(db, client, messages, ...)`
+`ask()` is the entry point every caller uses: it runs the input guardrail, refreshes the
+dates in the system prompt, then `run_turn`, then the output guardrail
+([`guardrail.md`](guardrail.md)). `run_turn(db, client, messages, ...)`
 is the part doing the actual looping: call the
 model (`complete`), append its message, and if it asked for a tool, run every tool
 call it made (there can be more than one in a round), append each tool's result as a
@@ -77,6 +79,95 @@ call it made (there can be more than one in a round), append each tool's result 
 final plain-text answer, the sources gathered along the way, and which tools ran (for
 `--debug` and the log). It never raises: a chat failure or an exhausted round budget
 both return a message instead.
+
+## Relative dates and follow-ups (#5)
+
+The checklist's test for state is "and what about last month?" resolving correctly. Two
+things have to hold.
+
+**The earlier turns reach the model.** `messages` keeps every question, answer and tool
+result, and `ask()` sends the whole list with the follow-up. So "And CNC-01?" after "What oil
+does CNC-03 take?" is asked as an oil question, "Which of those are still open?" knows which
+work orders, and a severity scale the user named two turns ago still counts: `scale_guessed()`
+looks for the user's words in every earlier user message, not only the latest. A refused
+question is only a placeholder in `messages`, so the conversation carries on after it.
+
+**"Last month" means the calendar's last month.** The model has no today of its own: asked
+for "last month", it guesses a date, often from its training. So the code gives it one, the
+way an assistant on live data works: today's date in Singapore (10 Nov 2026 chat, "follow
+convention"). On 10 Nov 2026 "last month" is October 2026.
+
+The client's data is a snapshot that ends earlier, on 30 Jun 2026, so on most days the period
+asked about has no data. The model is told where the data ends and what to do then: say so
+plainly, with the dates, and answer the same question for the latest full month the data has
+(June 2026), saying that's what it did. "And what about last month?" therefore gets "there's
+no data for October 2026; the data runs to 30 Jun 2026. In June 2026, ...". On live data, where
+the data runs to today, that fallback never comes up.
+
+| Piece | What it does |
+|---|---|
+| `today()` | Today in Singapore (UTC+8, no daylight saving, so no time-zone database is needed in the container). `AGENT_TODAY=YYYY-MM-DD` freezes it: the eval suite does, so its expected dates don't move with the calendar |
+| `relative_periods(today)` | This month, last month, this year, last year, by the calendar |
+| `data_dates(db)` | The last day each source has data for, from the views `agent_ro` already reads: `MAX(incident_date)` on `incident_detail`, `MAX(wo_date)` on `work_order_detail`, `MAX(last_reading)` on `machine_overview`. Read once and cached on the `Db`. `None` without a database (the unit tests) or when it can't be read; a failure isn't cached, so the next question tries again |
+| `latest_full_month(end)` | The latest calendar month the data covers to its last day: June 2026 for data ending 30 Jun 2026; for data ending mid-month, the month before |
+| `dates_note(dates, today)` | The section added to the system prompt, in words |
+| `ask()` | Sets the system message to `SYSTEM_PROMPT` plus that section before every question that reaches the model, so a conversation reloaded the next day gets the new date. A refused question reads nothing |
+
+On 10 Nov 2026, with the client's data, the model is told:
+
+```
+Dates:
+- Today is 10 Nov 2026 (Singapore). So "this month" is 1 Nov 2026 to 30 Nov 2026, "last month"
+  is 1 Oct 2026 to 31 Oct 2026, "this year" is 2026, "last year" is 2025, and "the past N days,
+  weeks or months" counts back from today.
+- The shop's data runs to 30 Jun 2026 (incidents to 28 May 2026, work orders to 30 Jun 2026,
+  sensor readings to 30 Jun 2026). Nothing after that is in it.
+- A period that starts after the data ends has no data. Say that plainly, with the period's
+  dates and where the data ends, then answer the same question for the latest full month the
+  data has, 1 Jun 2026 to 30 Jun 2026 (June 2026), and say that's what you did. Never present
+  it as the period asked about.
+- A period that runs past the data's end is answered for the part with data, saying where the
+  data stops.
+- When a question uses a relative period, put the exact dates in the tool call and say them in
+  the answer.
+- A follow-up keeps everything from the earlier question that it doesn't change: the machine,
+  the period, the severity scale and the filters. "And what about last month?" asks the same
+  question again for last month.
+```
+
+(The incident date shown is illustrative: it is whatever `MAX(incident_date)` returns.) When
+the data runs to today, the two fallback lines are left out.
+
+**If the data's dates can't be read** (the database is down when the question arrives), the
+model still gets today's date, is told it doesn't know where the data ends, and is told to ask
+the user for exact dates rather than assume they're covered; `dates_unknown` is logged (#4:
+honest degradation, not a guessed month).
+
+**Why the system prompt, and not a tool.** The dates are needed to *choose* a tool's arguments,
+before any tool runs, and they are the same for every question. A tool would cost a model
+round per question for a fact the code already has.
+
+**Why not the data's end as "today".** That was the first version (9-10 Nov 2026): "last month"
+was June 2026, so the demo's questions always landed on data. It was dropped for the
+convention: a skeptical user who knows it's November would read "last month (June 2026)" as
+the app being confused, while "no data for October; here's June" is plainly honest, and on
+live data both give the same answer anyway.
+
+**In the eval suite**, the system prompt counts as grounding evidence (`run_evals.evidence_for`):
+its only numbers are these dates, so "no data for October 2026; the data runs to 30 Jun 2026"
+is grounded and a month nobody gave the model is not. The suite freezes today at the date in
+`cases.yaml` (`today:`), so "last month" is October 2026 in every run. The multi-turn cases are
+in [`evals.md`](evals.md).
+
+**Limits.**
+- One fallback month for all sources: the latest full month of any of them. Incidents stop on
+  28 May, so "last month's incidents" falls back to June, which has none; the note lists each
+  source's last day, so the model can say so.
+- The whole conversation is resent with every follow-up, tool results included. A long
+  conversation costs more tokens per question; there is no trimming yet.
+- Whether a follow-up *keeps* the earlier context, and whether the fallback is stated, is the
+  model's job, told by the prompt and checked by the eval cases, not enforced in code (as the
+  severity scale is).
 
 ## The demo front end
 
@@ -95,7 +186,7 @@ including the PDPA one, and a
 New conversation button. Its trace comes from the same events as the log, collected per
 question, and the page also appends them to `logs/agent_app.jsonl` (run from the folder
 you start Streamlit in), so the file has the same lines as the table. `tests/test_agent_ui.py`
-(15 tests, no Streamlit needed) covers the trace table; the page itself is checked by
+(no Streamlit needed) covers the trace table; the page itself is checked by
 running it. Setting `APP_PASSWORD` puts a password box in front of the page, and
 `AGENT_LOG_FILE=off` stops it writing the file (it still logs to stderr). To host it, see
 [`agent_ui.md`](agent_ui.md#deploying-on-google-cloud-run).
@@ -121,6 +212,8 @@ Every line carries a UTC `ts` (ISO 8601, milliseconds):
   (`staff_name`, `nric`, `phone`, `email`). Never the blocked text.
 - `guard_not_ready`: the guardrail's staff name list isn't loaded, so the question was
   refused without a model call (fail closed; the CLI and the page don't start in that state).
+- `dates_unknown`: where the data ends couldn't be read, so the model was told to ask for
+  exact dates instead of assuming the period asked about is covered.
 - `turn`: one line per question — the question (truncated), every tool called, how
   many sources came back, `model_calls` and the question's `cost_usd`. A refused question has `refused` set, and a PDPA one is logged as
   `[withheld: pdpa]`, never its text (it may hold a name).
@@ -200,7 +293,7 @@ How to read it:
 |---|---|
 | `model rN` seconds | Time the model call took. Here 36.8 s of the 41.5 s total went on the first model call, so the wait was the model or proxy, not the database |
 | `tool rN` seconds | Time the tool took (the SQL). 0.09 s here |
-| `args:` | The arguments the model sent, truncated at 500 characters. Here it sent `severity_scale: 5_is_worst` although the user never said which scale: the guess the guard now blocks |
+| `args:` | The arguments the model sent, truncated at 500 characters. Here it sent `severity_scale: 5_is_worst` although the user never said which scale: the guess the guard now blocks. For a relative period, the dates here show how the model resolved it (October, then June as the fallback) |
 | `REFUSED needs_clarification` | The tool declined and the user was asked instead of getting a number |
 | `** scale_guess_blocked` | The model's scale had no quote from the user, so it was removed before the tool ran. Its arguments are shown on that line, the arguments the tool actually got are on the `tool` line below it |
 | `** clarification_returned` | The loop passed the tool's question straight to the user, with no second model call |
@@ -250,11 +343,30 @@ a severity scale the user never named (no quote, an invented quote, a quote nami
 in `run_tool` itself (not a normal tool error) still propagates today — a deliberate
 choice to surface in a test, not a gap to silently paper over.
 
+`tests/test_multiturn.py` (25 tests, no database, no real LLM call; a stand-in `Db` and a
+scripted chat call): **where the data ends**: read from each source (a DATE, date text and
+DATETIME text all understood) and only once; no database, a down one or an empty one giving no
+dates, a failure not cached. **What "today" means**: the calendar's date in Singapore, unless
+`AGENT_TODAY` freezes it (a value that isn't a date ignored); last month by the calendar, with
+the month and year boundaries (December into January, a leap February, January into February);
+the latest full month the data has (ending on a month's last day or mid-month). **The note**:
+today, last month, where each source ends and the June fallback, in words; on live data no
+fallback to explain; without the data's dates, today and an instruction to ask, with nothing
+claimed about the data. **The dates reaching the model**: on every question, refreshed rather
+than stacked on a follow-up, after a reload too; unreadable dates logged as `dates_unknown`; no
+database leaving the prompt unchanged; a refused question reading nothing. **A follow-up**
+reaching the model with the earlier question and answer and one system prompt. **The eval
+suite**: the dates given to the model counting as grounding evidence and a month nobody gave it
+not; real multi-turn cases in `cases.yaml`; every follow-up refused by the guard exactly when its
+case says so; the frozen today in `cases.yaml` and the October / June dates the cases expect
+following from it; the runner reading `today:` (a bad value refused) and `--check` showing it.
+
 `tests/test_read_log.py` (5 tests, standard library only): the documented example prints
 exactly as shown above; other lines skipped and an unfinished question shown; gcloud output
 read oldest first from `jsonPayload` or `textPayload`; the guard, eval and chat-error events
 shown; the command line reading a file and keeping the last N questions.
 
 **Not covered:** a real call to the llm proxy. That is what the eval suite is for
-(`python scripts/run_evals.py`, [`evals.md`](evals.md)): it asks the kill-shot questions and
-the trap-list questions through this loop against the real database and proxy.
+(`python scripts/run_evals.py`, [`evals.md`](evals.md)): it asks the kill-shot questions, the
+trap-list questions and the multi-turn follow-ups through this loop against the real database
+and proxy.

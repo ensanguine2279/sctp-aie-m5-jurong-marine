@@ -16,6 +16,10 @@ follow-up still has the earlier context. If the store isn't set up or is down, t
 says conversations aren't being saved and the page carries on in memory. The sidebar also
 lists the newest saved conversations (RECENT), above Spend; clicking one opens it here.
 
+The sidebar's spend for the conversation is added up from the answers on the page
+(conversation_spend), so a conversation reopened from its link or from the list shows what it
+cost, not $0 (10 Nov 2026: the old per-page counter reset on every load).
+
 Usage
     streamlit run scripts/agent_ui.py
 
@@ -27,6 +31,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -177,11 +182,56 @@ def cost_line(usage: dict) -> str:
     return f"{calls}, {tokens}, ${cost:.4f}"
 
 
-def session_line(spent: float, questions: int) -> str:
-    return f"This session: ${spent:.4f} over {questions} question{'s' if questions != 1 else ''}"
+_DOLLARS = re.compile(r"\$(\d+(?:\.\d+)?)")
 
 
-DISPLAY_KEYS = ("role", "text", "sources", "notes", "cost")   # no photos, no trace
+def _cost_of(m: dict) -> tuple[float, bool]:
+    """(cost, known) of one answer on the page. An answer from 10 Nov 2026 on carries its
+    cost as a number (cost_usd, cost_complete). One saved before that has it only in its
+    cost line ('2 model calls, 9,936 tokens, $0.0012'), so it is read back from there, to
+    the line's 4 decimal places. A line with no figure leaves the total a lower bound."""
+    c = m.get("cost_usd")
+    if isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c) and c >= 0:
+        return float(c), m.get("cost_complete") is not False
+    line = m.get("cost")
+    if not isinstance(line, str):
+        return 0.0, False
+    if line.startswith("No model calls"):
+        return 0.0, True                                  # refused or answered in code
+    found = _DOLLARS.findall(line)
+    if not found:
+        return 0.0, False
+    return float(found[-1]), "at least" not in line
+
+
+def conversation_spend(shown: list[dict]) -> tuple[float, int, bool]:
+    """(cost in USD, questions, complete) of the conversation on the page, added up from
+    what each answer recorded. Derived from the conversation itself, so a conversation
+    reopened from its link or from Recent conversations shows what it has cost, and
+    New conversation shows $0, with no separate counter to keep in step (10 Nov 2026: the
+    old counter lived in page memory and started at $0 on every load).
+    complete is False when any answer's cost wasn't known: the total is then a lower bound."""
+    total, questions, complete = 0.0, 0, True
+    for m in shown:
+        if not isinstance(m, dict):
+            continue
+        if m.get("role") == "user":
+            questions += 1
+        elif m.get("role") == "assistant":
+            cost, known = _cost_of(m)
+            total += cost
+            complete = complete and known
+    return total, questions, complete
+
+
+def conversation_line(cost: float, questions: int, complete: bool = True) -> str:
+    q = f"{questions} question{'s' if questions != 1 else ''}"
+    return f"This conversation: {'' if complete else 'at least '}${cost:.4f} over {q}"
+
+
+# What is saved of each message: no photos, no trace. cost_usd and cost_complete let the
+# sidebar add up a reopened conversation's spend exactly (conversation_spend).
+DISPLAY_KEYS = ("role", "text", "sources", "notes", "cost", "cost_usd", "cost_complete")
 
 
 def kept_question(text: str) -> str:
@@ -369,7 +419,7 @@ def main() -> None:
 
     def start_fresh():
         st.session_state.messages = app.new_conversation()
-        st.session_state.shown = []   # what to draw: role, text, sources, trace
+        st.session_state.shown = []   # what to draw: role, text, sources, trace, cost
         st.session_state.sid = sessions.new_session_id()
         st.session_state.save_error = None
         st.query_params["session"] = st.session_state.sid
@@ -395,7 +445,6 @@ def main() -> None:
                 picked = q
         if st.button("New conversation", use_container_width=True):
             start_fresh()
-            st.session_state.spent, st.session_state.questions = 0.0, 0
             st.rerun()
         st.caption(f"Model: {app.MODEL}")
         save_box = st.empty()                      # is this conversation being kept (#5)
@@ -415,7 +464,6 @@ def main() -> None:
             st.session_state.sid = sid
             st.session_state.save_error = None
             st.query_params["session"] = sid
-            st.session_state.spent, st.session_state.questions = 0.0, 0
         else:
             st.session_state.save_error = loaded.error or "that conversation is no longer saved"
         st.rerun()
@@ -437,15 +485,15 @@ def main() -> None:
                              use_container_width=True, disabled=here):
                     open_saved(r.sid)
     with st.sidebar:
-        # Spend (#7): this session from each call's cost header, exact and immediate; the
-        # key's total against its cap from the proxy (about a minute behind).
+        # Spend (#7): this conversation's cost, added up from each answer's cost header
+        # (exact and immediate, and the same after a reload or reopening it); the key's
+        # total against its cap from the proxy (about a minute behind).
         st.subheader("Spend")
         spend_box = st.empty()                     # filled now, and again after an answer
 
     def show_spend():
         with spend_box.container():
-            st.caption(session_line(st.session_state.get("spent", 0.0),
-                                    st.session_state.get("questions", 0)))
+            st.caption(conversation_line(*conversation_spend(st.session_state.shown)))
             ks = key_budget()
             (st.warning if ks.warn or not ks.ok else st.caption)(spend.budget_line(ks))
 
@@ -482,12 +530,16 @@ def main() -> None:
                                       usage=usage)
             photos = photo_items(db, raw)
             notes = app.format_notes(tool_notes)
-        st.session_state.spent = st.session_state.get("spent", 0.0) + (usage.get("cost_usd") or 0)
-        st.session_state.questions = st.session_state.get("questions", 0) + 1
-        key_budget.clear()                         # re-read the key's spend from the proxy
-        show_spend()                               # and redraw the sidebar with this question
         rows = trace_rows(handler.events)
         cost = cost_line(usage)
+        # On the page before the sidebar is redrawn, so the conversation's total includes it.
+        st.session_state.shown.append({
+            "role": "assistant", "text": answer, "sources": sources, "notes": notes,
+            "photos": photos, "trace": rows, "cost": cost,
+            "cost_usd": float(usage.get("cost_usd") or 0.0),
+            "cost_complete": bool(usage.get("cost_complete", True))})
+        key_budget.clear()                         # re-read the key's spend from the proxy
+        show_spend()                               # and redraw the sidebar with this question
         st.write(answer)
         st.caption(cost)
         if sources:
@@ -497,9 +549,6 @@ def main() -> None:
         if rows:
             with st.expander("What happened", expanded=True):
                 st.table(rows)
-    st.session_state.shown.append({"role": "assistant", "text": answer,
-                                   "sources": sources, "notes": notes, "photos": photos,
-                                   "trace": rows, "cost": cost})
     if store:                                      # keep it for a restart (#5); never raises
         _, st.session_state.save_error = store.save(
             st.session_state.sid, st.session_state.messages,

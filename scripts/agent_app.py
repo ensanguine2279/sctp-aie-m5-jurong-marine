@@ -22,8 +22,12 @@ harness checklist, enforced in code rather than hoped for from the prompt:
        replaced before the user sees it. Neither leaves the offending text in `messages`,
        so it never reaches a later prompt either.
 
-Cross-restart state (#5) is kept by the page, not here: `messages` is a plain list that
-agent_ui.py saves after every answer and loads back (scripts/sessions.py). No
+Multi-turn context (#5) is the `messages` list itself: every earlier question, answer and
+tool result goes back to the model with the follow-up. A relative period ("and what about
+last month?") is resolved in code: `ask()` puts today's date (Singapore) and the dates the
+data runs to into the system prompt (today, data_dates, dates_note), so "last month" is the
+calendar's, never the model's guess, and a period with no data is said to have none. Cross-restart state is kept by the page, not here: `messages` is a plain list
+that agent_ui.py saves after every answer and loads back (scripts/sessions.py). No
 human-in-the-loop gate (#6): this app is read-only, so none is needed. The eval suite (#8) is separate:
 `scripts/run_evals.py` over `evals/cases.yaml`.
 
@@ -46,7 +50,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import agent_tools as at
@@ -301,6 +305,142 @@ def new_conversation() -> list[dict]:
     return [{"role": "system", "content": SYSTEM_PROMPT}]
 
 
+# ============================================================ relative dates ===
+# "And what about last month?" (HARNESS_CHECKLIST.md section 5) needs a "today". The model
+# has none of its own (it would guess one from its training), so the code gives it one: the
+# calendar's date in Singapore, as any assistant on live data would use (10 Nov 2026 chat:
+# "follow convention"). The client's data ends earlier (30 Jun 2026), so the model is also
+# told where it ends, read from the database, and to say so when a period has no data, then
+# answer for the latest full month the data has. The same dates count as evidence in the
+# eval suite's grounding check (run_evals.py), which freezes today (AGENT_TODAY).
+
+DATA_SOURCES = (                 # (what, query): the last day each source has data for
+    ("incidents", "SELECT MAX(incident_date) AS d FROM incident_detail"),
+    ("work orders", "SELECT MAX(wo_date) AS d FROM work_order_detail"),
+    ("sensor readings", "SELECT MAX(last_reading) AS d FROM machine_overview"),
+)
+
+
+def _as_date(v):
+    from datetime import date as _date
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, _date):
+        return v
+    if isinstance(v, str) and re.match(r"\d{4}-\d{2}-\d{2}", v.strip()):
+        try:
+            return _date.fromisoformat(v.strip()[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def data_dates(db) -> dict | None:
+    """{source: the last day it has data for}, from the views agent_ro reads; None when
+    there is no database (tests) or it can't be read. Cached on the Db once read; a failure
+    isn't cached, so the next question tries again."""
+    if db is None:
+        return None
+    cache = getattr(db, "cache", None)
+    if isinstance(cache, dict) and "data_dates" in cache:
+        return cache["data_dates"]
+    out = {}
+    try:
+        for what, sql in DATA_SOURCES:
+            rows = db.query(sql)
+            d = _as_date(rows[0].get("d")) if rows else None
+            if d:
+                out[what] = d
+    except Exception:                           # down, refused: the note says so (#4)
+        return None
+    if not out:
+        return None
+    if isinstance(cache, dict):
+        cache["data_dates"] = out
+    return out
+
+
+def _day(d) -> str:
+    return f"{d.day} {d:%b %Y}"                 # 30 Jun 2026: the eval's date reader knows it
+
+
+SHOP_TZ = timezone(timedelta(hours=8))         # Singapore: UTC+8 all year, no DST
+
+
+def today():
+    """Today in Singapore, the shop's time. AGENT_TODAY=YYYY-MM-DD freezes it: the eval
+    suite does (run_evals.py, `today:` in cases.yaml), so its expected dates don't move
+    with the calendar. Anything else in AGENT_TODAY is ignored."""
+    from datetime import date as _date
+    fixed = (os.environ.get("AGENT_TODAY") or "").strip()
+    if fixed:
+        try:
+            return _date.fromisoformat(fixed)
+        except ValueError:
+            pass
+    return datetime.now(SHOP_TZ).date()
+
+
+def relative_periods(today_) -> dict:
+    """The periods a question can mean on `today_`, by the calendar: {today, this_month:
+    (first, last), last_month: (first, last), this_year, last_year}."""
+    nxt = (today_.replace(day=28) + timedelta(days=4)).replace(day=1)
+    last_end = today_.replace(day=1) - timedelta(days=1)
+    return {"today": today_,
+            "this_month": (today_.replace(day=1), nxt - timedelta(days=1)),
+            "last_month": (last_end.replace(day=1), last_end),
+            "this_year": today_.year, "last_year": today_.year - 1}
+
+
+def latest_full_month(end) -> tuple:
+    """(first, last) of the latest calendar month the data covers to its last day: the
+    month of `end` if `end` is its last day, else the month before."""
+    if (end + timedelta(days=1)).day == 1:
+        return end.replace(day=1), end
+    prev_end = end.replace(day=1) - timedelta(days=1)
+    return prev_end.replace(day=1), prev_end
+
+
+def dates_note(dates: dict | None, today_=None) -> str:
+    """The system prompt's dates section: today (the calendar's, in Singapore), what "last
+    month" and "this year" mean, where the data ends, and what to do when the period asked
+    about has no data: say so, then answer for the latest full month the data has, saying
+    that's what was done. Without the data's dates, the model is told to ask for exact
+    dates rather than assume they're covered."""
+    today_ = today_ or today()
+    p = relative_periods(today_)
+    (ls, le), (ts, te) = p["last_month"], p["this_month"]
+    head = (
+        "\nDates:\n"
+        f"- Today is {_day(today_)} (Singapore). So \"this month\" is {_day(ts)} to {_day(te)}, "
+        f"\"last month\" is {_day(ls)} to {_day(le)}, \"this year\" is {p['this_year']}, "
+        f"\"last year\" is {p['last_year']}, and \"the past N days, weeks or months\" counts "
+        f"back from today.\n")
+    tail = (
+        "- When a question uses a relative period, put the exact dates in the tool call and "
+        "say them in the answer.\n"
+        "- A follow-up keeps everything from the earlier question that it doesn't change: the "
+        "machine, the period, the severity scale and the filters. \"And what about last "
+        "month?\" asks the same question again for last month.\n")
+    if not dates:
+        return (head + "- Where the shop's data ends couldn't be read just now. If a question "
+                "uses a relative period, ask the user for the exact dates; don't assume the "
+                "data covers them.\n" + tail)
+    end = max(dates.values())
+    each = ", ".join(f"{what} to {_day(d)}" for what, d in dates.items())
+    lf, ll = latest_full_month(end)
+    data = f"- The shop's data runs to {_day(end)} ({each}). Nothing after that is in it.\n"
+    if end >= today_:
+        return head + data + tail
+    return (head + data +
+            "- A period that starts after the data ends has no data. Say that plainly, with the "
+            f"period's dates and where the data ends, then answer the same question for the "
+            f"latest full month the data has, {_day(lf)} to {_day(ll)} ({lf:%B %Y}), and say "
+            "that's what you did. Never present it as the period asked about.\n"
+            "- A period that runs past the data's end is answered for the part with data, "
+            "saying where the data stops.\n" + tail)
+
+
 def ask(db, client, messages, question, *, model=MODEL, logger=log, raw_sources=None,
         notes=None, usage=None):
     """Append the user's question, run it to completion, return (answer, source
@@ -340,6 +480,11 @@ def ask(db, client, messages, question, *, model=MODEL, logger=log, raw_sources=
               n_sources=0, refused=verdict.rule)
         return verdict.message, []
 
+    if db is not None and messages and messages[0].get("role") == "system":
+        dates = data_dates(db)                 # what "last month" means (#5), in code
+        if dates is None:
+            _emit(logger, "dates_unknown")
+        messages[0]["content"] = SYSTEM_PROMPT + dates_note(dates)
     messages.append({"role": "user", "content": question})
     answer, sources, tool_names = run_turn(db, client, messages, model=model, logger=logger,
                                            notes_out=notes, usage_out=tally)

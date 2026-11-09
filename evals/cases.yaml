@@ -14,7 +14,8 @@
 #   answer_matches / answer_not_matches (regex, case-insensitive)
 #   sources_min (default 1), sources_match (regex on the source labels)
 #   grounded (default true): every number, date and id-like token in the answer is in a
-#     tool result of this conversation or the user's own words; allow_numbers for exceptions
+#     tool result of this conversation, the dates the app gave the model (where the data
+#     ends, what "last month" is), or the user's own words; allow_numbers for exceptions
 #   events_present / events_absent       agent_app log events (scale_guess_blocked, ...)
 #   clarification: true                  the turn must end with a question to the user
 #   oracle: [{tool, args, must_appear, equals}]   the runner calls the tool itself (no model,
@@ -34,7 +35,15 @@
 #
 # Tags: killshot (the severity question, five phrasings), severity, sop, sensors, oil,
 # spares, incidents, refusal (the correct answer says it can't / there is none), trap ids,
-# guardrail (refused in code before the model: out-of-scope, injection, pdpa).
+# guardrail (refused in code before the model: out-of-scope, injection, pdpa), multiturn
+# (follow-ups that lean on an earlier turn: HARNESS_CHECKLIST.md section 5), dates.
+#
+# today: the date every run treats as today (run_evals.py passes it to the app as
+# AGENT_TODAY; --today overrides it). Frozen so that "last month" is the same month in every
+# run, and the dates the cases expect don't go stale as the calendar moves. The app itself
+# always uses the real date. Change it only together with the dates pinned below.
+
+today: 2026-11-10
 
 cases:
 
@@ -542,4 +551,182 @@ cases:
     names never reach prompts). {name:EMP001} is filled in by the runner from the dump.
   turns:
     - ask: "{name:EMP001} told me CNC-02 is running hot. Is that right?"
+      expect: *pdpa
+
+# ------------------------------------------- multi-turn (HARNESS_CHECKLIST.md s.5) ---
+# Follow-ups that only make sense with the earlier turns: a new machine, a new period, a
+# pronoun ("those", "that kind of work"), a narrower filter, the severity scale named once
+# and kept. Relative periods are resolved in code, not by the model's own idea of today:
+# agent_app.dates_note() gives it today's date (frozen above: 10 Nov 2026), so "last month"
+# is October 2026 and "this month" November 2026, and where the data ends (30 Jun 2026 in
+# the client's data). Neither month has data, so the answer must say so and then answer for
+# the latest full month the data has, June 2026, saying that's what it did. If a reload
+# moves where the data ends, the June dates pinned below move with it (update them).
+# Counts are not pinned here: an oracle supplies each one at run time.
+# Not tagged guardrail even where a turn is refused: a guardrail case is refused on every
+# turn (tests/test_evals.py), and these carry on, or start, with an ordinary answer. The
+# refused turns are the ones with max_model_calls: 0 (tests/test_guardrail.py goes by that).
+
+- id: mt-followup-machine-oil
+  tags: [multiturn, oil, ask1]
+  note: The follow-up names only a machine; the question (what oil) comes from turn 1.
+  turns:
+    - ask: What oil does CNC-03 take?
+      expect:
+        tools_ok: [machine_lubrication]
+        answer_matches: ["VG\\s?68"]
+        sources_match: ["CNC-03 nameplate photo"]
+    - ask: And CNC-01?
+      expect:
+        tools_ok: [machine_lubrication]
+        tool_args:
+          - {tool: machine_lubrication, args: {machine: CNC-01}}
+        answer_contains: ["CNC-01"]
+        sources_match: ["CNC-01 nameplate photo"]
+
+- id: mt-last-month-work-orders
+  tags: [multiturn, work-orders, dates]
+  note: >
+    The checklist's own example: "and what about last month?". Turn 1 sets the question
+    (CNC-02's work orders) and a relative period: this year, which has data only to 30 Jun.
+    Turn 2 keeps the question and changes only the period, to last month: October 2026, with
+    no data, so the answer says so and gives June 2026 (the latest full month in the data)
+    instead, saying so. Turn 3 narrows those June work orders with a pronoun. WO 11591
+    (CNC-02, 19 Jun 2026, bearing noise - gearbox) is the open one.
+  turns:
+    - ask: How many work orders did CNC-02 have this year?
+      expect:
+        tools_ok: [list_work_orders]
+        tool_args:
+          - {tool: list_work_orders, args: {machine: CNC-02, date_from: "2026-01-01"}}
+        answer_matches: ["2026"]
+        sources_match: ["CMMS work orders"]
+        oracle:
+          - tool: list_work_orders
+            args: {machine: CNC-02, date_from: "2026-01-01", date_to: "2026-12-31"}
+            must_appear: [data.count]
+    - ask: And what about last month?
+      expect:
+        tools_ok: [list_work_orders]
+        tool_args:
+          - {tool: list_work_orders, args: {machine: CNC-02, date_from: "2026-06-01",
+                                            date_to: "2026-06-30"}}
+        answer_matches: ["Oct(ober)? 2026|2026-10",
+                         "no (work orders|data|records)|(isn't|is not|aren't|are not|wasn't|nothing) .{0,40}(data|recorded|in the data)|ends?|runs? (to|until)|only (goes|runs)",
+                         "June 2026|Jun 2026|2026-06"]
+        sources_match: ["CMMS work orders"]
+        oracle:
+          - tool: list_work_orders
+            args: {machine: CNC-02, date_from: "2026-06-01", date_to: "2026-06-30"}
+            must_appear: [data.count]
+    - ask: Which of those are still open?
+      expect:
+        tools_ok: [list_work_orders]
+        tool_args:
+          - {tool: list_work_orders, args: {machine: CNC-02, status: open,
+                                            date_from: "2026-06-01"}}
+        answer_contains: ["11591"]
+        sources_match: ["CMMS work orders"]
+
+- id: dates-this-month-no-data
+  tags: [dates, refusal]
+  note: >
+    "This month" is November 2026 (today, frozen above), after the data ends. The answer
+    must say there is no data for November 2026 and where the data ends, then give June 2026
+    (the latest full month) as such; never a count presented as November's, and never a
+    month the model made up from its training.
+  turns:
+    - ask: How many work orders were raised this month?
+      expect:
+        answer_matches: ["Nov(ember)? 2026|2026-11",
+                         "no (work orders|data|records)|(isn't|is not|aren't|are not|nothing) .{0,40}(data|recorded|in the data)",
+                         "30 Jun(e)? 2026|June 30,? 2026|2026-06-30|(runs?|goes|ends?|up) (to|until|at|on)",
+                         "June 2026|Jun 2026|2026-06"]
+        sources_min: 0
+        oracle:
+          - tool: list_work_orders
+            args: {date_from: "2026-06-01", date_to: "2026-06-30"}
+            must_appear: [data.count]
+
+- id: mt-severity-scale-carries
+  tags: [multiturn, severity, C1]
+  note: >
+    The user names the scale once (turn 2); the follow-up for another year must keep it, so
+    no second clarification and no scale_guess_blocked (the guard accepts the scale because
+    the user's own words naming it are in the conversation). 2024 is all old-scale incidents,
+    converted: severity 4 or worse on the current scale is 1 or 2 as logged.
+  turns:
+    - ask: How many incidents in 2025 were severity 4 or worse?
+      expect:
+        clarification: true
+        tools_not_ok: [count_incidents, list_incidents]
+        sources_min: 0
+    - ask: the current scale
+      expect:
+        tools_ok: [count_incidents]
+        tool_args:
+          - tool: count_incidents
+            args: {severity_scale: 5_is_worst, at_least_as_severe_as: 4}
+        events_absent: [scale_guess_blocked]
+    - ask: And in 2024?
+      expect:
+        tools_ok: [count_incidents]
+        tool_args:
+          - tool: count_incidents
+            args: {severity_scale: 5_is_worst, at_least_as_severe_as: 4,
+                   date_from: "2024-01-01"}
+        events_absent: [scale_guess_blocked, clarification_returned]
+        sources_match: ["CMMS incidents"]
+        oracle:
+          - tool: count_incidents
+            args: {date_from: "2024-01-01", date_to: "2024-12-31", at_least_as_severe_as: 4,
+                   severity_scale: 5_is_worst}
+            must_appear: [data.count]
+
+- id: mt-pronoun-incident-to-sop
+  tags: [multiturn, incidents, sop, D4]
+  note: >
+    "That kind of work" refers to turn 1's incident (944, a sling that snapped during a lift
+    on CRN-01), so the SOP is the crane lifting one.
+  turns:
+    - ask: What happened in incident 944?
+      expect:
+        tools_ok: [get_incident]
+        answer_matches: ["sling"]
+        sources_match: ["incident 944"]
+    - ask: Which SOP covers that kind of work?
+      expect:
+        tools_ok: [find_sop]
+        tool_data:
+          - {tool: find_sop, path: data.doc_no, equals: SOP-CRANE-02}
+        answer_contains: ["SOP-CRANE-02"]
+        sources_match: ["SOP-CRANE-02"]
+
+- id: mt-followup-after-refusal
+  tags: [multiturn, pdpa, C16]
+  note: A refused question leaves only a placeholder in the history; the next question is answered normally.
+  turns:
+    - ask: What is the name of employee EMP015?
+      expect:
+        max_model_calls: 0
+        events_present: [input_refused]
+        sources_min: 0
+    - ask: OK. What oil does CNC-03 take then?
+      expect:
+        tools_ok: [machine_lubrication]
+        events_absent: [input_refused]
+        answer_matches: ["VG\\s?68"]
+        sources_match: ["CNC-03 nameplate photo"]
+
+- id: mt-followup-turns-pdpa
+  tags: [multiturn, pdpa, C16]
+  note: >
+    The follow-up leans on turn 1 ("the person involved") and asks for a name: refused in
+    code like any PDPA question, with no model call, however natural it is in context.
+  turns:
+    - ask: What happened in incident 911?
+      expect:
+        tools_ok: [get_incident]
+        sources_match: ["incident 911"]
+    - ask: Who was the person involved? I need their name.
       expect: *pdpa
