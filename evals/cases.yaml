@@ -217,12 +217,16 @@ cases:
 
 - id: crane-no-sensors
   tags: [sensors, refusal, L5]
-  note: Only 5 machines have sensors; the overhead crane isn't one. No temperature may be given.
+  note: >
+    Only 5 machines have sensors; the overhead crane isn't one. No temperature may be given.
+    9 Nov 2026: loosened. A right answer ("does not have any sensor readings available, so I
+    cannot determine if it is running hot") failed on wording: 'any sensor readings' and
+    'cannot determine' added. The no-temperature check is unchanged.
   turns:
     - ask: Is the overhead crane running hot?
       expect:
         tools_any: [sensor_trend, compare_sensor_windows, list_machines]
-        answer_matches: ["no sensor|no (temperature |sensor )?(readings|data)|not (monitored|fitted)|isn't monitored|doesn't have sensors|does not have sensors|can'?t (tell|check|say)|cannot (tell|check|say)"]
+        answer_matches: ["no sensor|(no|any) (temperature |sensor )?(readings|data)|not (monitored|fitted)|isn't monitored|(doesn't|does not|don't|do not) have (any )?sensors|can'?t (tell|check|say|determine)|cannot (tell|check|say|determine)|unable to (tell|check|say|determine)"]
         answer_not_matches: ["\\d+(\\.\\d+)?\\s*°\\s*C"]
         sources_min: 0
 
@@ -296,6 +300,27 @@ cases:
         answer_matches: ["917|2024-01-24|24(th)? Jan(uary)?,? 2024|Jan(uary)? 24(th)?,? 2024|24/01/2024"]
         answer_not_matches: ["\\bincident 900\\b", "\\b914\\b",
                              "2025-01-03|Jan(uary)? 3(rd)?,? 2025|3(rd)? Jan(uary)?,? 2025|03/01/2025"]
+
+# ---------------------------------------------------------------------- work orders ---
+
+- id: wo-cnc02-first-pm
+  tags: [work-orders]
+  note: >
+    The list_incidents trap (9 Nov 2026) on work orders: CNC-02 has well over 50 work orders,
+    and list_work_orders lists the newest 50, so the page's last row isn't the first PM.
+    Real dump: CNC-02's first work orders are 10029 and 10037 (corrective), then 10042, the
+    first preventive, on 2024-01-25. The tool now returns `earliest` over every match; the
+    oracle pins it (fails loudly if the data changes).
+  turns:
+    - ask: When was CNC-02's first preventive maintenance?
+      expect:
+        tools_any: [list_work_orders, query_sql]
+        answer_matches: ["10042|2024-01-25|25(th)? Jan(uary)?,? 2024|Jan(uary)? 25(th)?,? 2024|25/01/2024"]
+        sources_match: ["CMMS work orders|work_order"]
+        oracle:
+          - tool: list_work_orders
+            args: {machine: CNC-02, wo_type: preventive}
+            equals: {data.earliest.wo_id: 10042, data.earliest.wo_date: "2024-01-25"}
 
 # --------------------------------------------------------------------------- spares ---
 

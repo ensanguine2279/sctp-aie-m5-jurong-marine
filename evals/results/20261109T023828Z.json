@@ -1,0 +1,268 @@
+{
+  "run": "20261109T023828Z",
+  "model": "gpt-4o-mini",
+  "cases_file": "/home/hakngrow/Projects/sctp/module5/jurong-marine/evals/cases.yaml",
+  "repeat": 1,
+  "summary": "Cases: 2  passed 2  failed 0  errors 0  skipped 0\nModel calls: 4 (gpt-4o-mini)  tokens: 12934 in + 81 out  time: 10 s\nSpend: $0.0013 as charged by the proxy (x-litellm-response-cost); $0.0020 at list price",
+  "results": [
+    {
+      "id": "crane-no-sensors",
+      "status": "PASS",
+      "turns": [
+        {
+          "question": "Is the overhead crane running hot?",
+          "answer": "I could not check if the overhead crane is running hot because there are no sensor readings for it in the data.",
+          "sources": [],
+          "notes": [],
+          "tools": [
+            {
+              "name": "compare_sensor_windows",
+              "arguments": {
+                "machine": "overhead crane"
+              },
+              "sent": {
+                "machine": "overhead crane"
+              },
+              "ok": false,
+              "error_code": "no_data",
+              "result": {
+                "tool": "compare_sensor_windows",
+                "ok": false,
+                "data": null,
+                "sources": [],
+                "notes": [],
+                "error": {
+                  "code": "no_data",
+                  "message": "There are no sensor readings for CRN-01 in the data. Sensors cover only CMP-01, CNC-01, CNC-02, CNC-03, PMP-T01 (trap list L5)."
+                },
+                "ms": 351
+              }
+            }
+          ],
+          "events": [
+            {
+              "ts": "2026-11-09T02:38:33.756+00:00",
+              "event": "chat_call",
+              "round": 1,
+              "model": "gpt-4o-mini",
+              "prompt_tokens": 3067,
+              "completion_tokens": 17,
+              "tool_calls": [
+                "compare_sensor_windows"
+              ],
+              "ms": 4723.2
+            },
+            {
+              "ts": "2026-11-09T02:38:34.108+00:00",
+              "event": "tool_call",
+              "round": 1,
+              "tool": "compare_sensor_windows",
+              "arguments": "{\"machine\":\"overhead crane\"}",
+              "ok": false,
+              "error_code": "no_data",
+              "n_sources": 0,
+              "ms": 352.0
+            },
+            {
+              "ts": "2026-11-09T02:38:36.091+00:00",
+              "event": "chat_call",
+              "round": 2,
+              "model": "gpt-4o-mini",
+              "prompt_tokens": 3171,
+              "completion_tokens": 24,
+              "tool_calls": [],
+              "ms": 1982.4
+            },
+            {
+              "ts": "2026-11-09T02:38:36.091+00:00",
+              "event": "turn",
+              "question": "Is the overhead crane running hot?",
+              "tools_called": [
+                "compare_sensor_windows"
+              ],
+              "n_sources": 0
+            }
+          ],
+          "seconds": 7.1,
+          "prompt_tokens": 6238,
+          "completion_tokens": 41,
+          "proxy_cost": 0.0007394999999999999,
+          "model_calls": 2,
+          "oracle": {},
+          "failures": [],
+          "warnings": []
+        }
+      ],
+      "failures": [],
+      "warnings": [],
+      "seconds": 7.1,
+      "prompt_tokens": 6238,
+      "completion_tokens": 41,
+      "proxy_cost": 0.0007394999999999999,
+      "model_calls": 2
+    },
+    {
+      "id": "wo-11570-parts-not-recorded",
+      "status": "PASS",
+      "turns": [
+        {
+          "question": "What part is work order 11570 waiting for?",
+          "answer": "Work order 11570 is awaiting parts, but the CMMS does not record which specific part is needed.",
+          "sources": [
+            "CMMS work orders: jurongmarine_cmms.sql, line 1657 (cmms_work_orders_audit), SHA-256 cbedcaebeb37…"
+          ],
+          "notes": [
+            "Work orders that aren't closed already carry hours and costs; treat those as estimates (trap list C10).",
+            "Work order(s) 11570 are awaiting parts, but the CMMS doesn't record which part (trap list C11). If asked, say the data doesn't record it; don't name a part.",
+            "Work orders record no parts used (trap list C11)."
+          ],
+          "tools": [
+            {
+              "name": "list_work_orders",
+              "arguments": {
+                "wo_id": 11570
+              },
+              "sent": {
+                "wo_id": 11570
+              },
+              "ok": true,
+              "error_code": null,
+              "result": {
+                "tool": "list_work_orders",
+                "ok": true,
+                "data": {
+                  "machine_id": null,
+                  "count": 1,
+                  "by_type": {
+                    "corrective": 1
+                  },
+                  "by_status": {
+                    "awaiting parts": 1
+                  },
+                  "hours_total": 4.8,
+                  "cost_closed_sgd": 0.0,
+                  "cost_not_closed_sgd": 1942.31,
+                  "work_orders": [
+                    {
+                      "wo_id": 11570,
+                      "wo_date": "2026-06-10",
+                      "machine_id": "CRN-01",
+                      "wo_type": "corrective",
+                      "description": "crane limit switch fault",
+                      "hours": 4.8,
+                      "cost_sgd": 1942.31,
+                      "status": "awaiting parts",
+                      "dump_line": 1657,
+                      "part_awaited": "not recorded in the CMMS (trap list C11)"
+                    }
+                  ],
+                  "earliest": {
+                    "wo_id": 11570,
+                    "wo_date": "2026-06-10",
+                    "machine_id": "CRN-01",
+                    "wo_type": "corrective",
+                    "description": "crane limit switch fault",
+                    "hours": 4.8,
+                    "cost_sgd": 1942.31,
+                    "status": "awaiting parts",
+                    "dump_line": 1657,
+                    "part_awaited": "not recorded in the CMMS (trap list C11)"
+                  },
+                  "latest": {
+                    "wo_id": 11570,
+                    "wo_date": "2026-06-10",
+                    "machine_id": "CRN-01",
+                    "wo_type": "corrective",
+                    "description": "crane limit switch fault",
+                    "hours": 4.8,
+                    "cost_sgd": 1942.31,
+                    "status": "awaiting parts",
+                    "dump_line": 1657,
+                    "part_awaited": "not recorded in the CMMS (trap list C11)"
+                  }
+                },
+                "sources": [
+                  {
+                    "kind": "file",
+                    "object": "cmms_work_orders_audit",
+                    "file": "jurongmarine_cmms.sql",
+                    "locator": "line 1657",
+                    "sha256": "cbedcaebeb379109dd968ea79f56218d961e71a8dbe8b177bdbdda6f60343b79",
+                    "what": "CMMS work orders",
+                    "label": "CMMS work orders: jurongmarine_cmms.sql, line 1657 (cmms_work_orders_audit), SHA-256 cbedcaebeb37…"
+                  }
+                ],
+                "notes": [
+                  "Work orders that aren't closed already carry hours and costs; treat those as estimates (trap list C10).",
+                  "Work order(s) 11570 are awaiting parts, but the CMMS doesn't record which part (trap list C11). If asked, say the data doesn't record it; don't name a part.",
+                  "Work orders record no parts used (trap list C11)."
+                ],
+                "error": null,
+                "ms": 178
+              }
+            }
+          ],
+          "events": [
+            {
+              "ts": "2026-11-09T02:38:37.386+00:00",
+              "event": "chat_call",
+              "round": 1,
+              "model": "gpt-4o-mini",
+              "prompt_tokens": 3071,
+              "completion_tokens": 17,
+              "tool_calls": [
+                "list_work_orders"
+              ],
+              "ms": 1270.0
+            },
+            {
+              "ts": "2026-11-09T02:38:37.565+00:00",
+              "event": "tool_call",
+              "round": 1,
+              "tool": "list_work_orders",
+              "arguments": "{\"wo_id\":11570}",
+              "ok": true,
+              "error_code": null,
+              "n_sources": 1,
+              "ms": 178.7
+            },
+            {
+              "ts": "2026-11-09T02:38:39.121+00:00",
+              "event": "chat_call",
+              "round": 2,
+              "model": "gpt-4o-mini",
+              "prompt_tokens": 3625,
+              "completion_tokens": 23,
+              "tool_calls": [],
+              "ms": 1555.1
+            },
+            {
+              "ts": "2026-11-09T02:38:39.127+00:00",
+              "event": "turn",
+              "question": "What part is work order 11570 waiting for?",
+              "tools_called": [
+                "list_work_orders"
+              ],
+              "n_sources": 1
+            }
+          ],
+          "seconds": 3.0,
+          "prompt_tokens": 6696,
+          "completion_tokens": 40,
+          "proxy_cost": 0.0005771999999999999,
+          "model_calls": 2,
+          "oracle": {},
+          "failures": [],
+          "warnings": []
+        }
+      ],
+      "failures": [],
+      "warnings": [],
+      "seconds": 3.0,
+      "prompt_tokens": 6696,
+      "completion_tokens": 40,
+      "proxy_cost": 0.0005771999999999999,
+      "model_calls": 2
+    }
+  ]
+}

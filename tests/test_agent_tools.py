@@ -968,3 +968,90 @@ def test_every_incident_row_says_its_severity_in_words(incidents_db):
     assert rows[919]["severity"].endswith(": the most severe")
     assert rows[906]["severity"] == "3 on the current scale, where 5 is the most severe"
     assert "can't be placed" in rows[907]["severity"]
+
+
+# --------------------------------------- earliest / latest over many work orders ---
+# Same trap as list_incidents (eval run 9 Nov 2026): the list is the newest 50 of up to
+# 1,603 work orders, so "when was CNC-02 first serviced?" could be answered from the last
+# row of the page. The first and last work orders are now computed over every match.
+
+@pytest.fixture
+def wo_db():
+    """Only the work order tables (and machines), so these tests don't need the SOP load."""
+    c = sqlite3.connect(":memory:")
+    names = {m: n for m, n, _ in MACHINES}
+    wos = [  # wo_id, date, machine, type, description, hours, cost, status
+        (10042, "2024-01-25", "CNC-02", "PREVENTIVE", "scheduled PM", 1.2, 1187.31, "CLOSED"),
+        (10727, "2025-02-01", "CNC-02", "PREVENTIVE", "scheduled PM", 4.4, 358.6, "CLOSED"),
+        (10728, "2025-02-01", "CNC-02", "PREVENTIVE", "scheduled PM", 1.1, 835.61, "CLOSED"),
+        (11529, "2026-05-15", "CNC-02", "BREAKDOWN", "spindle vibration high", 13.3, 134.32, "CLOSED"),
+        (11591, "2026-06-19", "CNC-02", "CORRECTIVE", "bearing noise - gearbox", 3.2, 830.7, "OPEN"),
+        (11570, "2026-06-10", "CRN-01", "CORRECTIVE", "crane limit switch fault", 4.8, 1942.31, "AWAITING PARTS"),
+    ]
+    pd.DataFrame([{"wo_id": w, "wo_date": d, "machine_id": m, "machine_name": names[m],
+                   "wo_type": t, "description": de, "duration_hrs": h, "cost_sgd": co,
+                   "status": s, "raw_id": 2000 + n}
+                  for n, (w, d, m, t, de, h, co, s) in enumerate(wos)]
+                 ).to_sql("work_order_detail", c, index=False)
+    pd.DataFrame([{"wo_id": w, "raw_id": 2000 + n, "source_file": CMMS, "source_line": 900 + n,
+                   "file_sha256": SHA} for n, (w, *_) in enumerate(wos)]
+                 ).to_sql("cmms_work_orders_audit", c, index=False)
+    pd.DataFrame([{"machine_id": m, "machine_name": n, "model": mo, "sensor_readings": 0,
+                   "first_reading": None, "last_reading": None} for m, n, mo in MACHINES]
+                 ).to_sql("machine_overview", c, index=False)
+    yield at.sqlite_db(c)
+    c.close()
+
+
+def test_the_first_work_order_is_over_every_match_not_the_last_row_listed(wo_db, monkeypatch):
+    monkeypatch.setattr(at, "MAX_ROWS", 2)                     # 5 for CNC-02, 2 listed
+    r = call(wo_db, "list_work_orders", machine="CNC-02")
+    assert [w["wo_id"] for w in r.data["work_orders"]] == [11591, 11529]   # newest first
+    assert r.data["earliest"]["wo_id"] == 10042 and str(r.data["earliest"]["wo_date"]) == "2024-01-25"
+    assert r.data["latest"]["wo_id"] == 11591
+    note = next(n for n in r.notes if "only the newest 2" in n)
+    assert "NOT the earliest" in note and "10042 (2024-01-25)" in note and "11591 (2026-06-19)" in note
+    assert r.data["count"] == 5 and r.data["hours_total"] == 23.2        # totals still cover all
+
+
+def test_work_orders_can_be_listed_oldest_first(wo_db, monkeypatch):
+    monkeypatch.setattr(at, "MAX_ROWS", 2)
+    r = call(wo_db, "list_work_orders", machine="CNC-02", newest_first=False)
+    assert [w["wo_id"] for w in r.data["work_orders"]] == [10042, 10727]
+    assert any("only the oldest 2" in n and "NOT the latest" in n for n in r.notes)
+
+
+def test_a_short_work_order_list_has_first_and_last_and_no_truncation_note(wo_db):
+    r = call(wo_db, "list_work_orders", machine="CRN-01")
+    assert r.data["earliest"]["wo_id"] == r.data["latest"]["wo_id"] == 11570
+    assert "not recorded" in r.data["earliest"]["part_awaited"]          # C11 rides along
+    assert not any("are listed" in n for n in r.notes)
+    assert "earliest" not in call(wo_db, "list_work_orders", machine="MILL-01").data
+
+
+# -------------------------------------------------- one work order by its number ---
+# Eval run 9 Nov 2026 (wo-11570-parts-not-recorded): asked what WO 11570 is waiting for,
+# the model had no way to look up one work order: it searched the descriptions for "11570",
+# found nothing, and said the work order doesn't exist. It does (CRN-01, awaiting parts).
+
+def test_one_work_order_by_its_number_carries_the_parts_gap(wo_db):
+    r = call(wo_db, "list_work_orders", wo_id=11570)
+    assert r.ok and r.data["count"] == 1
+    wo = r.data["work_orders"][0]
+    assert wo["wo_id"] == 11570 and wo["machine_id"] == "CRN-01"
+    assert "not recorded" in wo["part_awaited"]
+    assert any("11570" in n and "don't name" in n for n in r.notes)
+
+
+def test_a_work_order_number_in_the_description_search_is_redirected_not_not_found(wo_db):
+    for said in ("11570", "WO 11570", "wo11570", "#11570"):
+        r = call(wo_db, "list_work_orders", description_contains=said)
+        assert not r.ok and r.error["code"] == "bad_arguments", said
+        assert "wo_id" in r.error["message"] and "11570" in r.error["message"]
+    assert call(wo_db, "list_work_orders", description_contains="limit switch").ok   # words: fine
+
+
+def test_a_work_order_that_doesnt_exist_says_so(wo_db):
+    r = call(wo_db, "list_work_orders", wo_id=99999)
+    assert not r.ok and r.error["code"] == "no_data"
+    assert "no work order 99999" in r.error["message"].lower()
