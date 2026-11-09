@@ -1,12 +1,11 @@
 # What the hosted demo page needs (not the ingest scripts). Pin these to the versions in
 # your working environment (`pip freeze`, or `uv pip freeze`) before the demo.
-
-cryptography>=41.0.0        # PyMySQL needs it for MySQL 8's default login method (caching_sha2_password)
-openai>=0.27.0              # without it, the query_sql tool is switched off
-pandas>=2.2
-pydantic>=2.11
-pymysql>=1.1
-python-dotenv>=1.0
-sqlalchemy>=2.0
-sqlglot>=12.0.0
-streamlit>=1.24.0
+streamlit>=1.36   # the page uses st.popover and st.columns(vertical_alignment=...)
+openai
+pandas
+pydantic
+sqlalchemy
+pymysql
+cryptography      # PyMySQL needs it for MySQL 8's default login method (caching_sha2_password)
+sqlglot           # without it, the query_sql tool is switched off
+python-dotenv

@@ -286,15 +286,17 @@ def test_the_suite_freezes_today_and_its_dates_follow_from_it():
     the latest full month, instead; if either date moves, this is the reminder."""
     frozen = date.fromisoformat(ev.case_file_today(CASES))
     p = app.relative_periods(frozen)
+    lm_from, lm_to = (d.isoformat() for d in p["last_month"])
     assert p["last_month"][0].strftime("%b %Y") == "Oct 2026"
-    first, last = (d.isoformat() for d in app.latest_full_month(date(2026, 6, 30)))
     case = {c["id"]: c for c in ev.load_cases(CASES)}["mt-last-month-work-orders"]
     turns = [t["expect"] for t in case["turns"]]
     args = [a["args"] for e in turns for a in e.get("tool_args") or []]
     assert args[0]["date_from"] == f"{p['this_year']}-01-01"
-    assert (args[1]["date_from"], args[1]["date_to"]) == (first, last)   # the June fallback
-    assert args[2]["date_from"] == first
-    assert any("Oct" in pat for pat in turns[1]["answer_matches"])       # and says October
+    assert (args[1]["date_from"], args[1]["date_to"]) == (lm_from, lm_to)   # October, asked
+    assert "period_after_data" in turns[1]["events_present"]                 # June, by the code
+    assert app.latest_full_month(date(2026, 6, 30))[0].strftime("%b %Y") == "Jun 2026"
+    pats = turns[1]["answer_matches"]
+    assert any("Oct" in x for x in pats) and any("June" in x for x in pats)
 
 
 def test_the_runner_reads_today_from_the_cases_file(tmp_path):
@@ -311,3 +313,114 @@ def test_the_runner_reads_today_from_the_cases_file(tmp_path):
 def test_check_shows_the_frozen_date(capsys):
     assert ev.main(["--check", "--cases", str(CASES)]) == 0
     assert "today 2026-11-10: OK" in capsys.readouterr().out
+
+
+
+# ------------------------------- a period after the data ends, in code ---
+# 10 Nov 2026, first real eval run: "and what about last month?" queried October 2026 (right),
+# got nothing, and the model answered "no work orders in October", ignoring the prompt's rule
+# to fall back to June. The loop now does the fallback itself (agent_app.period_check).
+
+class _Fn:
+    def __init__(self, name, arguments):
+        self.name, self.arguments = name, arguments
+
+
+class _Call:
+    def __init__(self, cid, name, arguments):
+        self.id, self.function = cid, _Fn(name, arguments)
+
+
+class _ToolMsg:
+    def __init__(self, calls):
+        self.content, self.tool_calls = None, calls
+
+
+class _R:
+    """A ToolResult stand-in: what run_turn and period_check read."""
+
+    def __init__(self, data, sources=(), notes=(), ok=True):
+        self.ok, self.error, self.data = ok, None, data
+        self.sources, self.notes = list(sources), list(notes)
+
+    def for_model(self):
+        return json.dumps({"tool": "list_work_orders", "ok": self.ok, "data": self.data,
+                           "notes": self.notes, "sources": self.sources})
+
+
+def _loop(monkeypatch, arguments, db):
+    """One run_turn: the model calls list_work_orders with `arguments`, then answers.
+    Returns (the tool runs, the tool message's content as JSON, events, notes, sources)."""
+    runs = []
+
+    def run_tool(db_, name, args):
+        args = json.loads(args) if isinstance(args, str) else dict(args)
+        runs.append(args)
+        june = args.get("date_from") == "2026-06-01"
+        return _R({"count": 4 if june else 0},
+                  sources=[{"label": f"CMMS work orders {args.get('date_from')}"}],
+                  notes=["Work orders record no parts used (trap list C11)."])
+    monkeypatch.setattr(app.at, "run_tool", run_tool)
+    replies = iter([_Resp(None), _Resp("done")])
+    replies_first = next(replies)
+    replies_first.choices[0].message = _ToolMsg([_Call("c1", "list_work_orders", arguments)])
+    seq = iter([replies_first, next(replies)])
+    events = []
+
+    class Grab(logging.Handler):
+        def emit(self, r):
+            events.append(json.loads(r.getMessage()))
+    lg = logging.getLogger(f"test_multiturn.period.{id(runs)}")
+    lg.setLevel(logging.INFO)
+    lg.addHandler(Grab())
+    messages = [{"role": "user", "content": "and what about last month?"}]
+    notes = []
+    _, sources, _ = app.run_turn(db, None, messages, complete_fn=lambda *a: next(seq),
+                                 logger=lg, notes_out=notes)
+    tool_msg = next(m for m in messages if m.get("role") == "tool")
+    return runs, json.loads(tool_msg["content"]), events, notes, sources
+
+
+def test_a_period_after_the_data_ends_is_run_again_for_the_latest_full_month(monkeypatch):
+    runs, body, events, notes, sources = _loop(
+        monkeypatch, '{"machine": "CNC-02", "date_from": "2026-10-01", "date_to": "2026-10-31"}',
+        FakeDb(DATA))
+    assert runs == [{"machine": "CNC-02", "date_from": "2026-10-01", "date_to": "2026-10-31"},
+                    {"machine": "CNC-02", "date_from": "2026-06-01", "date_to": "2026-06-30"}]
+    assert body["no_data_for_period_asked"] is True and body["data_ends"] == "2026-06-30"
+    assert body["result_for_period_asked"]["data"]["count"] == 0
+    fb = body["latest_full_month"]
+    assert (fb["month"], fb["from"], fb["to"]) == ("June 2026", "2026-06-01", "2026-06-30")
+    assert fb["result"]["data"]["count"] == 4
+    note = body["notes"][0]
+    assert "1 Oct 2026 to 31 Oct 2026" in note and "runs to 30 Jun 2026" in note
+    assert "June 2026" in note and "Never present it as the period asked about" in note
+    ev_ = [e for e in events if e["event"] == "period_after_data"]
+    assert len(ev_) == 1 and ev_[0]["fallback"] == "1 Jun 2026 to 30 Jun 2026"
+    assert [e["event"] for e in events].count("tool_call") == 1          # the model's call, once
+    assert note in notes and len(sources) == 2                           # both cited
+
+
+def test_a_period_inside_the_data_is_passed_through_unchanged(monkeypatch):
+    runs, body, events, notes, _ = _loop(
+        monkeypatch, {"machine": "CNC-02", "date_from": "2026-06-01", "date_to": "2026-06-30"},
+        FakeDb(DATA))
+    assert len(runs) == 1 and body["data"]["count"] == 4 and "latest_full_month" not in body
+    assert not [e for e in events if e["event"].startswith("period_")]
+
+
+def test_a_period_running_past_the_data_says_where_it_stops(monkeypatch):
+    runs, body, events, notes, _ = _loop(
+        monkeypatch, {"machine": "CNC-02", "date_from": "2026-01-01", "date_to": "2026-11-10"},
+        FakeDb(DATA))
+    assert len(runs) == 1                                                # no second query
+    assert body["notes"][-1].startswith("The period asked runs to 10 Nov 2026, but the data "
+                                        "ends on 30 Jun 2026")
+    assert [e["event"] for e in events if e["event"].startswith("period_")] == ["period_past_data"]
+
+
+def test_without_the_datas_dates_nothing_is_changed(monkeypatch):
+    for db in (None, FakeDb(fail=True)):
+        runs, body, events, _, _ = _loop(
+            monkeypatch, {"date_from": "2026-10-01", "date_to": "2026-10-31"}, db)
+        assert len(runs) == 1 and "latest_full_month" not in body

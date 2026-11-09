@@ -1,6 +1,8 @@
 """Tests for scripts/agent_ui.py's helpers (no Streamlit needed: it is imported inside main())."""
 from __future__ import annotations
 
+import contextlib
+
 import agent_app as app
 import agent_ui as ui
 from test_agent_app import (FakeMessage, FakeResponse, FakeToolCall, FakeToolResult,
@@ -121,26 +123,28 @@ def test_a_caption_cant_inject_html():
     assert "data:image/jpeg;base64," in tag              # an odd type is never passed through
 
 
-def test_the_tools_notes_are_shown_under_the_answer_in_a_closed_expander():
-    import contextlib
+class FakeSt:
+    def __init__(self):
+        self.md, self.expanders = [], []
 
-    class St:
-        def __init__(self):
-            self.md, self.expanders = [], []
+    def markdown(self, text, **kw):
+        self.md.append(text)
 
-        def markdown(self, text, **kw):
-            self.md.append(text)
+    def expander(self, label, expanded=False):
+        self.expanders.append((label, expanded))
+        return contextlib.nullcontext()
 
-        def expander(self, label, expanded=False):
-            self.expanders.append((label, expanded))
-            return contextlib.nullcontext()
-    st = St()
+
+def test_the_tools_notes_are_a_plain_list_inside_their_tab():
+    """10 Nov 2026: the notes moved from a closed expander into the answer's Caveats tab,
+    which is just as closed until clicked; an expander inside a tab is clutter."""
+    st = FakeSt()
     ui.show_notes(st, ["read off the scan by a person", "trap list C6"])
-    assert st.expanders == [("Caveats from the data (2), as the tools gave them", False)]
     assert st.md == ["- read off the scan by a person\n- trap list C6"]
-    st2 = St()
+    assert st.expanders == []
+    st2 = FakeSt()
     ui.show_notes(st2, [])
-    assert st2.md == [] and st2.expanders == []
+    assert st2.md == []
 
 
 def test_a_guardrail_refusal_shows_in_the_rows_with_no_model_call(monkeypatch):
@@ -170,6 +174,43 @@ def test_a_question_refused_because_the_name_list_is_missing_shows_in_the_rows()
     assert ui.trace_rows([{"event": "guard_not_ready"}]) == [
         {"step": "guardrail", "seconds": None,
          "detail": "refused: the staff name list isn't loaded (fail closed)"}]
+
+
+# ----------------------------------------------- the page layout (10 Nov 2026) ---
+
+def test_each_answer_gets_a_tab_only_for_what_it_has_with_counts():
+    m = {"role": "assistant", "text": "a", "sources": ["CMMS", "sensor log"],
+         "notes": ["trap list C6"], "photos": [], "trace": [{"step": "model"}]}
+    assert ui.evidence_tabs(m) == [("sources", "Sources (2)"), ("notes", "Caveats (1)"),
+                                   ("trace", "What happened (1 step)")]
+    assert ui.evidence_tabs({"role": "assistant", "text": "a"}) == []
+    reloaded = {"role": "assistant", "text": "a", "sources": ["CMMS"]}   # no trace once saved
+    assert ui.evidence_tabs(reloaded, latest=True) == [("sources", "Sources (1)")]
+
+
+def test_on_the_newest_answer_what_happened_is_the_first_tab():
+    """Streamlit opens the first tab: the demo shows the path of the newest question."""
+    m = {"sources": ["CMMS"], "photos": [{"note": "x"}], "trace": [{}, {}, {}]}
+    assert [k for k, _ in ui.evidence_tabs(m, latest=True)] == ["trace", "sources", "photos"]
+    assert [k for k, _ in ui.evidence_tabs(m)] == ["sources", "photos", "trace"]
+    assert ui.evidence_tabs(m, latest=True)[0][1] == "What happened (3 steps)"
+
+
+def test_the_newest_answer_is_found():
+    shown = [{"role": "user", "text": "q"}, {"role": "assistant", "text": "a"},
+             {"role": "user", "text": "q2"}]
+    assert ui.last_answer(shown) == 1
+    assert ui.last_answer([]) is None and ui.last_answer([{"role": "user"}]) is None
+
+
+def test_the_usage_button_shows_model_and_cost_as_plain_text():
+    assert ui.usage_label("gpt-4o-mini", 0.0031) == r"gpt\-4o\-mini · \$0\.0031"
+    assert ui.usage_label("m", 0.0004, complete=False) == r"m · at least \$0\.0004"
+
+
+def test_only_the_guardrail_example_has_a_tooltip():
+    helps = {q: ui.example_help(q) for q in ui.EXAMPLES}
+    assert [q for q, h in helps.items() if h] == ["What is the name of employee EMP015?"]
 
 
 # ------------------------------------------------------- spend on the page (#7) ---

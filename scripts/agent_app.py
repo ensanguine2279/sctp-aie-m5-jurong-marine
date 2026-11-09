@@ -26,7 +26,10 @@ Multi-turn context (#5) is the `messages` list itself: every earlier question, a
 tool result goes back to the model with the follow-up. A relative period ("and what about
 last month?") is resolved in code: `ask()` puts today's date (Singapore) and the dates the
 data runs to into the system prompt (today, data_dates, dates_note), so "last month" is the
-calendar's, never the model's guess, and a period with no data is said to have none. Cross-restart state is kept by the page, not here: `messages` is a plain list
+calendar's, never the model's guess. A tool asked for a period after the data ends is run
+again by the loop for the latest full month the data has (period_check), so the model gets
+both results and can't stop at "nothing found". Cross-restart state is kept by the page,
+not here: `messages` is a plain list
 that agent_ui.py saves after every answer and loads back (scripts/sessions.py). No
 human-in-the-loop gate (#6): this app is read-only, so none is needed. The eval suite (#8) is separate:
 `scripts/run_evals.py` over `evals/cases.yaml`.
@@ -215,6 +218,77 @@ def _new_usage() -> dict:
             "cost_complete": True}
 
 
+def _parse_args(arguments) -> dict:
+    try:
+        a = json.loads(arguments) if isinstance(arguments, str) else dict(arguments or {})
+    except (ValueError, TypeError):
+        return {}
+    return a if isinstance(a, dict) else {}
+
+
+def _span(start, end) -> str:
+    return f"{_day(start)} to {_day(end)}" if end else f"from {_day(start)}"
+
+
+def period_check(db, name, arguments, result, logger=log, round_no=None):
+    """(content for the model, extra sources, extra notes) for one tool result, with the
+    period it was asked for checked against where the data ends, in code (#4, #5).
+
+    A period that STARTS after the data ends has no data, so the loop runs the same tool
+    for the latest full month the data has and gives the model both results, with a note
+    to say so and present the second as that month, never as the one asked about. Found on
+    the eval run of 10 Nov 2026: asked "and what about last month?", the model queried
+    October 2026 (right), got nothing, and answered "no work orders in October": the prompt
+    told it to fall back to June, and it didn't. A period that runs PAST the data's end gets
+    a note that it covers only up to that day. Anything else is passed through unchanged."""
+    plain = result.for_model()
+    args = _parse_args(arguments)
+    start, stop = _as_date(args.get("date_from")), _as_date(args.get("date_to"))
+    dates = data_dates(db) if start else None
+    if not dates:
+        return plain, [], []
+    end = max(dates.values())
+    if start <= end:
+        if stop and stop > end and getattr(result, "ok", False):
+            note = (f"The period asked runs to {_day(stop)}, but the data ends on {_day(end)}: "
+                    f"this covers only {_span(start, end)}. Say so in the answer.")
+            _emit(logger, "period_past_data", round=round_no, tool=name,
+                  asked=_span(start, stop), data_ends=end.isoformat())
+            try:
+                body = json.loads(plain)
+                body["notes"] = list(body.get("notes") or []) + [note]
+                return json.dumps(body, ensure_ascii=False, separators=(",", ":")), [], [note]
+            except (ValueError, TypeError, AttributeError):
+                return plain, [], [note]
+        return plain, [], []
+    f_from, f_to = latest_full_month(end)
+    f_args = {**args, "date_from": f_from.isoformat(), "date_to": f_to.isoformat()}
+    fallback = at.run_tool(db, name, f_args)
+    month = f"{f_from:%B %Y}"
+    note = (f"Nothing in the data for the period asked, {_span(start, stop)}: the shop's data "
+            f"runs to {_day(end)}. In the answer, say that first, with those dates. Then give "
+            f"the result for {month} ({_span(f_from, f_to)}), the latest full month with data, "
+            f"from latest_full_month below, and say that's what it is. Never present it as "
+            f"the period asked about.")
+    _emit(logger, "period_after_data", round=round_no, tool=name, asked=_span(start, stop),
+          data_ends=end.isoformat(), fallback=_span(f_from, f_to),
+          fallback_arguments=json.dumps(f_args)[:500], fallback_ok=getattr(fallback, "ok", None))
+    try:
+        asked_body, fb_body = json.loads(plain), json.loads(fallback.for_model())
+    except (ValueError, TypeError):
+        asked_body, fb_body = plain, fallback.for_model()
+    body = {"tool": name, "ok": getattr(result, "ok", None), "notes": [note],
+            "period_asked": {"from": start.isoformat(), "to": stop.isoformat() if stop else None},
+            "data_ends": end.isoformat(), "no_data_for_period_asked": True,
+            "result_for_period_asked": asked_body,
+            "latest_full_month": {"month": month, "from": f_from.isoformat(),
+                                  "to": f_to.isoformat(), "arguments": f_args,
+                                  "result": fb_body}}
+    return (json.dumps(body, ensure_ascii=False, separators=(",", ":"), default=str),
+            list(getattr(fallback, "sources", None) or []),
+            [note] + list(getattr(fallback, "notes", None) or []))
+
+
 def run_turn(db, client, messages, *, model=MODEL, max_rounds=MAX_TOOL_ROUNDS,
              complete_fn=None, logger=log, notes_out=None, usage_out=None):
     """Run one user turn to completion: call the model, run any tools it picks, feed
@@ -280,11 +354,14 @@ def run_turn(db, client, messages, *, model=MODEL, max_rounds=MAX_TOOL_ROUNDS,
             tool_names.append(call.function.name)
             if clarify is None and isinstance(err, dict) and err.get("code") in CLARIFY_CODES:
                 clarify = err.get("message") or "Could you clarify your question?"
+            content, extra_sources, extra_notes = period_check(
+                db, call.function.name, arguments, result, logger, round_no)
             sources.extend(result.sources)
+            sources.extend(extra_sources)
             if notes_out is not None:
                 notes_out.extend(getattr(result, "notes", None) or [])
-            messages.append({"role": "tool", "tool_call_id": call.id,
-                              "content": result.for_model()})
+                notes_out.extend(extra_notes)
+            messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
         if clarify:
             _emit(logger, "clarification_returned", round=round_no)
             messages.append({"role": "assistant", "content": clarify})

@@ -112,6 +112,7 @@ the data runs to today, that fallback never comes up.
 | `latest_full_month(end)` | The latest calendar month the data covers to its last day: June 2026 for data ending 30 Jun 2026; for data ending mid-month, the month before |
 | `dates_note(dates, today)` | The section added to the system prompt, in words |
 | `ask()` | Sets the system message to `SYSTEM_PROMPT` plus that section before every question that reaches the model, so a conversation reloaded the next day gets the new date. A refused question reads nothing |
+| `period_check()` | In `run_turn`, after every tool call with a `date_from`: a period that **starts** after the data ends is run again by the loop for the latest full month, and the model gets both results and a note (`period_after_data`); a period that **runs past** the data's end gets a note that it covers only up to that day (`period_past_data`); anything else is passed through unchanged |
 
 On 10 Nov 2026, with the client's data, the model is told:
 
@@ -137,6 +138,30 @@ Dates:
 
 (The incident date shown is illustrative: it is whatever `MAX(incident_date)` returns.) When
 the data runs to today, the two fallback lines are left out.
+
+**The fallback is run in code, not left to the model.** The first version only told the
+model, in the prompt, to fall back to June. On the first real eval run (10 Nov 2026) it didn't:
+asked "and what about last month?", it queried October 2026 (right), got nothing, and answered
+"CNC-02 had no work orders in October 2026"; asked "this month", it said "I could not check
+that". So `period_check()` now does it, as the severity-scale guard does for scales: when a
+tool call's `date_from` is after the data's last day, the loop runs the same tool with the
+latest full month's dates and sends the model one tool message holding
+
+```json
+{"no_data_for_period_asked": true, "period_asked": {"from": "2026-10-01", "to": "2026-10-31"},
+ "data_ends": "2026-06-30", "result_for_period_asked": {...},
+ "latest_full_month": {"month": "June 2026", "from": "2026-06-01", "to": "2026-06-30",
+                       "arguments": {...}, "result": {...}},
+ "notes": ["Nothing in the data for the period asked, 1 Oct 2026 to 31 Oct 2026: the shop's
+            data runs to 30 Jun 2026. In the answer, say that first, with those dates. Then
+            give the result for June 2026 (...), the latest full month with data, ... Never
+            present it as the period asked about."]}
+```
+
+Both results are cited, the note is shown under the answer with the other caveats, and the
+log has one `tool_call` (the model's own, with October) plus a `period_after_data` line with
+the fallback's arguments. What the model must still do is *say* it: the eval cases check the
+answer names October, says there's no data, and gives June's count.
 
 **If the data's dates can't be read** (the database is down when the question arrives), the
 model still gets today's date, is told it doesn't know where the data ends, and is told to ask
@@ -165,9 +190,12 @@ in [`evals.md`](evals.md).
   source's last day, so the model can say so.
 - The whole conversation is resent with every follow-up, tool results included. A long
   conversation costs more tokens per question; there is no trimming yet.
-- Whether a follow-up *keeps* the earlier context, and whether the fallback is stated, is the
-  model's job, told by the prompt and checked by the eval cases, not enforced in code (as the
-  severity scale is).
+- Whether a follow-up *keeps* the earlier context, and how the answer words the fallback, is
+  the model's job, told by the prompt and the tool's note and checked by the eval cases. The
+  fallback query itself is code.
+- Only tools with a `date_from` argument are checked: `list_work_orders`, `list_incidents`,
+  `count_incidents` and `sensor_trend`. `compare_sensor_windows` names its windows differently,
+  and `sensor_trend` already clips a period to the readings it has.
 
 ## The demo front end
 
@@ -214,6 +242,10 @@ Every line carries a UTC `ts` (ISO 8601, milliseconds):
   refused without a model call (fail closed; the CLI and the page don't start in that state).
 - `dates_unknown`: where the data ends couldn't be read, so the model was told to ask for
   exact dates instead of assuming the period asked about is covered.
+- `period_after_data`: a tool was asked for a period that starts after the data ends; the
+  loop ran it again for the latest full month (`fallback`, `fallback_arguments`).
+- `period_past_data`: a tool was asked for a period that runs past the data's end; the result
+  carries a note that it covers only up to that day.
 - `turn`: one line per question — the question (truncated), every tool called, how
   many sources came back, `model_calls` and the question's `cost_usd`. A refused question has `refused` set, and a PDPA one is logged as
   `[withheld: pdpa]`, never its text (it may hold a name).
@@ -343,7 +375,7 @@ a severity scale the user never named (no quote, an invented quote, a quote nami
 in `run_tool` itself (not a normal tool error) still propagates today — a deliberate
 choice to surface in a test, not a gap to silently paper over.
 
-`tests/test_multiturn.py` (25 tests, no database, no real LLM call; a stand-in `Db` and a
+`tests/test_multiturn.py` (29 tests, no database, no real LLM call; a stand-in `Db` and a
 scripted chat call): **where the data ends**: read from each source (a DATE, date text and
 DATETIME text all understood) and only once; no database, a down one or an empty one giving no
 dates, a failure not cached. **What "today" means**: the calendar's date in Singapore, unless
@@ -360,6 +392,12 @@ suite**: the dates given to the model counting as grounding evidence and a month
 not; real multi-turn cases in `cases.yaml`; every follow-up refused by the guard exactly when its
 case says so; the frozen today in `cases.yaml` and the October / June dates the cases expect
 following from it; the runner reading `today:` (a bad value refused) and `--check` showing it.
+**The fallback in code** (found on the first real eval run): a period after the data ends run
+again for the latest full month through the real `run_turn`, both results and the note in one
+tool message, `period_after_data` logged once beside one `tool_call`, both cited, the note
+among the caveats; a period inside the data passed through untouched; one running past the
+data's end noted (`period_past_data`) with no second query; no change without the data's dates
+(no database, or a down one).
 
 `tests/test_read_log.py` (5 tests, standard library only): the documented example prints
 exactly as shown above; other lines skipped and an unfinished question shown; gcloud output
