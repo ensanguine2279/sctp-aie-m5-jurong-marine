@@ -15,12 +15,17 @@ harness checklist, enforced in code rather than hoped for from the prompt:
        to the model, which must say so. A failed LLM call, or too many tool-call rounds,
        produces a plain "I couldn't answer this" rather than a crash or a guess.
 
+    4. Guardrails (#3): `ask()` puts guardrail.py on both sides of the model. A question
+       that is a prompt injection, asks for a person's name or personal details (PDPA),
+       or is plainly out of scope is refused in code, before any model call; a model
+       answer carrying a staff name, an NRIC, a phone number or an e-mail address is
+       replaced before the user sees it. Neither leaves the offending text in `messages`,
+       so it never reaches a later prompt either.
+
 What this script does NOT do yet (by design, not oversight - see the capstone task
-list): no guardrail layer in front of the model (#3), no cross-restart conversation
-state (#5), no human-in-the-loop gate (#6: this app is read-only, so none is needed),
-and no eval suite (#8, `evals/cases.yaml`, separate). Those are later steps; this is
-the minimum that answers a question end to end, grounded, with citations, without
-crashing or inventing.
+list): no cross-restart conversation state (#5), and no human-in-the-loop gate (#6: this
+app is read-only, so none is needed). The eval suite (#8) is separate:
+`scripts/run_evals.py` over `evals/cases.yaml`.
 
 Usage
     python scripts/agent_app.py "is CNC-02 running differently now?"
@@ -45,6 +50,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import agent_tools as at
+import guardrail
 
 MODEL = os.environ.get("AGENT_MODEL", "gpt-4o-mini")
 # A tool asking for a clarification is passed to the user as-is; the model never gets to
@@ -243,6 +249,12 @@ def run_turn(db, client, messages, *, model=MODEL, max_rounds=MAX_TOOL_ROUNDS,
             "calls. Try asking a narrower question."), sources, tool_names
 
 
+def _loggable(question: str, rule: str | None) -> str:
+    """The question as the log may keep it: a PDPA question can hold a person's name or
+    personal details, so only the fact that one was asked is logged."""
+    return "[withheld: pdpa]" if rule == "pdpa" else question[:200]
+
+
 def new_conversation() -> list[dict]:
     return [{"role": "system", "content": SYSTEM_PROMPT}]
 
@@ -253,10 +265,42 @@ def ask(db, client, messages, question, *, model=MODEL, logger=log, raw_sources=
     labels). `messages` is mutated in place so the caller can keep the conversation.
     raw_sources: a list to extend with the tools' source records (agent_ui.py shows the
     photo behind each image source from them). notes: a list to extend with the tools'
-    notes, the caveats the page shows under the answer whether or not the model said them."""
+    notes, the caveats the page shows under the answer whether or not the model said them.
+
+    The guardrail (#3) runs here, on both sides of the model, so every caller (the CLI, the
+    page, the eval suite) gets it:
+      - input: a refused question gets the guard's own message and no model call. Only a
+        placeholder goes into `messages`, so the question (which may hold a name or an
+        injection) never reaches a later prompt; the `turn` log line withholds a PDPA
+        question's text for the same reason.
+      - output: an answer with personal data is replaced, in `messages` too, so the next
+        turn's prompt doesn't carry it either."""
+    if not guardrail.names_loaded():           # fail closed: no name list, no answers
+        _emit(logger, "guard_not_ready")
+        _emit(logger, "turn", question="[withheld: guard not ready]", tools_called=[],
+              n_sources=0, refused="not_ready")
+        return guardrail.MESSAGES["not_ready"], []
+    verdict = guardrail.check_input(question)
+    if not verdict.allowed:
+        messages.append({"role": "user", "content": f"[question withheld by the guardrail: "
+                                                    f"{verdict.rule}]"})
+        messages.append({"role": "assistant", "content": verdict.message})
+        _emit(logger, "input_refused", rule=verdict.rule, reason=verdict.reason)
+        _emit(logger, "turn", question=_loggable(question, verdict.rule), tools_called=[],
+              n_sources=0, refused=verdict.rule)
+        return verdict.message, []
+
     messages.append({"role": "user", "content": question})
     answer, sources, tool_names = run_turn(db, client, messages, model=model, logger=logger,
                                            notes_out=notes)
+    out = guardrail.check_output(answer or "")
+    if not out.allowed:
+        _emit(logger, "output_blocked", rule=out.rule, reason=out.reason)   # never the text
+        answer = out.message
+        for m in reversed(messages):              # the leaked text leaves the history too
+            if m.get("role") == "assistant" and m.get("content"):
+                m["content"] = answer
+                break
     _emit(logger, "turn", question=question[:200],
           tools_called=tool_names, n_sources=len(sources))
     if raw_sources is not None:
@@ -303,6 +347,10 @@ def main() -> None:
 
     _setup_logging(a.log_file or None)
 
+    try:
+        guardrail.require_names()              # fail closed, before anything else
+    except guardrail.GuardNotReady as e:
+        sys.exit(str(e))
     try:
         db = at.connect(a.env_file)
     except Exception as e:

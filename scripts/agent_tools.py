@@ -926,11 +926,23 @@ def _logged(r) -> str:
     return f"{int(v)} on the {'old (1 = most severe)' if old else 'current (5 = most severe)'} scale"
 
 
+def severity_said(s) -> str:
+    """The converted severity in words, so the number can't be read on the wrong scale.
+    Eval run 9 Nov 2026 (incident-earliest-917): incident 914, severity_5_worst 1 (the least
+    severe), was reported as '1 on the old scale (where 1 is the most severe)'."""
+    if s is None or pd.isna(s):
+        return "can't be placed on one scale (July 2025, trap list C2)"
+    s = int(s)
+    end = {5: ": the most severe", 1: ": the least severe"}.get(s, "")
+    return f"{s} on the current scale, where 5 is the most severe{end}"
+
+
 def _incident_row(r: dict) -> dict:
     s = r.get("severity_5_worst")
     return {"incident_id": int(r["incident_id"]), "incident_date": r["incident_date"],
             "machine_id": r["machine_id"], "description": r["description"],
             "severity_5_worst": None if s is None or pd.isna(s) else int(s),
+            "severity": severity_said(s),
             "severity_as_logged": _logged(r), "lost_days": r.get("lost_days"),
             "reporting": r.get("reporting"), "dump_line": r.get("source_line")}
 
@@ -997,26 +1009,45 @@ class ListIncidentArgs(IncidentFilter):
 @tool("list_incidents", """The incidents behind a count (up to 50), each with date,
 machine, description, severity on the 5 = most severe scale AND as logged, lost days,
 and its line in the CMMS dump. Same filters as count_incidents. Order is by incident
-date (incident ids are not in date order).""", ListIncidentArgs)
+date (incident ids are not in date order). `earliest` and `latest` are the first and last
+matching incidents by date, over ALL matches, even when only 50 are listed: use them for
+'the first / earliest / latest / most recent incident'.""", ListIncidentArgs)
 def list_incidents(db: Db, a: ListIncidentArgs) -> ToolResult:
     df, unplaced, applied = _incidents(db, a)
     df = df.sort_values(["incident_date", "incident_id"], ascending=not a.newest_first)
     rows = [_incident_row(r) for r in df.head(MAX_ROWS).to_dict("records")]
+    data = {"count": len(df), "filter": applied, "severity_rule": SEVERITY_RULE,
+            "incidents": rows}
+    sources = cite_rows(df.head(MAX_ROWS), "cmms_safety_incidents_audit", "file",
+                        "source_line", "line", what="CMMS incidents")
     notes = []
+    if len(df):
+        # Computed over every match, not the page. Eval run 9 Nov 2026 (incident-earliest-917):
+        # 85 incidents, the newest 50 listed; the model took the page's last row (914,
+        # 2025-01-03) as the earliest. The real earliest, 917 (2024-01-24), wasn't on it.
+        by_date = df.sort_values(["incident_date", "incident_id"])
+        first, last = by_date.iloc[0].to_dict(), by_date.iloc[-1].to_dict()
+        data["earliest"], data["latest"] = _incident_row(first), _incident_row(last)
+        shown = set(df.head(MAX_ROWS)["incident_id"])
+        extra = by_date[by_date["incident_id"].isin({first["incident_id"], last["incident_id"]})
+                        & ~by_date["incident_id"].isin(shown)]
+        if len(extra):          # cite the line of an earliest/latest that isn't on the page
+            sources += cite_rows(extra, "cmms_safety_incidents_audit", "file", "source_line",
+                                 "line", what="CMMS incidents")
     if len(df) > MAX_ROWS:
-        notes.append(f"{len(df)} incidents match; the first {MAX_ROWS} are listed. Use "
-                     f"count_incidents for totals.")
+        end = "newest" if a.newest_first else "oldest"
+        notes.append(f"{len(df)} incidents match; only the {end} {MAX_ROWS} are listed, so the "
+                     f"list's last row is NOT the {'earliest' if a.newest_first else 'latest'} "
+                     f"incident. The earliest of all {len(df)} is incident "
+                     f"{data['earliest']['incident_id']} ({data['earliest']['incident_date']}); "
+                     f"the latest is incident {data['latest']['incident_id']} "
+                     f"({data['latest']['incident_date']}). Use count_incidents for totals.")
     if len(unplaced):
         notes.append(f"Not listed: {len(unplaced)} July 2025 incident(s) whose severity can't be "
                      f"placed on one scale ({', '.join(str(int(x)) for x in unplaced['incident_id'])}).")
     if not len(df):
         notes.append("No incidents in the CMMS match.")
-    return ToolResult("list_incidents", True,
-                      data={"count": len(df), "filter": applied, "severity_rule": SEVERITY_RULE,
-                            "incidents": rows},
-                      notes=notes,
-                      sources=cite_rows(df.head(MAX_ROWS), "cmms_safety_incidents_audit", "file",
-                                        "source_line", "line", what="CMMS incidents"))
+    return ToolResult("list_incidents", True, data=data, notes=notes, sources=sources)
 
 
 # Words in an incident description and the machines they can happen on. A description on any

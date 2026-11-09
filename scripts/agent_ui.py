@@ -34,6 +34,7 @@ EXAMPLES = [
     "What is the procedure for entering the blasting chamber?",
     "What is the welding SOP?",
     "How many incidents in 2025 were severity 4 or worse?",
+    "What is the name of employee EMP015?",          # the guardrail: a PDPA refusal, in code
 ]
 
 
@@ -180,6 +181,17 @@ def trace_rows(events: list[dict]) -> list[dict]:
                          "seconds": None})
         elif kind == "max_rounds_exceeded":
             rows.append({"step": "app", "detail": "stopped: too many tool calls", "seconds": None})
+        elif kind == "input_refused":
+            rows.append({"step": "guardrail", "seconds": None,
+                         "detail": f"question refused in code ({e.get('rule')}: "
+                                   f"{e.get('reason')}); the model was not called"})
+        elif kind == "guard_not_ready":
+            rows.append({"step": "guardrail", "seconds": None,
+                         "detail": "refused: the staff name list isn't loaded (fail closed)"})
+        elif kind == "output_blocked":
+            rows.append({"step": "guardrail", "seconds": None,
+                         "detail": f"answer replaced before it was shown ({e.get('rule')}: "
+                                   f"{e.get('reason')})"})
     return rows
 
 
@@ -199,6 +211,13 @@ def main() -> None:
             st.rerun()
         if typed:
             st.error("Wrong password.")
+        st.stop()
+
+    import guardrail
+    try:
+        guardrail.require_names()              # fail closed: no page without the name list
+    except guardrail.GuardNotReady as e:
+        st.error(str(e))
         st.stop()
 
     @st.cache_resource

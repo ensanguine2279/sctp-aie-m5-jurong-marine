@@ -903,3 +903,68 @@ def test_descriptions_that_dont_fit_the_machine(desc, mid, flagged):
 def test_get_incident_flags_a_description_that_doesnt_fit(db):
     assert any("trap list C6" in n for n in call(db, "get_incident", incident_id=914).notes)
     assert not any("trap list C6" in n for n in call(db, "get_incident", incident_id=906).notes)
+
+
+# ------------------------------------------- earliest / latest over a long list ---
+# Eval run 9 Nov 2026 (incident-earliest-917): "What was the earliest safety incident?"
+# list_incidents had 85 matches, listed the newest 50 (newest first), and the model took the
+# page's last row, 914 (2025-01-03), as the earliest. The real earliest, 917 (2024-01-24),
+# wasn't on the page. The same answer called 914 "severity 1 on the old scale, where 1 is the
+# most severe": it is 1 on the CURRENT scale, the least severe.
+
+@pytest.fixture
+def incidents_db():
+    """Only the incident tables, so these tests don't need the SOP load."""
+    c = sqlite3.connect(":memory:")
+    names = {m: n for m, n, _ in MACHINES}
+    pd.DataFrame([
+        {"incident_id": i, "incident_date": d, "machine_id": m, "machine_name": names[m],
+         "description": desc, "severity_5_worst": s5,
+         "severity_scale": "ambiguous" if s5 is None else ("1_worst" if d < "2025-07-01" else "5_worst"),
+         "lost_days": ld, "reporting": "reported same day", "raw_id": 1000 + i}
+        for i, d, m, desc, logged, s5, ld in INCIDENTS]).to_sql("incident_detail", c, index=False)
+    pd.DataFrame([
+        {"incident_id": i, "raw_id": 1000 + i, "severity_as_logged": logged, "source_file": CMMS,
+         "source_line": 300 + n, "file_sha256": SHA}
+        for n, (i, d, m, desc, logged, s5, ld) in enumerate(INCIDENTS)]
+    ).to_sql("cmms_safety_incidents_audit", c, index=False)
+    pd.DataFrame([{"machine_id": m, "machine_name": n, "model": mo, "sensor_readings": 0,
+                   "first_reading": None, "last_reading": None} for m, n, mo in MACHINES]
+                 ).to_sql("machine_overview", c, index=False)
+    yield at.sqlite_db(c)
+    c.close()
+
+
+def test_the_earliest_incident_is_over_every_match_not_the_last_row_listed(incidents_db, monkeypatch):
+    monkeypatch.setattr(at, "MAX_ROWS", 3)                     # 10 incidents, 3 listed
+    r = call(incidents_db, "list_incidents")
+    assert [x["incident_id"] for x in r.data["incidents"]] == [944, 933, 904]   # newest first
+    assert r.data["incidents"][-1]["incident_id"] != 917       # the 9 Nov trap: last row != earliest
+    assert r.data["earliest"]["incident_id"] == 917 and str(r.data["earliest"]["incident_date"]) == "2024-01-24"
+    assert r.data["latest"]["incident_id"] == 944
+    note = next(n for n in r.notes if "only the newest 3" in n)
+    assert "NOT the earliest" in note and "917 (2024-01-24)" in note and "944 (2026-04-28)" in note
+    assert any("line 300" in s["locator"] or "lines 300" in s["locator"] for s in r.sources)   # 917 cited
+
+
+def test_listed_oldest_first_the_note_warns_about_the_latest(incidents_db, monkeypatch):
+    monkeypatch.setattr(at, "MAX_ROWS", 3)
+    r = call(incidents_db, "list_incidents", newest_first=False)
+    assert r.data["incidents"][0]["incident_id"] == 917
+    assert any("only the oldest 3" in n and "NOT the latest" in n and "944" in n for n in r.notes)
+
+
+def test_a_short_list_has_earliest_and_latest_and_no_truncation_note(incidents_db):
+    r = call(incidents_db, "list_incidents", machine="CNC-02")
+    assert (r.data["earliest"]["incident_id"], r.data["latest"]["incident_id"]) == (919, 904)
+    assert not any("are listed" in n for n in r.notes)
+    assert "earliest" not in call(incidents_db, "list_incidents", machine="MILL-01").data
+
+
+def test_every_incident_row_says_its_severity_in_words(incidents_db):
+    rows = {x["incident_id"]: x for x in call(incidents_db, "list_incidents").data["incidents"]}
+    assert rows[914]["severity"] == "1 on the current scale, where 5 is the most severe: the least severe"
+    assert rows[914]["severity_as_logged"] == "5 on the old (1 = most severe) scale"
+    assert rows[919]["severity"].endswith(": the most severe")
+    assert rows[906]["severity"] == "3 on the current scale, where 5 is the most severe"
+    assert "can't be placed" in rows[907]["severity"]

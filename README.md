@@ -13,8 +13,9 @@ Tuas, preparing for a MOM WSH audit. The client has two asks ([`CLIENT_BRIEF.md`
 This repo answers both from the client's own data: a CMMS SQL dump, a sensor log, a spares
 spreadsheet, scanned nameplates and incident forms, and SOP documents. Every source is cleaned
 and loaded into one MySQL database with lineage back to the exact file and line. The LLM
-reaches it only through fixed, read-only tools that cite their sources, and an eval suite
-checks the answers on the real model and data.
+reaches it only through fixed, read-only tools that cite their sources, a guardrail in code
+refuses what the app must not answer, and an eval suite checks the answers on the real model
+and data.
 
 - **Loading the data** (every ingest script, the tables, linking, lineage):
   [`docs/ingestion.md`](docs/ingestion.md)
@@ -38,6 +39,7 @@ flowchart LR
     R["relationships.py<br/>links and views"] --> DB
     DB -->|"agent_ro: SELECT only"| T["agent_tools.py<br/>fixed tools with citations"]
     T --> A["agent_app.py<br/>function-calling loop"]
+    G["guardrail.py<br/>input and output checks, in code"] --- A
     A <-->|"member key"| L["LLM via the proxy"]
     U["agent_ui.py<br/>Streamlit chat page"] --> A
     E["run_evals.py<br/>eval suite"] --> A
@@ -60,7 +62,8 @@ The [ER diagram](docs/er_diagram.md) shows the cleaned schema.
 | `scripts/agent_user.py` | Creates the app's read-only database user (PDPA) | [`agent_user.md`](docs/agent_user.md) |
 | `scripts/agent_tools.py` | The fixed tools the app's LLM calls, as the read-only user, with citations | [`agent_tools.md`](docs/agent_tools.md) |
 | `scripts/agent_app.py`, `scripts/agent_ui.py` | The chat agent (function-calling loop) and its Streamlit page, with sources, photos and caveats under each answer | [`agent_app.md`](docs/agent_app.md), [`agent_ui.md`](docs/agent_ui.md) |
-| `scripts/run_evals.py` | The eval suite (`evals/cases.yaml`): the real model, loop and database, each answer checked for the tools that ran, key facts, sources and grounding; prints the spend | [`evals.md`](docs/evals.md) |
+| `scripts/guardrail.py`, `scripts/guard_names.py` | The guardrail in code, on both sides of the model: prompt injection, names and personal details (PDPA) and out-of-scope requests refused before any model call; staff names, NRICs, phone numbers and e-mails stopped in answers. `guard_names.py` is the staff list as hashes, generated from the dump | [`guardrail.md`](docs/guardrail.md) |
+| `scripts/run_evals.py` | The eval suite (`evals/cases.yaml`): the real model, loop and database, each answer checked for the tools that ran, key facts, sources, grounding, model calls and staff names; prints the spend | [`evals.md`](docs/evals.md) |
 | `scripts/read_log.py` | Prints the agent's log (`logs/agent_app.jsonl`, or Cloud Logging for the hosted page) one question at a time: model calls, tools and their arguments, timings | [`agent_app.md`](docs/agent_app.md#reading-the-log-of-one-question-a-working-example) |
 
 The first nine are covered together, with the database they fill, in
@@ -189,12 +192,24 @@ loop (no framework) that wires an LLM to the tools above, shows the sources a to
 cited under every answer, and degrades honestly rather than inventing a value when a
 tool or the LLM call fails. Every note a tool returns (an OCR value the engines disagreed on,
 a severity read by eye, a description that doesn't fit the machine) is a caveat the answer
-must carry. Details, what it deliberately doesn't do yet (guardrails,
-cross-restart state), and its tests: [`agent_app.md`](docs/agent_app.md).
+must carry. Details, what it deliberately doesn't do yet (cross-restart state), and its
+tests: [`agent_app.md`](docs/agent_app.md).
 
 ```bash
 python scripts/agent_app.py "is CNC-02 running differently now?"
 streamlit run scripts/agent_ui.py          # the same, as a chat page for the demo
+```
+
+**The guardrail** (`scripts/guardrail.py`, [`guardrail.md`](docs/guardrail.md)) runs inside
+`agent_app.ask()`, so the CLI, the page and the eval suite all get it. A prompt injection, a
+request for a person's name or personal details (PDPA, including a staff name typed into the
+question) or a plainly out-of-scope request is refused in code, each with its own message,
+before any model call; an answer carrying a staff name, an NRIC, a phone number or an e-mail is
+replaced before it's shown. Regular expressions and hashed names only, no LLM, so the same
+question always gets the same verdict:
+
+```bash
+python scripts/guardrail.py check "What is the name of employee EMP015?"   # free: no model, no DB
 ```
 
 The page ([`agent_ui.md`](docs/agent_ui.md)) shows under each answer the sources, the
@@ -204,10 +219,12 @@ tools' caveats in a closed expander. To host it (Google Cloud Run, Aiven for the
 redeploy, hard-refresh the page (Ctrl+Shift+R) before testing.
 
 **The eval suite** (`evals/cases.yaml`, run by `scripts/run_evals.py`) asks the real model
-23 questions (the severity kill-shot in five phrasings, the SOPs, CNC-02, oil, trap-list
-items, six refusals) through the same loop over the real database, and checks each answer
-for the tools that ran, its key facts, its sources, and that it states nothing no tool
-returned. It prints the spend; run it after every significant change and commit
+42 questions through the same loop over the real database: the severity kill-shot in five
+phrasings, the SOPs, CNC-02, oil, trap-list items, and 20 guardrail cases (out of scope,
+prompt injection, and the PDPA kill-shot in seven phrasings) that must be refused in code with
+no model call. It checks each answer for the tools that ran, its key facts, its sources, that
+it states nothing no tool returned, how many model calls it took, and, on every answer, that
+no staff name appears. It prints the spend; run it after every significant change and commit
 `evals/results/latest.txt` ([`evals.md`](docs/evals.md)).
 
 ```bash
@@ -215,6 +232,7 @@ pip install pyyaml                         # team repo; with uv (personal repo):
 python scripts/run_evals.py --check        # validate the cases: free
 python scripts/run_evals.py                # the real run: about 40 model calls
 python scripts/run_evals.py --tag killshot # one group
+python scripts/run_evals.py --tag guardrail # the guardrail cases: no model calls
 ```
 
 ## Data concerns and open questions
@@ -283,15 +301,18 @@ FROM cmms_work_orders GROUP BY 1, 2, 3 HAVING n > 1 ORDER BY wo_date;
 | No plausibility checks: a 900 °C reading or negative quantity loads as written. The client's sensor file stays within 28.1–79.8 °C and 0.2–5.81 mm/s, so nothing is affected today | [`ingest_logs.md`](docs/ingest_logs.md), [`ingest_spares.md`](docs/ingest_spares.md) | add a rule if a later file needs one |
 | Time gaps in the sensor log aren't detected at ingest. In 2026H1, 2,216 of 108,600 expected readings are missing, none more than two 12-minute slots in a row | [`ingest_logs.md`](docs/ingest_logs.md) | `audit_sensor_csv.py`; analysis groups by time, not by row |
 | An SOP is found by keyword; a question that shares no word with any SOP (after stop words and synonyms) has no SOP | [`ingest_sops.md`](docs/ingest_sops.md#search-keyword-not-a-vector-database) | the search tests; add a `SYNONYMS` entry and a test when a real question misses |
+| A question is out of scope only if it asks for a task the app never does (poems, code, markets) or names a far-off topic (weather, sport, ...) with no shop word in it; anything less clear goes to the model | [`guardrail.md`](docs/guardrail.md#not-refusing-what-the-app-is-for) | `tests/test_guardrail.py` runs every in-scope eval question through the guard; add a phrasing there and to `cases.yaml` when one is wrongly refused or let through |
+| A staff name is two or more consecutive words of it, or one word of six letters or more; a short surname alone (Ng, Lim, Tan) isn't treated as a name | [`guardrail.md`](docs/guardrail.md#the-staff-list-guard_namespy) | the name tests in `tests/test_guardrail.py`; the eval suite checks every answer for full names and word pairs |
 
 ### Still to check ourselves
 
 | Item | How |
 |---|---|
 | All 30 incident forms and all 12 nameplates are loaded with `--engine both` and compared with the CMMS. Every new-scale severity is now known (6 from the blue ink, 911/922/955 by eye: I12); all 4 forms Tesseract thought unsigned are signed (I23); the plate misreads found by eye (CRN-02 and CNC-03 grease intervals and weights, WELD-02's oil, the CNC-01 power line) are read right by the model (I15, I18, I25). Left: 13 warnings on the plates and 32 on the forms, mostly `engines_disagree_*` the app reports as caveats; plate lines that look copied between machines (I19, client Q15–Q16) | `SELECT * FROM machine_nameplate`, then the audit queries in [`ingest_images.md`](docs/ingest_images.md#audit-queries); add findings to [`trap_list.md`](docs/trap_list.md#images-images-incident-forms-and-nameplates); a value read by eye goes into `REVIEWED` |
-| Whether `emp_code` with trade and shift identifies a person in a 32-person shop (PDPA) | team decision: if so, drop `emp_code` from `incident_detail` / `work_order_detail` |
-| Names also appear in the spares sheet title (`storeman: Halim`) | stored only in `critical_spares_raw.source_title`, which the app user can't read; keep it that way |
+| Whether `emp_code` with trade and shift identifies a person in a 32-person shop (PDPA) | team decision: if so, drop `emp_code` from `incident_detail` / `work_order_detail`, and the guardrail's "codes are fine" stance with it |
+| Names also appear in the spares sheet title (`storeman: Halim`) | stored only in `critical_spares_raw.source_title`, which the app user can't read; keep it that way. The guardrail also blocks it (`build-names --extra`) |
 | Views, grants and run logging have only been tested without a database | run `relationships.py` and `agent_user.py --check` on the real database |
+| The guardrail cases on the real model | `python scripts/run_evals.py --tag guardrail` (no model calls), then the full suite: every in-scope case must still pass. Commit `evals/results/latest.txt` |
 
 ## Testing with pytest
 
@@ -339,6 +360,8 @@ pytest -k "mysql or plural or synonym or entry"     # the SOP search: MySQL vs s
 pytest tests/test_agent_tools.py                    # the agent's tools (SQLite stand-in, no MySQL)
 pytest -k "severity and (incident or count)"        # the severity kill-shot, on the tools layer
 pytest tests/test_agent_app.py                      # the agent's loop (chat call + tools both stubbed)
+pytest tests/test_guardrail.py                      # the guardrail: injection, PDPA, scope, PII out
+pytest -k "pdpa or name"                            # the PDPA tests across the guard, loop and evals
 pytest tests/test_agent_ui.py                       # the chat page's helpers: trace, photos, caveats
 pytest tests/test_evals.py                          # the eval runner's checks and cases.yaml (no model, no DB)
 pytest tests/test_read_log.py                       # the log reader (standard library only)
@@ -357,10 +380,11 @@ With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
 
 | File | Covers | Tests |
 |---|---|---|
-| `tests/test_agent_tools.py` | [`agent_tools.py`](docs/agent_tools.md): every tool's schema; machine names written six ways, ambiguous and unknown machines; **the severity kill-shot**: four phrasings without a scale asked about on both incident tools, the same question on either scale giving the same incidents, the naive logged-value count never produced, July 2025 reported apart; listings by date with no employee data; form vs CMMS disagreements; OCR confidence per field, known plate problems, no photo; oil from two sources that disagree (shop-wide vs the machine's own), and an unreadable one; spares in both units, shop-wide only, below minimum once each; open costs apart and double entries; no sensors on a crane; weekly coverage; CNC-02 `machine_specific` against flat machines; the blasting chamber SOP quoted whole, nothing for welding; `query_sql` refusing writes, two statements, employees, `SELECT *`, the logged severity, `SLEEP` and `UNION`, and capping rows; a dead database giving `tool_failed`; bad, extra and JSON-string arguments; the app refusing the owner account; OCR confidence ranked (unreadable, engines disagreed, uncertain, majority, one engine, clear) with power warnings applying to kW, phases and voltage, values checked by eye; the photo behind a nameplate or form fetched and hash-checked, `query_sql` never returning `image_bytes`; descriptions that don't fit the machine (C6); found by the eval suite (8 Nov 2026): the July 2025 incidents named in the count's note, a crane's max load looked up in SOP-CRANE-02 with its line, the part an awaiting-parts work order waits for marked as not recorded; the sensor verdict spelled out in the first note | 125 |
-| `tests/test_agent_app.py` | [`agent_app.py`](docs/agent_app.md): the loop's own logic, with `agent_tools.run_tool` and the chat call stubbed — a plain answer needing no tool, a tool call round-tripping into the next model call, several tool calls in one round all running and all cited, a tool's clarification question returned to the user with no further model call (the severity-scale guess), a severity scale the user never named stripped so the tool asks (the model's guess), a failed chat call degrading to a plain message instead of raising, too many tool-call rounds stopping with an honest message instead of looping forever, the assistant-message shape matching the API with and without tool calls, source-label deduplication, a new conversation starting with only the system prompt, and `ask()` appending the question, returning formatted sources and logging one turn summary; raw sources and tool notes passed out of the turn, notes formatted once, the system prompt telling the model to carry every note as a caveat | 21 |
-| `tests/test_agent_ui.py` | [`agent_ui.py`](docs/agent_ui.md): the trace table behind the demo page: one row per model call and tool call in order, with the arguments the model sent, a refusal and a failed chat call shown (Streamlit not needed), the page password check, logging to stderr with no file; the photos under an answer (one per image, from the tools' sources, as data URLs so a redeploy can't break them) and the caveats listed once in a closed expander | 10 |
-| `tests/test_evals.py` | [`run_evals.py`](docs/evals.md) and `evals/cases.yaml`, with the model and tools stubbed: the suite meets the checklist (20+ cases, 2+ refusals, the kill-shot in 5 phrasings, each asking and never counting); a malformed `cases.yaml` refused before any call; selection by id and tag; grounding (an invented number fails, a rounded one warns, ids, dates in four formats, thousands separators, digits inside dates and ids not counting); paths into a tool result; the severity case end to end through the real loop and guard: passing when the guard strips the guess, **failing on the 5 Nov behaviour**, failing on an invented count; a failed model call as ERROR, not FAIL; a changed pinned value reported; the proxy's cost header read per call, list price as the fallback | 19 |
+| `tests/test_agent_tools.py` | [`agent_tools.py`](docs/agent_tools.md): every tool's schema; machine names written six ways, ambiguous and unknown machines; **the severity kill-shot**: four phrasings without a scale asked about on both incident tools, the same question on either scale giving the same incidents, the naive logged-value count never produced, July 2025 reported apart; listings by date with no employee data; form vs CMMS disagreements; OCR confidence per field, known plate problems, no photo; oil from two sources that disagree (shop-wide vs the machine's own), and an unreadable one; spares in both units, shop-wide only, below minimum once each; open costs apart and double entries; no sensors on a crane; weekly coverage; CNC-02 `machine_specific` against flat machines; the blasting chamber SOP quoted whole, nothing for welding; `query_sql` refusing writes, two statements, employees, `SELECT *`, the logged severity, `SLEEP` and `UNION`, and capping rows; a dead database giving `tool_failed`; bad, extra and JSON-string arguments; the app refusing the owner account; OCR confidence ranked (unreadable, engines disagreed, uncertain, majority, one engine, clear) with power warnings applying to kW, phases and voltage, values checked by eye; the photo behind a nameplate or form fetched and hash-checked, `query_sql` never returning `image_bytes`; descriptions that don't fit the machine (C6); found by the eval suite (8 Nov 2026): the July 2025 incidents named in the count's note, a crane's max load looked up in SOP-CRANE-02 with its line, the part an awaiting-parts work order waits for marked as not recorded; the sensor verdict spelled out in the first note; found by the eval run of 9 Nov 2026: `list_incidents` giving the earliest and latest incident over **every** match, not the last row of a 50-row page, and saying which end of a long list is shown; every incident row saying its severity in words ("1 on the current scale, where 5 is the most severe: the least severe") | 129 |
+| `tests/test_agent_app.py` | [`agent_app.py`](docs/agent_app.md): the loop's own logic, with `agent_tools.run_tool` and the chat call stubbed — a plain answer needing no tool, a tool call round-tripping into the next model call, several tool calls in one round all running and all cited, a tool's clarification question returned to the user with no further model call (the severity-scale guess), a severity scale the user never named stripped so the tool asks (the model's guess), a failed chat call degrading to a plain message instead of raising, too many tool-call rounds stopping with an honest message instead of looping forever, the assistant-message shape matching the API with and without tool calls, source-label deduplication, a new conversation starting with only the system prompt, and `ask()` appending the question, returning formatted sources and logging one turn summary; raw sources and tool notes passed out of the turn, notes formatted once, the system prompt telling the model to carry every note as a caveat; **the guardrail in `ask()`**: a refused question never reaching the model, kept out of the history and (PDPA) out of the log, the conversation carrying on after a refusal, an answer with personal data replaced in the history and absent from the log, an ordinary answer unchanged; without the staff name list every question refused and the app refusing to start | 28 |
+| `tests/test_guardrail.py` | [`guardrail.py`](docs/guardrail.md): out of scope, prompt injection and PDPA each refused in code in 11-13 phrasings; a staff name typed into a question refused (two words of it, any case, curly apostrophe, an `--extra` name), one common word not; every real staff name known to the guard (from the dump); **every in-scope question in `cases.yaml` and 24 more allowed** (names of things, codes, "ignore the previous work order", rain in the blasting chamber, follow-ups); answers with a staff name, phone number, NRIC or e-mail blocked, ordinary answers and the three SOPs quoted whole not; the guard's messages hold no digits; the hashed name list matching the dump with no plaintext; `build-names`; patterns working without a name list; odd input handled, deterministic; the CLI; the 20 guardrail eval cases passing end to end with a model that fails the test if called; found while writing it: a phone number before a full stop, "forget the rules above"; **failing closed**: a missing, broken or empty name list is "not ready", with the build command in the message | 116 |
+| `tests/test_agent_ui.py` | [`agent_ui.py`](docs/agent_ui.md): the trace table behind the demo page: one row per model call and tool call in order, with the arguments the model sent, a refusal and a failed chat call shown (Streamlit not needed), a guardrail refusal or blocked answer shown as a `guardrail` row with no model row, the page password check, logging to stderr with no file; the photos under an answer (one per image, from the tools' sources, as data URLs so a redeploy can't break them) and the caveats listed once in a closed expander; every sidebar example answered except the PDPA one, which is refused; a `guardrail` row when the name list is missing | 13 |
+| `tests/test_evals.py` | [`run_evals.py`](docs/evals.md) and `evals/cases.yaml`, with the model and tools stubbed: the suite meets the checklist (20+ cases, 2+ refusals, the kill-shot in 5 phrasings, each asking and never counting); a malformed `cases.yaml` refused before any call; selection by id and tag; grounding (an invented number fails, a rounded one warns, ids, dates in four formats, thousands separators, digits inside dates and ids not counting); paths into a tool result; the severity case end to end through the real loop and guard: passing when the guard strips the guess, **failing on the 5 Nov behaviour**, failing on an invented count; a failed model call as ERROR, not FAIL; a changed pinned value reported; the proxy's cost header read per call, list price as the fallback; **`max_model_calls`** counted from the log (failed calls included), validated, failing end to end when the model was called; **the guardrail cases** (5+ out-of-scope, 5+ PDPA, 3+ injection, each refused with no model call, no real name in the file); **PDPA on every answer**: names read from the dump, found however written, reported by code, masked in what's printed and saved, `{name:EMP001}` filled in and never recorded; the runner refusing to start without the guard's name list | 36 |
 | `tests/test_read_log.py` | [`read_log.py`](docs/agent_app.md#reading-the-log-of-one-question-a-working-example): the documented example printed exactly as in the doc; other lines skipped and an unfinished question shown; gcloud output read oldest first from either payload; the guard, eval and chat-error events shown; the command line with `--last` | 5 |
 | `tests/test_logs.py` | [`ingest_logs.py`](docs/ingest_logs.md): ISO/epoch timestamps (incl. the 8-hour bug), timezones, °C/°F, unknown units, every CSV line kept in raw with its line number, clean rows linked to raw, reject reasons, duplicates within the file and against rows already loaded, Windows (CRLF) line endings read exactly like LF | 10 |
 | `tests/test_spares.py` | [`ingest_spares.py`](docs/ingest_spares.md): costs (`$38/spool`), lead times (`2-3 weeks (Germany)`, `local`), metric/imperial sizes, machine lists; on a messy sheet: raw rows and row numbers, `raw_id`, duplicate/missing part numbers, warnings for unreadable values | 18 |
@@ -371,7 +395,7 @@ With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
 | `tests/test_pipeline.py` | [`pipeline.py`](docs/pipeline.md): step order and flags (images after the CMMS), foreign keys dropped first and re-added last (never in a dry run), sample rows with names kept out of the report, counts from every script's summary, the images folder hashed like the load, a failure stopping the rest, `--keep-going`, Ctrl+C, the report's tables, `--save-log`, `--audit`; the SOP step (after the CMMS and before the linking, its folder hashed like the load, one summary line per SOP with the step table and the rejected email's name kept out); the image engine (`--image-engine`, else `IMAGE_ENGINE` from `.env`) passed on and shown in the report header, the photo lines in the summary | 44 |
 | `tests/test_agent_user.py` | [`agent_user.py`](docs/agent_user.md): the allow-list never includes employees or raw tables (nor the raw OCR, nor the raw SOP files), the scans' and SOPs' objects granted, objects with `emp_name` refused, missing objects skipped, a refused object told apart as "not created yet" or "exists but not granted", `SELECT`-only grants after a full reset, password never written into SQL or output, bad user/host/database names rejected, MySQL error codes read correctly, errors never include the password, failed steps named with MySQL's message, no statement needing rights over every database, the access check reads no rows; settings with Windows line endings (from the shell or a CRLF `.env`) read without the trailing `\r`, and no settings leak in from your shell or `.env`; the public photo view granted, the photo table itself probed and refused | 29 |
 | `tests/test_shared.py` | `db_config.py`, `lineage.py`: password never printed, passwords with special characters, values of a failed query kept out of error messages, table-name check, file SHA-256, a run recorded without a file, values passed to MySQL are plain Python types, `getenv` and `load_db_config` strip a trailing `\r` (CRLF `.env`) | 9 |
-| **Total** | | **675** |
+| **Total** | | **822** |
 
 **Not covered:** anything that needs MySQL, i.e. creating tables, views and users,
 the inserts, the one-transaction rollback and the `ingest_runs` record. After
@@ -386,14 +410,15 @@ for the agent's answers on the real model and data, the eval suite
 
 ### Reading the output
 
-One line per test file, a dot per test, then the total (shortened here):
+A header line says whether the guardrail's staff name list is loaded (`tests/conftest.py`), then
+one line per test file, a dot per test, then the total (shortened here):
 
 ```
-tests/test_agent_app.py .....................                                    [  3%]
+tests/test_agent_app.py ..........................                               [  3%]
 tests/test_agent_tools.py ...................................................... [ 11%]
 ...
 tests/test_spares.py ..................                                          [100%]
-========== 675 passed in 25.1s ==========
+========== 822 passed in 25.1s ==========
 ```
 
 | Mark | Meaning |
@@ -401,7 +426,7 @@ tests/test_spares.py ..................                                         
 | `.` | passed |
 | `F` | failed: an `assert` was false. pytest prints the values on both sides |
 | `E` | error: the test couldn't run (e.g. an import failed) |
-| `s` | skipped: the tests that build a SQLAlchemy engine or URL skip if SQLAlchemy isn't installed; installing `requirements-dev.txt` fixes it. the tests on the real scans (`test_the_real_scans_read_correctly`, the blue-ink severities, the redaction and signature checks on every form) skip without Tesseract or `data/images/`, `test_the_real_sop_folder` without `data/sops/` |
+| `s` | skipped: the tests that build a SQLAlchemy engine or URL skip if SQLAlchemy isn't installed; installing `requirements-dev.txt` fixes it. the tests on the real scans (`test_the_real_scans_read_correctly`, the blue-ink severities, the redaction and signature checks on every form) skip without Tesseract or `data/images/`, `test_the_real_sop_folder` without `data/sops/`, and the guardrail and eval tests that need the real staff names without `data/sql/jurongmarine_cmms.sql` |
 
 ### When it doesn't work
 
@@ -412,12 +437,14 @@ tests/test_spares.py ..................                                         
 | `ModuleNotFoundError: No module named 'pandas'` (or `openpyxl`, `cv2`, `openai`, `dotenv`, `pydantic`, `sqlglot`, `yaml`, ...) | Virtual environment not active, or requirements not installed | Activate `.venv`, then `pip install -r requirements-dev.txt` (`yaml` is the `pyyaml` package) |
 | `pytest: command not found` | pytest not installed in the active environment | `pip install -r requirements-dev.txt`, or use `python -m pytest` |
 | `Invalid user name: 'agent_ro\r'` (or another value ending in `\r`) | `.env` has Windows line endings and was loaded with `source .env`, so every value in your shell ends in `\r` | Update to the current scripts (they strip it), and fix the file: `sed -i 's/\r$//' .env`, then open a new shell |
+| Header says `guardrail: STAFF NAME LIST MISSING`; agent, page and eval tests fail; `GuardNotReady` | `scripts/guard_names.py` isn't in the repo (not copied, or git-ignored). The app fails closed without it, so the tests that ask questions fail too | `python scripts/guardrail.py build-names data/sql/jurongmarine_cmms.sql --extra Halim` (with uv: `uv run python ...`), then commit `scripts/guard_names.py` |
+| `test_the_name_list_matches_the_dump_and_holds_no_plaintext` fails with "rebuild guard_names.py" | The staff list in the dump changed since `guard_names.py` was built | `python scripts/guardrail.py build-names data/sql/jurongmarine_cmms.sql --extra Halim` (with uv: `uv run python ...`), then commit `scripts/guard_names.py` |
 
 ### Adding a test
 
-- Put it in the file for the script it tests (`test_logs.py`, `test_spares.py`, `test_cmms.py`, `test_images.py`, `test_sops.py`, `test_relationships.py`, `test_agent_tools.py`, `test_agent_app.py`, `test_agent_ui.py`, `test_evals.py`, `test_agent_user.py`, `test_pipeline.py`), or `test_shared.py` for `db_config.py` / `lineage.py`.
+- Put it in the file for the script it tests (`test_logs.py`, `test_spares.py`, `test_cmms.py`, `test_images.py`, `test_sops.py`, `test_relationships.py`, `test_agent_tools.py`, `test_agent_app.py`, `test_guardrail.py`, `test_agent_ui.py`, `test_evals.py`, `test_agent_user.py`, `test_pipeline.py`), or `test_shared.py` for `db_config.py` / `lineage.py`.
 - Name the function `test_...`, otherwise pytest won't find it.
-- Test the cleaning functions directly with a small `DataFrame` (see `test_temperature_units`), or a whole file through `process()` / `prepare()` using the `tmp_path` fixture (see the `lineage_run` and `messy_sheet` fixtures). For the CMMS script, pass a dump as a string to `parse_dump()` and then `process()` (see `test_pipeline_end_to_end`). For the scans, pass OCR text as an `Extraction` to `process()` (see `test_incident_form_end_to_end`); copy the text from `img_documents_raw.ocr_text` when a real scan misreads; for a two-engine case, give both readings to `interpret_both` (the model's from `fields_raw` / `ocr_notes`). For `relationships.py`, pass key counts to `check_relationship()` (see `test_check_counts_matched_null_and_orphans`). For an SOP question that finds the wrong SOP or none, add it to the search tests in `test_sops.py`, with a `SYNONYMS` entry (or an `ENTRY_VERBS`/`SPACE_WORDS` case) if it's a paraphrase. For a tool that answers wrong on a real call, add that exact question and arguments to `test_agent_tools.py` using the SQLite fixture, with a comment pointing at the real-data check that found it. For a loop bug (a tool call not round-tripping right, a bad degrade-on-failure path), add it to `test_agent_app.py` with the chat call and `agent_tools.run_tool` both stubbed — no database or real LLM call needed. For a wrong answer on the real model, add the question to `evals/cases.yaml` ([Adding a case](docs/evals.md#adding-a-case)); a bug in the runner's own checks goes in `test_evals.py`.
+- Test the cleaning functions directly with a small `DataFrame` (see `test_temperature_units`), or a whole file through `process()` / `prepare()` using the `tmp_path` fixture (see the `lineage_run` and `messy_sheet` fixtures). For the CMMS script, pass a dump as a string to `parse_dump()` and then `process()` (see `test_pipeline_end_to_end`). For the scans, pass OCR text as an `Extraction` to `process()` (see `test_incident_form_end_to_end`); copy the text from `img_documents_raw.ocr_text` when a real scan misreads; for a two-engine case, give both readings to `interpret_both` (the model's from `fields_raw` / `ocr_notes`). For `relationships.py`, pass key counts to `check_relationship()` (see `test_check_counts_matched_null_and_orphans`). For an SOP question that finds the wrong SOP or none, add it to the search tests in `test_sops.py`, with a `SYNONYMS` entry (or an `ENTRY_VERBS`/`SPACE_WORDS` case) if it's a paraphrase. For a tool that answers wrong on a real call, add that exact question and arguments to `test_agent_tools.py` using the SQLite fixture, with a comment pointing at the real-data check that found it. For a loop bug (a tool call not round-tripping right, a bad degrade-on-failure path), add it to `test_agent_app.py` with the chat call and `agent_tools.run_tool` both stubbed — no database or real LLM call needed. For a question the guardrail wrongly refuses or lets through, add the exact phrasing to the right list in `test_guardrail.py` (`IN_SCOPE_MORE`, `OUT_OF_SCOPE`, `INJECTION`, `PDPA`) and to `cases.yaml`, before changing a pattern; never write a real staff name in a test (use the `fake_staff` fixture, or `{name:EMP001}` in `cases.yaml`). For a wrong answer on the real model, add the question to `evals/cases.yaml` ([Adding a case](docs/evals.md#adding-a-case)); a bug in the runner's own checks goes in `test_evals.py`.
 - When you find a new problem in the client's data, add a test with that exact value **before** fixing the code. It fails first, then passes with the fix, and it keeps the problem from coming back. The harness checklist asks for this pattern in your git history.
 
 ## Rules worth knowing
@@ -455,7 +482,11 @@ is the one path the app uses to answer this; see [The agent's tools](#the-agents
 **Employee names (PDPA):** `emp_name` stays in `cmms_employees`. None of the linking
 views select it; they give `emp_code`, trade and shift only. The app connects as the
 read-only user from `agent_user.py`, which the database stops from reading names, so
-this holds whatever the model is asked. Scanned forms keep only `EMP` codes and whether
+this holds whatever the model is asked. On top of that, the guardrail refuses any
+question asking for a person's name or personal details, or naming a member of staff, before
+it reaches the model, and stops a staff name, NRIC, phone number or e-mail in an answer
+([`guardrail.md`](docs/guardrail.md)); the eval suite checks every answer for staff names.
+Scanned forms keep only `EMP` codes and whether
 the form was signed, and their photos are stored only redacted. See
 [Database access for the app](#database-access-for-the-app-pdpa) and
 [`relationships.md`](docs/relationships.md#views).
