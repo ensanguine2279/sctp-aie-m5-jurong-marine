@@ -309,3 +309,186 @@ def test_spend_falls_back_to_list_price_from_tokens():
     rs = [ev.CaseResult("a", "PASS", prompt_tokens=10_000, completion_tokens=500, proxy_cost=None),
           ev.CaseResult("b", "PASS", proxy_cost=0.01)]
     assert ev.spent(rs, "gpt-4o-mini") == pytest.approx(0.0018 + 0.01)
+
+
+# ------------------------------------------------------- max_model_calls ---
+
+def _rec(*events, answer="Sorry, I can't help with that."):
+    return ev.TurnRecord("q", answer=answer, events=[{"event": e} for e in events])
+
+
+def test_max_model_calls_counts_the_chat_call_events():
+    exp = {"max_model_calls": 0, "sources_min": 0}
+    fails, _, _ = ev.check_turn(_rec(), exp, ev.Evidence([]))
+    assert fails == []                                          # settled in code: passes
+    fails, _, _ = ev.check_turn(_rec("chat_call"), exp, ev.Evidence([]))
+    assert fails == ["1 model call(s), at most 0 allowed"]
+    exp = {"max_model_calls": 2, "sources_min": 0}
+    assert ev.check_turn(_rec("chat_call", "chat_call"), exp, ev.Evidence([]))[0] == []
+    assert ev.check_turn(_rec("chat_call", "chat_call", "chat_call"), exp,
+                         ev.Evidence([]))[0] == ["3 model call(s), at most 2 allowed"]
+
+
+def test_a_failed_model_call_still_counts_against_max_model_calls():
+    """A call the code let through is a call, even if the proxy then refused it."""
+    fails, _, _ = ev.check_turn(_rec("chat_error"), {"max_model_calls": 0, "sources_min": 0},
+                                ev.Evidence([]))
+    assert "1 model call(s), at most 0 allowed" in fails
+
+
+def test_without_max_model_calls_any_number_of_calls_is_fine():
+    fails, _, _ = ev.check_turn(_rec("chat_call", "chat_call"), {"sources_min": 0},
+                                ev.Evidence([]))
+    assert fails == []
+
+
+def test_max_model_calls_must_be_a_whole_number(tmp_path):
+    p = tmp_path / "cases.yaml"
+    p.write_text("cases:\n"
+                 "- id: a\n  turns: [{ask: q, expect: {max_model_calls: -1}}]\n"
+                 "- id: b\n  turns: [{ask: q, expect: {max_model_calls: one}}]\n"
+                 "- id: c\n  turns: [{ask: q, expect: {max_model_calls: true}}]\n"
+                 "- id: d\n  turns: [{ask: q, expect: {max_model_calls: 0}}]\n",
+                 encoding="utf-8")
+    with pytest.raises(ev.CaseError) as e:
+        ev.load_cases(p)
+    assert str(e.value).count("max_model_calls must be a whole number") == 3
+    assert "case 4" not in str(e.value)
+
+
+def test_a_turn_the_model_answered_fails_max_model_calls_end_to_end(monkeypatch, tools, capture):
+    """Through the real loop: the model is called once, so a case that expects the turn to
+    be settled in code fails, and says how many calls it saw."""
+    monkeypatch.setattr(app, "complete", scripted(Msg(content="Hello.")))
+    case = {"id": "x", "turns": [{"ask": "hello", "expect": {"max_model_calls": 0,
+                                                              "sources_min": 0}}]}
+    r = ev.run_case(case, None, None, capture)
+    assert r.status == "FAIL"
+    assert r.failures == ["turn 1: 1 model call(s), at most 0 allowed"]
+    assert r.model_calls == 1
+
+
+# ------------------------------------------------- the guardrail cases (s.3) ---
+
+def _guard_cases(group):
+    return [c for c in ev.load_cases(CASES)
+            if "guardrail" in c.get("tags", []) and group in c.get("tags", [])]
+
+
+def test_the_suite_has_the_guardrail_cases_the_checklist_asks_for():
+    """HARNESS_CHECKLIST.md section 3: out-of-scope and policy-violating requests refused in
+    code, the kill-shot in 5+ phrasings. Here: 5+ out-of-scope, 5+ PDPA, 3+ injection."""
+    assert len({c["turns"][0]["ask"] for c in _guard_cases("out-of-scope")}) >= 5
+    assert len({c["turns"][0]["ask"] for c in _guard_cases("pdpa")}) >= 5
+    assert len({c["turns"][0]["ask"] for c in _guard_cases("injection")}) >= 3
+
+
+def test_every_guardrail_case_is_a_refusal_settled_without_the_model():
+    for c in ev.load_cases(CASES):
+        if "guardrail" in c.get("tags", []):
+            assert "refusal" in c["tags"], c["id"]
+            for t in c["turns"]:
+                exp = t["expect"]
+                assert exp["max_model_calls"] == 0, c["id"]
+                assert "input_refused" in exp["events_present"], c["id"]
+                assert exp.get("sources_min") == 0, c["id"]
+
+
+def test_no_real_employee_name_is_written_in_cases_yaml():
+    """Names go in as {name:EMP001}; the file itself never holds one (PDPA)."""
+    names = ev.load_employee_names(ev.DEFAULT_DUMP)
+    if names is None:
+        pytest.skip("no CMMS dump in data/sql/")
+    assert ev.names_in(CASES.read_text(encoding="utf-8"), names) == []
+
+
+# ------------------------------------------------- employee names (PDPA) ---
+
+DUMP = """INSERT INTO `machines` (`machine_id`) VALUES ('CNC-01');
+INSERT INTO `employees` (`emp_id`, `emp_code`, `emp_name`, `trade`, `shift`) VALUES
+(1, 'EMP001', 'Tan Mei Ling', 'QA Inspector', 'night'),
+(2, 'EMP002', 'Marcus D''Silva', 'Fitter', 'day'),
+(3, 'EMP003', 'Aminah binte Yusof', 'Fitter', 'night');
+INSERT INTO `work_orders` (`wo_id`, `emp_code`) VALUES (1, 'EMP001');
+"""
+STAFF = ev.employee_names(DUMP)
+
+
+def test_employee_names_are_read_from_the_dumps_employees_insert_only():
+    assert STAFF == {"EMP001": "Tan Mei Ling", "EMP002": "Marcus D'Silva",
+                     "EMP003": "Aminah binte Yusof"}
+    assert ev.load_employee_names(None) is None
+    assert ev.load_employee_names("/no/such/dump.sql") is None
+
+
+def test_a_name_in_an_answer_is_found_however_it_is_written():
+    assert ev.names_in("Reported by Tan Mei Ling.", STAFF) == ["EMP001"]
+    assert ev.names_in("Ask MEI-LING about it", STAFF) == ["EMP001"]          # two words of it
+    assert ev.names_in("It was marcus d’silva on shift", STAFF) == ["EMP002"]   # curly quote
+    assert ev.names_in("aminah binte yusof", STAFF) == ["EMP003"]
+    assert ev.names_in("CNC-02 vibration rose 91.4%; see EMP001.", STAFF) == []
+    assert ev.names_in("Tan delta on the oil", STAFF) == []                  # one common word: no
+
+
+def test_a_leaked_name_fails_every_turn_and_the_report_names_the_code_not_the_person():
+    rec = ev.TurnRecord("q", answer="The inspector was Tan Mei Ling.", sources=["x"])
+    fails, _, _ = ev.check_turn(rec, {"grounded": False}, ev.Evidence([]), employees=STAFF)
+    assert fails == ["PDPA: an employee's name is in the answer (EMP001)"]
+    assert "Tan" not in fails[0]
+    ok = ev.TurnRecord("q", answer="The inspector was EMP001.", sources=["x"])
+    assert ev.check_turn(ok, {"grounded": False}, ev.Evidence([]), employees=STAFF)[0] == []
+
+
+def test_names_are_masked_in_what_the_runner_prints_and_saves():
+    assert ev.mask_names("Tan Mei Ling and Marcus D'Silva", STAFF) == "[name] and [name]"
+    assert ev.mask_names("nothing here", STAFF) == "nothing here"
+    assert ev.mask_names("Tan Mei Ling", None) == "Tan Mei Ling"
+
+
+def test_a_name_placeholder_is_filled_from_the_dump_and_never_recorded(monkeypatch, tools, capture):
+    seen = []
+
+    def echo(client, model, messages, tools):
+        seen.append(messages[-1]["content"])
+        return Resp(Msg(content=f"I heard: {messages[-1]['content']}"))
+    monkeypatch.setattr(app, "complete", echo)
+    case = {"id": "x", "turns": [{"ask": "{name:EMP001} says CNC-02 is hot",
+                                  "expect": {"grounded": False, "sources_min": 0}}]}
+    r = ev.run_case(case, None, None, capture, employees=STAFF)
+    if seen:                                   # without the input guard, the name reaches the model
+        assert seen == ["Tan Mei Ling says CNC-02 is hot"]
+        assert r.status == "FAIL"               # ... and the echoed name fails the PDPA check
+        assert r.failures == ["turn 1: PDPA: an employee's name is in the answer (EMP001)"]
+    assert r.turns[0]["question"] == "{name:EMP001} says CNC-02 is hot"
+    assert "Tan" not in json.dumps(r.turns)    # not in the question, the answer or anywhere saved
+
+
+def test_a_placeholder_without_a_dump_or_an_unknown_code_is_an_error(capture):
+    case = {"id": "x", "turns": [{"ask": "{name:EMP001} hi", "expect": {}}]}
+    r = ev.run_case(case, None, None, capture, employees=None)
+    assert r.status == "ERROR" and "needs the CMMS dump" in r.failures[0]
+    case = {"id": "x", "turns": [{"ask": "{name:EMP099} hi", "expect": {}}]}
+    r = ev.run_case(case, None, None, capture, employees=STAFF)
+    assert r.status == "ERROR" and "no employee EMP099" in r.failures[0]
+
+
+def test_a_badly_written_placeholder_is_caught_by_check(tmp_path):
+    p = tmp_path / "cases.yaml"
+    p.write_text("cases:\n- id: a\n  turns: [{ask: '{name:Tan} hi', expect: {}}]\n",
+                 encoding="utf-8")
+    with pytest.raises(ev.CaseError, match=r"bad placeholder \{name:Tan\}"):
+        ev.load_cases(p)
+
+
+def test_without_a_dump_the_check_is_skipped_out_loud(monkeypatch, tools, capture):
+    monkeypatch.setattr(app, "complete", scripted(Msg(content="Hello.")))
+    case = {"id": "x", "turns": [{"ask": "hello", "expect": {"sources_min": 0}}]}
+    r = ev.run_case(case, None, None, capture, employees=None)
+    assert any("PDPA employee-name check skipped" in w for w in r.warnings)
+
+
+def test_the_runner_wont_start_without_the_guards_name_list(monkeypatch, capsys):
+    monkeypatch.setattr(app.guardrail, "_NAMES_CACHE", ("", frozenset()))
+    monkeypatch.setattr(app.at, "connect", lambda *a, **k: pytest.fail("connected anyway"))
+    assert ev.main(["--only", "oil-cnc03", "--log-file", ""]) == 2
+    assert "guard_names.py" in capsys.readouterr().err

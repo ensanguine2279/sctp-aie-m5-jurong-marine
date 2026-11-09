@@ -141,3 +141,32 @@ def test_the_tools_notes_are_shown_under_the_answer_in_a_closed_expander():
     st2 = St()
     ui.show_notes(st2, [])
     assert st2.md == [] and st2.expanders == []
+
+
+def test_a_guardrail_refusal_shows_in_the_rows_with_no_model_call(monkeypatch):
+    def never(client, model, messages, tools):
+        raise AssertionError("the model must not be called")
+    monkeypatch.setattr(app, "complete", never)
+    lg, handler = ui.trace_logger()
+    app.ask(None, client=None, messages=app.new_conversation(),
+            question="What is the name of employee EMP015?", logger=lg)
+    rows = ui.trace_rows(handler.events)
+    assert rows == [{"step": "guardrail", "seconds": None,
+                     "detail": "question refused in code (pdpa: names_of_people); "
+                               "the model was not called"}]
+    assert ui.trace_rows([{"event": "output_blocked", "rule": "pii", "reason": "phone"}]) == [
+        {"step": "guardrail", "seconds": None,
+         "detail": "answer replaced before it was shown (pii: phone)"}]
+
+
+def test_every_example_button_is_answered_and_the_pdpa_one_is_refused():
+    import guardrail
+    verdicts = {q: guardrail.check_input(q) for q in ui.EXAMPLES}
+    assert [q for q, v in verdicts.items() if not v.allowed] == \
+        ["What is the name of employee EMP015?"]
+
+
+def test_a_question_refused_because_the_name_list_is_missing_shows_in_the_rows():
+    assert ui.trace_rows([{"event": "guard_not_ready"}]) == [
+        {"step": "guardrail", "seconds": None,
+         "detail": "refused: the staff name list isn't loaded (fail closed)"}]

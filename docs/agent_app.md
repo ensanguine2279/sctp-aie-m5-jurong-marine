@@ -27,20 +27,19 @@ OPENAI_BASE_URL=https://35-240-177-226.sslip.io           # the llm proxy (https
 
 ## What it guarantees, in code
 
-Three of the [Harness Checklist](HARNESS_CHECKLIST.md) items are enforced here, not
+Four of the [Harness Checklist](HARNESS_CHECKLIST.md) items are enforced here, not
 just asked for in the prompt:
 
 | # | What | How |
 |---|---|---|
 | 1 (grounding) | Every fact comes from a tool call made this turn | The model only ever picks a tool and fills in arguments; `agent_tools.py` validates them and runs the fixed SQL. There is no path from "the model says X" to "the answer says X" that skips a tool |
 | 2 (citations) | Every answer can be checked | Every tool result's `sources` are collected across the whole turn (every tool call, not just the last) and shown under the answer as `sources[].label` |
+| 3 (guardrails) | Policy is enforced between the user and the model, and between the model and the user | `ask()` runs [`guardrail.py`](guardrail.md) on both sides. A prompt injection, a request for a person's name or personal details (PDPA, trap C16) or a plainly out-of-scope request is refused in code with its own message, **before any model call** (`input_refused`); only a placeholder goes into `messages`, so the question never reaches a later prompt. An answer carrying a staff name, an NRIC, a phone number or an e-mail address is replaced before it is shown, in `messages` too (`output_blocked`). Found on the eval run, 8 Nov 2026: "What is the name of employee EMP015?" got "I could not check that", which read like an outage |
 | C1 (severity scale) | The model can't pick a severity scale for the user | `count_incidents` / `list_incidents` take a `scale_quote`: the user's own words naming the scale. `scale_guessed()` checks the quote is really in a user message and names a scale ("5 is worst", "the current scale", "the old scale"; "severity 4 or worse" names none). If not, the scale is removed before the tool runs, so the tool returns `needs_clarification` and the user is asked. Found on the real run, 5 Nov 2026: gpt-4o-mini sent `"severity_scale":"5_is_worst"` on its own. Logged as `scale_guess_blocked` |
 | 4 (honest degradation) | A failure never becomes an invented value | A tool that asks for a clarification (`needs_clarification`, `ambiguous_machine`, e.g. a severity number with no scale) has its message returned to the user **in code**; the model is not called again, so it can't answer over the question (found on the real run, 5 Nov 2026: gpt-4o-mini invented a count after the tool refused). A failed chat-API call (budget cap, network, timeout) is caught as `ChatError` and gives a plain "I couldn't reach the language model" — never a guess. A tool error (`needs_clarification`, `no_data`, `tool_failed`, ...) goes back to the model as the tool's own message, and the system prompt tells it to say so, not paper over it. A model that keeps calling tools past `MAX_TOOL_ROUNDS` (6) gets stopped with an honest "try a narrower question" instead of looping forever |
 
 What it does **not** yet do, by design (see the capstone task list, not an oversight):
 
-- **No guardrail layer (#3).** Policy still lives in the system prompt, not in code
-  between the model and the user. Next step.
 - **No cross-restart state (#5).** `messages` lives in one Python process; closing the
   app loses the conversation. A checkpointer (SQLite, the NB 03 pattern) is a
   LangGraph-shaped problem, not this loop's.
@@ -67,7 +66,9 @@ for s in sources:
 answer2, sources2 = app.ask(db, client, messages, "and what about CNC-03?")
 ```
 
-`run_turn(db, client, messages, ...)` is the part doing the actual looping: call the
+`ask()` is the entry point every caller uses: it runs the input guardrail, then `run_turn`,
+then the output guardrail ([`guardrail.md`](guardrail.md)). `run_turn(db, client, messages, ...)`
+is the part doing the actual looping: call the
 model (`complete`), append its message, and if it asked for a tool, run every tool
 call it made (there can be more than one in a round), append each tool's result as a
 `role: "tool"` message, and go again — up to `MAX_TOOL_ROUNDS` times. It returns the
@@ -86,11 +87,13 @@ streamlit run scripts/agent_ui.py
 
 Under each answer it shows the sources the tools cited, and a **What happened** table:
 every model call (with seconds) and every tool call (the arguments the model sent, ok or
-refused, seconds), in order. The sidebar has the kill-shot questions as buttons and a
+refused, seconds), in order, and a `guardrail` row when a question was refused in code (no
+model row then) or an answer was replaced. The sidebar has the kill-shot questions as buttons,
+including the PDPA one, and a
 New conversation button. Its trace comes from the same events as the log, collected per
 question, and the page also appends them to `logs/agent_app.jsonl` (run from the folder
 you start Streamlit in), so the file has the same lines as the table. `tests/test_agent_ui.py`
-(4 tests, no Streamlit needed) covers the trace table; the page itself is checked by
+(13 tests, no Streamlit needed) covers the trace table; the page itself is checked by
 running it. Setting `APP_PASSWORD` puts a password box in front of the page, and
 `AGENT_LOG_FILE=off` stops it writing the file (it still logs to stderr). To host it, see
 [`agent_ui.md`](agent_ui.md#deploying-on-google-cloud-run).
@@ -110,8 +113,15 @@ Every line carries a UTC `ts` (ISO 8601, milliseconds):
 - `scale_guess_blocked`: the model gave a severity scale the user never stated; it was removed before the tool ran.
 - `clarification_returned`: a tool asked a question and the loop passed it on.
 - `max_rounds_exceeded`: the loop was stopped rather than left to run forever.
+- `input_refused`: the guardrail refused the question in code: `rule` (`injection`, `pdpa`,
+  `out_of_scope`) and `reason` (which family of pattern fired). No model call follows.
+- `output_blocked`: the guardrail replaced the answer: `rule` (`pii`) and `reason`
+  (`staff_name`, `nric`, `phone`, `email`). Never the blocked text.
+- `guard_not_ready`: the guardrail's staff name list isn't loaded, so the question was
+  refused without a model call (fail closed; the CLI and the page don't start in that state).
 - `turn`: one line per question — the question (truncated), every tool called, how
-  many sources came back.
+  many sources came back. A refused question has `refused` set, and a PDPA one is logged as
+  `[withheld: pdpa]`, never its text (it may hold a name).
 - `eval_case`: written by `run_evals.py` before each eval turn (case id and turn), so an
   eval run can be replayed from the same file.
 
@@ -172,6 +182,8 @@ How to read it:
 | `** chat_error` | The model call failed (budget cap, network, timeout), with the reason |
 | `eval case …, turn N` | The question was asked by `run_evals.py`; the case id is in `evals/cases.yaml` |
 | `sources=0` after a number is given | A number with no source: investigate |
+| `** input_refused` and no `model` line | The guardrail refused the question in code; the model was never called. A PDPA question shows as `Q: [withheld: pdpa]`. `read_log.py` prints the event but not its `rule` / `reason`: `grep input_refused logs/agent_app.jsonl` has them |
+| `** output_blocked` | The guardrail replaced the model's answer before it was shown (rule and kind in the JSON line, never the text) |
 
 **On the hosted page** the same lines go to Cloud Logging (stderr). Read the latest ones into
 the same script (the exact filter has not been run against the live service; if the fields
@@ -194,11 +206,12 @@ answers a question end to end, grounded and cited — nothing else in the checkl
 (evals, guardrails) has anything to run against until this exists. LangGraph adds
 real value on top (a checkpointer for #5, explicit guardrail nodes for #3), but none
 of that is needed to get a working demo; it's the next layer, not a prerequisite for
-this one. See the task list for when it gets built.
+this one. The guardrail is two function calls in `ask()`, so it would become two nodes
+unchanged. See the task list for when it gets built.
 
 ## Tests
 
-`tests/test_agent_app.py` (18 tests, no database, no real LLM call): the loop's own
+`tests/test_agent_app.py` (28 tests, no database, no real LLM call): the loop's own
 logic only — `agent_tools.run_tool` and the chat call are both stubbed, since tool
 correctness is already covered by `tests/test_agent_tools.py`. Covers: a plain
 text answer needing no tool; one tool call round-tripping into the next model call;
@@ -208,7 +221,7 @@ with an honest message rather than looping forever; the assistant-message shape
 matching what the API expects, with and without tool calls; source label
 deduplication, keeping first-seen order; a new conversation starting with only the
 system prompt; and `ask()` appending the question, returning formatted sources, and
-a severity scale the user never named (no quote, an invented quote, a quote naming no scale) being stripped so the tool asks, and one the user did name passing; a clarification going straight to the user with no further model call; logging one `turn` summary line; every log line carrying a timestamp and each tool call logging its arguments and refusal code. One test documents, rather than hides, that a bug
+a severity scale the user never named (no quote, an invented quote, a quote naming no scale) being stripped so the tool asks, and one the user did name passing; a clarification going straight to the user with no further model call; logging one `turn` summary line; every log line carrying a timestamp and each tool call logging its arguments and refusal code. **The guardrail in `ask()`:** a refused question never reaching the model; the question kept out of `messages` and a PDPA one out of the log; the conversation carrying on after a refusal with nothing of the refused question in the next prompt; an answer with personal data replaced, in `messages` too, and absent from the log; an ordinary answer passing unchanged; without the staff name list, every question refused with no model call and the app refusing to start. The guard's own rules are tested in `tests/test_guardrail.py` ([`guardrail.md`](guardrail.md#tests)). One test documents, rather than hides, that a bug
 in `run_tool` itself (not a normal tool error) still propagates today — a deliberate
 choice to surface in a test, not a gap to silently paper over.
 

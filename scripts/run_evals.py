@@ -14,6 +14,13 @@ each turn checks, from what actually happened (not from what the model says happ
                id-like token (CNC-02, BRG-6310, SOP-CONFINED-03) must appear in a tool result
                of this conversation or in the user's own words
     events     log events that must or must not happen (e.g. scale_guess_blocked)
+    calls      how many model calls the turn may make (max_model_calls; 0 = answered in
+               code, e.g. a guardrail refusal), counted from the chat_call events
+    PDPA       on EVERY turn of every case: no employee's name in the answer. The names are
+               read from the CMMS dump (--dump), independently of the app's own guardrail,
+               and a failure names the employee code, never the name. A question can carry
+               a name as {name:EMP001}, filled in from the dump at run time, so cases.yaml,
+               the printed output and the results JSON never hold one
 
 Unit tests (tests/test_*.py) stub the model and the database; this doesn't. A real model
 call takes 5-40 s and spends from the key's cap, so the suite is small, every run prints
@@ -51,6 +58,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CASES = ROOT / "evals" / "cases.yaml"
 DEFAULT_OUT = ROOT / "evals" / "results"
 DEFAULT_LOG = "logs/agent_app.jsonl"     # same file as the app, so read_log.py replays it
+DEFAULT_DUMP = ROOT / "data" / "sql" / "jurongmarine_cmms.sql"   # the employee names (PDPA)
 
 # USD per 1M tokens (input, output), list price; checked 7 Nov 2026 (openai.com/api/pricing).
 # Only used when the proxy doesn't report its own cost (x-litellm-response-cost header).
@@ -60,7 +68,7 @@ TURN_KEYS = {
     "tools_all", "tools_any", "tools_none", "tools_ok", "tools_not_ok", "tool_error",
     "tool_args", "tool_data", "answer_contains", "answer_not_contains", "answer_matches",
     "answer_not_matches", "sources_min", "sources_match", "grounded", "allow_numbers",
-    "events_present", "events_absent", "clarification", "oracle",
+    "events_present", "events_absent", "clarification", "oracle", "max_model_calls",
 }
 CASE_KEYS = {"id", "tags", "note", "turns"}
 
@@ -112,6 +120,13 @@ def load_cases(path: Path | str) -> list[dict]:
             for o in exp.get("oracle") or []:
                 if not o.get("tool") or not o.get("must_appear") and not o.get("equals"):
                     problems.append(f"{tw}: an oracle needs 'tool' and 'must_appear' or 'equals'")
+            for bad_ph in re.findall(r"\{name:[^}]*\}", str(t["ask"])):
+                if not PLACEHOLDER.fullmatch(bad_ph):
+                    problems.append(f"{tw}: bad placeholder {bad_ph} (use {{name:EMP001}})")
+            mmc = exp.get("max_model_calls")
+            if "max_model_calls" in exp and (isinstance(mmc, bool) or not isinstance(mmc, int)
+                                             or mmc < 0):
+                problems.append(f"{tw}: max_model_calls must be a whole number, 0 or more")
     if problems:
         raise CaseError("\n".join(problems))
     return cases
@@ -310,6 +325,81 @@ def appears_in(value, answer: str) -> bool:
     return _compact(value) in _compact(answer)
 
 
+# ===================================================== employee names (PDPA) ===
+# The eval suite's own copy of the rule "no employee name ever reaches an answer" (trap
+# list C16). Deliberately NOT the app's guardrail: a check that reused the guard's matcher
+# would only prove the guard agrees with itself. This one reads the names straight from
+# the CMMS dump, as written, and looks for them in every answer.
+
+PLACEHOLDER = re.compile(r"\{name:(EMP\d{3})\}")
+_EMP_INSERT = re.compile(r"INSERT INTO `employees`[^;]*?VALUES(.*?\));", re.S)
+_EMP_ROW = re.compile(r"\(\s*\d+\s*,\s*'(EMP\d+)'\s*,\s*'((?:[^']|'')*)'")
+
+
+def employee_names(dump_text: str) -> dict[str, str]:
+    """{emp_code: name} from the dump's employees INSERT ('' is an escaped quote)."""
+    out = {}
+    for block in _EMP_INSERT.findall(dump_text):
+        for code, name in _EMP_ROW.findall(block):
+            out[code] = name.replace("''", "'")
+    return out
+
+
+def load_employee_names(path: Path | str | None) -> dict[str, str] | None:
+    """The names, or None when there is no dump to read them from (the check is then
+    skipped, with a warning on every case, never silently)."""
+    p = Path(path) if path else None
+    if not p or not p.is_file():
+        return None
+    return employee_names(p.read_text(encoding="utf-8", errors="replace")) or None
+
+
+def _name_words(text: str) -> list[str]:
+    """Lower-case words, apostrophes dropped: "Marcus D'Silva" -> ['marcus', 'dsilva']."""
+    return re.findall(r"[a-z]+", re.sub(r"['’]", "", str(text).lower()))
+
+
+def _name_phrases(name: str) -> set[str]:
+    """Every run of two or more words of a name: 'aminah binte', 'binte yusof', ...
+    A single word on its own (a surname like Low, Ho, Ng) is too common to test for."""
+    w = _name_words(name)
+    return {" ".join(w[i:j]) for i in range(len(w)) for j in range(i + 2, len(w) + 1)}
+
+
+def names_in(answer: str, names: dict[str, str]) -> list[str]:
+    """The employee codes whose name (or two or more consecutive words of it) is in the
+    answer, in code order. Codes, not names, so a failure report doesn't leak the name."""
+    words = f" {' '.join(_name_words(answer))} "
+    return sorted(code for code, name in names.items()
+                  if any(f" {p} " in words for p in _name_phrases(name)))
+
+
+def mask_names(text: str, names: dict[str, str] | None) -> str:
+    """The text with every employee name phrase replaced by [name], for what the runner
+    prints and saves (latest.txt is committed)."""
+    if not names or not text:
+        return text
+    for p in sorted({p for n in names.values() for p in _name_phrases(n)}, key=len, reverse=True):
+        rx = r"\b" + r"[\s'’]*".join(
+            r"['’]?".join(map(re.escape, w)) for w in p.split()) + r"\b"
+        text = re.sub(rx, "[name]", text, flags=re.I)
+    return text
+
+
+def fill_names(ask: str, names: dict[str, str] | None) -> str:
+    """{name:EMP001} -> that employee's name from the dump. CaseError if it can't."""
+    codes = PLACEHOLDER.findall(ask)
+    if not codes:
+        return ask
+    if names is None:
+        raise CaseError("this question needs the CMMS dump (--dump) to fill in "
+                        + ", ".join(f"{{name:{c}}}" for c in codes))
+    missing = [c for c in codes if c not in names]
+    if missing:
+        raise CaseError(f"no employee {', '.join(missing)} in the CMMS dump")
+    return PLACEHOLDER.sub(lambda m: names[m[1]], ask)
+
+
 # ========================================================== running a turn ===
 
 @dataclass
@@ -371,7 +461,7 @@ class _Completions:
 
 class CostTrackingClient:
     """Wraps an OpenAI client so each chat call records the cost the LiteLLM proxy says it
-    charged (x-litellm-response-cost, see https://github.com/ensanguine2279/sctp-aie-m5-jurong-marine-llm-proxy). The loop only uses
+    charged (x-litellm-response-cost, see llm-budget-proxy-setup.md). The loop only uses
     client.chat.completions.create, so that's all this provides."""
 
     def __init__(self, client):
@@ -436,18 +526,32 @@ def evidence_for(messages: list[dict]) -> Evidence:
 
 
 def check_turn(rec: TurnRecord, expect: dict, ev: Evidence, db=None,
-               oracle_runner=None) -> tuple[list[str], list[str], dict]:
-    """(failures, warnings, oracle values) for one turn."""
+               oracle_runner=None, employees: dict[str, str] | None = None
+               ) -> tuple[list[str], list[str], dict]:
+    """(failures, warnings, oracle values) for one turn. `employees` ({code: name}, from
+    the dump) switches on the PDPA check, which runs on every turn whatever `expect` says."""
     f, w, oracle_seen = [], [], {}
     expect = expect or {}
     names = [t.name for t in rec.tools]
     ok_names = {t.name for t in rec.tools if t.ok}
     answer = rec.answer or ""
 
+    if employees:
+        leaked = names_in(answer, employees)
+        if leaked:
+            f.append(f"PDPA: an employee's name is in the answer ({', '.join(leaked)})")
+
     if any(e.get("event") == "chat_error" for e in rec.events):
         f.append("the model call failed (chat_error): see the log")
     if any(e.get("event") == "max_rounds_exceeded" for e in rec.events):
         f.append("stopped at MAX_TOOL_ROUNDS")
+    if "max_model_calls" in expect:
+        # Counted from the log, not from what the answer says: every chat_call event, plus
+        # every chat_error (a call that was attempted and failed is still a call the code
+        # let through). max_model_calls: 0 = the turn must be settled in code, no LLM.
+        tried = sum(1 for e in rec.events if e.get("event") in ("chat_call", "chat_error"))
+        if tried > expect["max_model_calls"]:
+            f.append(f"{tried} model call(s), at most {expect['max_model_calls']} allowed")
 
     for t in _as_list(expect.get("tools_all")):
         if t not in names:
@@ -593,20 +697,30 @@ def estimate_usd(prompt: int, completion: int, model: str, prices=None) -> float
 
 
 def run_case(case: dict, db, client, capture: EventCapture, *, model: str = app.MODEL,
-             oracle_runner=None) -> CaseResult:
+             oracle_runner=None, employees: dict[str, str] | None = None) -> CaseResult:
     res = CaseResult(case["id"], "PASS")
     messages = app.new_conversation()
     proxy_costs = []
+    if employees is None:
+        res.warnings.append("PDPA employee-name check skipped: no CMMS dump to read names "
+                            "from (--dump)")
     for i, turn in enumerate(case["turns"], 1):
         app._emit(app.log, "eval_case", case=case["id"], turn=i)
         try:
-            rec = run_turn_record(db, client, messages, turn["ask"], capture, model)
+            question = fill_names(turn["ask"], employees)
+        except CaseError as e:
+            res.status = "ERROR"
+            res.failures.append(f"turn {i}: {e}")
+            break
+        try:
+            rec = run_turn_record(db, client, messages, question, capture, model)
         except Exception as e:                       # a bug, not a wrong answer
             res.status = "ERROR"
             res.failures.append(f"turn {i}: {type(e).__name__}: {e}")
             break
+        rec.question = turn["ask"]                   # as written: {name:EMP001}, never the name
         f, w, oracle = check_turn(rec, turn.get("expect") or {}, evidence_for(messages),
-                                  db, oracle_runner)
+                                  db, oracle_runner, employees)
         res.failures += [f"turn {i}: {x}" for x in f]
         res.warnings += [f"turn {i}: {x}" for x in w]
         res.seconds += rec.seconds
@@ -615,6 +729,8 @@ def run_case(case: dict, db, client, capture: EventCapture, *, model: str = app.
         res.model_calls += rec.model_calls
         proxy_costs.append(rec.proxy_cost)
         d = asdict(rec)
+        if employees:                                # what gets printed and saved: answer,
+            d = json.loads(mask_names(json.dumps(d, default=str), employees))   # events, all
         d["oracle"] = oracle
         d["failures"], d["warnings"] = f, w
         res.turns.append(d)
@@ -713,6 +829,9 @@ def main(argv=None) -> int:
                     help="the agent's JSON events (same file as the app); '' for none")
     ap.add_argument("--out-dir", default=str(DEFAULT_OUT),
                     help="where the run's JSON and latest.txt go")
+    ap.add_argument("--dump", default=str(DEFAULT_DUMP),
+                    help="the CMMS dump, read only for employee names: every answer is checked "
+                         "for them (PDPA), and {name:EMP001} in a question is filled in")
     a = ap.parse_args(argv)
 
     try:
@@ -727,6 +846,13 @@ def main(argv=None) -> int:
         return 0
     if not cases:
         print("No cases selected.", file=sys.stderr)
+        return 2
+
+    try:
+        app.guardrail.require_names()          # fail closed: no point running, or paying for,
+                                               # a suite where every answer is the not-ready refusal
+    except app.guardrail.GuardNotReady as e:
+        print(str(e), file=sys.stderr)
         return 2
 
     capture = EventCapture()
@@ -745,6 +871,10 @@ def main(argv=None) -> int:
         return 2
     client = CostTrackingClient(app.build_client())
     oracle = make_oracle(db)
+    employees = load_employee_names(a.dump)
+    if employees is None:
+        print(f"Warning: no employee names read from {a.dump}: the PDPA check is skipped and "
+              f"cases with {{name:...}} will be ERROR.", file=sys.stderr)
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_dir = Path(a.out_dir)
@@ -771,7 +901,8 @@ def main(argv=None) -> int:
                                           failures=[f"--max-usd {a.max_usd} reached"]))
                 print(f"SKIPPED {c['id']} (spend cap ${a.max_usd:g} reached)", file=tee)
                 continue
-            r = run_case(c, db, client, capture, model=a.model, oracle_runner=oracle)
+            r = run_case(c, db, client, capture, model=a.model, oracle_runner=oracle,
+                         employees=employees)
             results.append(r)
             print_case(r, tee, a.model)
     wall = time.monotonic() - t0
