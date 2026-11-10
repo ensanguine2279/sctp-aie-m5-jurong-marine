@@ -33,23 +33,43 @@ page uses Streamlit's wide layout.
   - **Recent**: the eight saved conversations answered most recently, each titled by its
     first question, with how many questions and how long ago. Click one to open it here;
     the one on the page is greyed out ("open now").
+  - **Fold earlier questions**, a toggle ([below](#what-the-page-shows)): on, only the latest
+    exchange is open; off, the whole conversation is shown.
   - Whether this conversation is being saved
     ([below](#the-conversation-survives-a-restart)): a quiet line when it is, a warning when
     it isn't.
 - **Top bar.**
   - The title, "JME maintenance assistant", and a caption saying that answers come only from
     the shop's own data, through fixed tools, with sources shown.
-  - **Examples**, a popover with the six example questions, once a conversation has started.
-  - The **usage** popover, labelled with the model and this conversation's cost
-    (`gpt-4o-mini · $0.0031`). Open it for the model, "This conversation: $X over N
-    questions" (added up from the answers on the page, so it is the same after a reload or
-    reopening a saved conversation), and the key's spend against its budget, from the proxy.
+  - **Examples**, a lightbulb icon (`EXAMPLES_ICON`, tooltip "Example questions") opening a
+    popover with the six example questions, once a conversation has started. An icon, not
+    the word: the word was cut off in its narrow column.
+  - The **usage** popover, a payments icon at the right (`USAGE_ICON`). Hovering it shows
+    the model and this conversation's cost (`gpt-4o-mini · $0.0031`). Open it for the model,
+    "This conversation: $X over N questions" (added up from the answers on the page, so it is
+    the same after a reload or reopening a saved conversation), and the key's spend against
+    its budget, from the proxy.
   - When the key is near or over its cap, or the proxy can't be reached, a warning also shows
     across the page, under the top bar, so it can't be missed inside a closed popover.
 - **A new conversation** opens on the six example questions as a grid of buttons: CNC-02
   behaviour, CNC-03 oil, blasting-chamber entry, welding SOP, the count of 2025 incidents at
   severity 4 or worse, and an employee's name. The last one is refused by the guardrail on
   purpose, and its tooltip says so. The grid goes once a question is asked.
+- **Only the latest exchange is open**, by default. Every earlier question and answer folds
+  into one expander at the top, "Earlier in this conversation (N questions)", so the page
+  stays short and still reads top to bottom (`split_latest()`, `earlier_label()`,
+  `history_parts()`). Asking a new question folds the previous exchange straight away: the
+  page reads the chat box before it draws the history. A reopened conversation folds the same
+  way. The sidebar's **Fold earlier questions** toggle turns this off, to show the whole
+  conversation as a normal chat; the choice lasts for the browser session. (Considered and not done: newest
+  first. The chat box is pinned to the bottom, and follow-ups would read bottom to top.)
+- **A new question is scrolled into view**, whether typed or picked from the examples. A
+  picked one isn't typed into the chat box, so Streamlit didn't scroll to it, and it landed
+  below the visible page unseen (10 Nov 2026). `scroll_script()` is an invisible component
+  that scrolls the newest message to the top of the view.
+- **Less space above the title**: `TOP_CSS` cuts Streamlit's default top padding (about
+  6rem) to 2.5rem. It also gives the usage popover's panel a minimum width (24rem): it took
+  the width of its narrow icon column and cut its lines off.
 - **Each answer**: its text, one line with what it cost, then tabs for what it rests on, only
   for what it has, each with a count:
   - **Sources**: the sources the tools cited.
@@ -201,7 +221,10 @@ The **What happened** table is built from these same events.
 | `show_notes()` | The tools' caveats, in the Caveats tab, from `agent_app.ask(..., notes=...)` |
 | `photo_items()`, `show_photos()`, `img_html()` | The photos behind an answer's image sources, fetched and hash-checked, with captions; drawn in the Photos tab as `<img>` tags with the bytes inside (caption HTML-escaped) |
 | `cost_line()` | The cost under each answer |
-| `conversation_spend()`, `conversation_line()`, `usage_label()` | The conversation's spend: the sum of its answers' costs (`cost_usd`, or read back from the cost line of an answer saved before 10 Nov 2026), "at least" when one isn't known; the usage popover's label, escaped for Markdown |
+| `conversation_spend()`, `conversation_line()`, `USAGE_ICON`, `usage_help()` | The conversation's spend: the sum of its answers' costs (`cost_usd`, or read back from the cost line of an answer saved before 10 Nov 2026), "at least" when one isn't known; the usage popover's icon and its tooltip, escaped for Markdown |
+| `split_latest()`, `history_parts()`, `earlier_label()`, `draw_messages()`, `FOLD_KEY` | The latest exchange drawn open, everything before it folded into one expander, unless the sidebar toggle (`FOLD_KEY` in `st.session_state`) turns folding off |
+| `TOP_MARKER`, `TOP_BAR` | The top bar's layout: a marker (an empty `<span id="jme-topbar">` in the caption) lets `TOP_CSS` shrink the two icon columns to their buttons, so the icons sit together at the right edge; the column weights are the fallback for a browser without CSS `:has()` |
+| `TOP_CSS`, `scroll_script()` | Less padding above the title; the invisible component that scrolls a new question into view |
 | `display_copy()`, `restored()`, `kept_question()`, `save_line()` | What is saved of the display (no photos, no trace, a refused question only as its placeholder, each answer's cost as a number), a loaded conversation turned back into `messages` and `shown` (questions checked again), and the sidebar's saved / not saved line |
 | `RECENT`, `recent_label()`, `ago()`, `md_plain()` | The sidebar's list of saved conversations: how many (8), one line each (title, questions, how long ago or "open now"), Markdown escaped |
 | `main()` | The Streamlit page: password gate, the cached `connect()` (one DB connection and LLM client per process, through `st.cache_resource`), the cached session store (purges old conversations once per process), the conversation loaded from `?session=`, the sidebar (with `open_saved()` behind the recent list), the top bar, the examples grid on a new conversation, the chat, one question per run, then the save |

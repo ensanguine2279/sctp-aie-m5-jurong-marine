@@ -553,7 +553,10 @@ def run_turn_record(db, client, messages, question, capture: EventCapture,
     rec.completion_tokens = sum(e.get("completion_tokens") or 0 for e in chats)
     if costs is not None:
         mine = costs[first_cost:]
-        rec.proxy_cost = sum(mine) if mine and all(c is not None for c in mine) else None
+        # No model calls (a guardrail refusal, answered in code) costs nothing: $0, not
+        # unknown, or one refused turn would make the whole run's proxy total "not reported".
+        rec.proxy_cost = (0.0 if not mine else
+                          sum(mine) if all(c is not None for c in mine) else None)
     return rec
 
 

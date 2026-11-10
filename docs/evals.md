@@ -174,7 +174,11 @@ The proxy's own figure comes from the `x-litellm-response-cost` header it return
 call ([llm-budget-proxy-setup.md](llm-budget-proxy-setup.md#how-accurate-is-the-cost-tracking));
 the list-price estimate is tokens × $0.15 / $0.60 per million (gpt-4o-mini, checked 7 Nov
 2026; `PRICES` in the script). `--max-usd` (default $0.50) stops **starting** new cases once
-the run has spent that much; skipped cases show as SKIPPED. `spend_report.py` on the proxy is
+the run has spent that much; skipped cases show as SKIPPED.
+A turn settled in code (a guardrail refusal) makes no model call, so it costs $0 and the
+proxy total still shows. Until 10 Nov 2026 such a turn counted as "unknown", so any run with
+a guardrail case printed "proxy cost not reported" though every call had reported its cost.
+The total is "not reported" only when a call that did run came back without the header. `spend_report.py` on the proxy is
 still the authority for the key's remaining budget.
 
 ## Output and logs
@@ -207,7 +211,7 @@ still the authority for the key's remaining budget.
 
 ## Tests
 
-`tests/test_evals.py` (36 tests, no database, no real model; model and tools stubbed): the
+`tests/test_evals.py` (38 tests, no database, no real model; model and tools stubbed): the
 suite meets the checklist (20+ cases, 2+ refusals, 5 kill-shot phrasings, each asking and
 never counting); a malformed `cases.yaml` refused before any call; selection by id and tag;
 grounding (an invented number, a rounded one as a warning, ids, dates in four formats,
@@ -215,7 +219,8 @@ thousands separators, digits inside dates and ids not counting); paths into a to
 the severity case end to end through the real `agent_app` loop and guard: passing when the
 guard strips the guess, **failing on the 5 Nov behaviour** (a guessed scale accepted and a
 count given), failing on an invented count; a failed model call as ERROR; a changed pinned
-value reported; the proxy's cost header read per call; the list-price fallback.
+value reported; the proxy's cost header read per call; the list-price fallback; a turn
+refused in code costing $0, not "unknown" (found on the first full run, 10 Nov 2026).
 **`max_model_calls`:** counted from the `chat_call` events, a failed call counting too, no
 limit without the key, a malformed value refused by `--check`, and a turn the model answered
 failing it end to end. **The guardrail cases:** 5+ out-of-scope, 5+ PDPA and 3+ injection

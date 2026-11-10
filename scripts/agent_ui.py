@@ -204,6 +204,49 @@ def last_answer(shown: list[dict]) -> int | None:
     return None
 
 
+def split_latest(shown: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(earlier, latest): the latest exchange is the last question and everything after it
+    (its answer). The page draws it open and folds everything earlier into one expander, so
+    the page stays short and still reads top to bottom (10 Nov 2026, instead of putting the
+    newest message first)."""
+    for i in range(len(shown) - 1, -1, -1):
+        if isinstance(shown[i], dict) and shown[i].get("role") == "user":
+            return shown[:i], shown[i:]
+    return [], list(shown)
+
+
+FOLD_KEY = "fold_earlier"        # the sidebar toggle's state: fold earlier questions or not
+
+
+def history_parts(shown: list[dict], new_question: bool,
+                  fold: bool = True) -> tuple[list[dict], list[dict]]:
+    """(folded, open) for drawing the conversation. Folding off: everything open, as a
+    normal chat. Folding on: the latest exchange open and the rest in one expander; with a
+    new question on its way, the previous exchange folds too, so only the new one is open."""
+    if not fold:
+        return [], list(shown)
+    if new_question:
+        return list(shown), []
+    return split_latest(shown)
+
+
+def earlier_label(earlier: list[dict]) -> str:
+    """The folded earlier part's label: 'Earlier in this conversation (3 questions)'."""
+    n = sum(1 for m in earlier if isinstance(m, dict) and m.get("role") == "user")
+    return f"Earlier in this conversation ({n} question{'s' if n != 1 else ''})"
+
+
+def draw_messages(st, messages: list[dict], newest: int | None = None) -> None:
+    """Questions and answers in order; `newest` is the index (in `messages`) of the answer
+    whose What happened tab comes first."""
+    for i, m in enumerate(messages):
+        with st.chat_message(m["role"]):
+            if m["role"] == "assistant":
+                render_answer(st, m, latest=(i == newest))
+            else:
+                st.write(m["text"])
+
+
 def render_answer(st, m: dict, latest: bool = False) -> None:
     """One answer: its text, what it cost, then its evidence in tabs."""
     st.write(m["text"])
@@ -293,10 +336,55 @@ def conversation_line(cost: float, questions: int, complete: bool = True) -> str
     return f"This conversation: {'' if complete else 'at least '}${cost:.4f} over {q}"
 
 
-def usage_label(model: str, cost: float, complete: bool = True) -> str:
-    """The top bar's usage button: the model and this conversation's cost, escaped for a
-    Streamlit label (which reads Markdown, and $...$ as maths)."""
+USAGE_ICON = ":material/payments:"   # the usage popover's button: an icon, no words
+# The Examples button too: its word was cut off in its narrow column (10 Nov 2026).
+EXAMPLES_ICON = ":material/lightbulb:"
+EXAMPLES_HELP = "Example questions"
+
+
+def usage_help(model: str, cost: float, complete: bool = True) -> str:
+    """Tooltip on the usage icon: the model and this conversation's cost, escaped for
+    Streamlit (which reads Markdown, and $...$ as maths), so it can be seen without a click."""
     return md_plain(f"{model} · {'at least ' if not complete else ''}${cost:.4f}")
+
+
+# Less room above the title: Streamlit pads the top of the page by about 6rem. Both
+# selectors, because the container's test id is newer than its class.
+# The usage popover's panel took the width of its narrow icon column and cut its lines off
+# (10 Nov 2026), so it gets a minimum width of its own.
+TOP_CSS = """<style>
+[data-testid="stMainBlockContainer"], .block-container { padding-top: 2.5rem; }
+[data-testid="stPopoverBody"] { min-width: 24rem; }
+[data-testid="stPopover"] button { padding-left: 0.5rem; padding-right: 0.5rem; }
+[data-testid="stHorizontalBlock"]:has(#jme-topbar) { gap: 0.25rem; }
+[data-testid="stHorizontalBlock"]:has(#jme-topbar) > [data-testid="stColumn"]:not(:first-child),
+[data-testid="stHorizontalBlock"]:has(#jme-topbar) > [data-testid="column"]:not(:first-child) {
+  flex: 0 0 auto !important; width: auto !important; min-width: 0 !important;
+}
+</style>"""
+# Marks the top bar for the CSS above, which shrinks its two icon columns to their buttons
+# so the icons sit side by side at the right edge (10 Nov 2026: in equal columns they had a
+# wide gap between them). The title column takes the rest.
+TOP_MARKER = '<span id="jme-topbar"></span>'
+# Column weights, used as-is only by a browser without :has() (all current ones have it).
+# Not narrower: the icon buttons hold the icon and Streamlit's dropdown arrow, and in
+# columns of 0.7 against 10 the arrow pushed the icon out of view (10 Nov 2026).
+TOP_BAR = [6, 1, 1]
+
+
+def scroll_script(nonce: int) -> str:
+    """HTML for an invisible component that scrolls the page to the newest question.
+
+    A question picked from the examples isn't typed into st.chat_input, so Streamlit doesn't
+    scroll to it, and it landed below the visible part of the page unseen (10 Nov 2026).
+    The script runs in a component's iframe, which shares the page's origin, and scrolls
+    the last chat message into view. `nonce` (how many messages are on the page) makes each
+    question's component different, so Streamlit runs it again rather than reusing the last."""
+    return (f"<script>/* {nonce} */"
+            "const d = window.parent.document;"
+            "const m = d.querySelectorAll('[data-testid=\"stChatMessage\"]');"
+            "if (m.length) m[m.length - 1].scrollIntoView({behavior: 'smooth', block: 'start'});"
+            "</script>")
 
 
 # What is saved of each message: no photos, no trace. cost_usd and cost_complete let the
@@ -435,6 +523,7 @@ def main() -> None:
     import streamlit as st
 
     st.set_page_config(page_title=TITLE, page_icon=None, layout="wide")
+    st.markdown(TOP_CSS, unsafe_allow_html=True)
 
     expected = os.environ.get("APP_PASSWORD")
     if expected and not st.session_state.get("authed"):
@@ -539,6 +628,9 @@ def main() -> None:
                              use_container_width=True, disabled=here):
                     open_saved(r.sid)
         st.divider()
+        fold = st.toggle("Fold earlier questions", value=True, key=FOLD_KEY,
+                         help="On: only the latest question and answer stay open, the rest "
+                              "fold into one line. Off: the whole conversation, as a chat.")
         save_box = st.empty()                      # is this conversation being kept (#5)
 
     def show_saved():
@@ -549,12 +641,12 @@ def main() -> None:
 
     # ---- top bar: title, examples (once started), usage ------------------------------
     picked = None
-    head, ex_col, use_col = st.columns([6, 1.2, 2], vertical_alignment="center")
+    head, ex_col, use_col = st.columns(TOP_BAR, vertical_alignment="center")
     with head:
         st.subheader(TITLE)
-        st.caption(CAPTION)
+        st.caption(CAPTION + TOP_MARKER, unsafe_allow_html=True)   # marker: no element of its own
     if st.session_state.shown:
-        with ex_col, st.popover("Examples", use_container_width=True):
+        with ex_col, st.popover(EXAMPLES_ICON, help=EXAMPLES_HELP):
             for i, q in enumerate(EXAMPLES):
                 if st.button(q, key=f"ex_pop_{i}", use_container_width=True,
                              help=example_help(q)):
@@ -569,8 +661,8 @@ def main() -> None:
         # total against its cap from the proxy (about a minute behind).
         cost, questions, complete = conversation_spend(st.session_state.shown)
         ks = key_budget()
-        with usage_box.container(), st.popover(usage_label(app.MODEL, cost, complete),
-                                               use_container_width=True):
+        with usage_box.container(), st.popover(USAGE_ICON,
+                                               help=usage_help(app.MODEL, cost, complete)):
             st.caption(f"Model: {app.MODEL}")
             st.markdown(conversation_line(cost, questions, complete))
             st.markdown(spend.budget_line(ks))
@@ -594,15 +686,17 @@ def main() -> None:
                         picked = q
 
     # ---- the conversation -----------------------------------------------------------
-    newest = last_answer(st.session_state.shown)
-    for i, m in enumerate(st.session_state.shown):
-        with st.chat_message(m["role"]):
-            if m["role"] == "assistant":
-                render_answer(st, m, latest=(i == newest))
-            else:
-                st.write(m["text"])
-
+    # Read before the history is drawn (the box stays pinned to the bottom wherever it is
+    # called), so a new question folds the previous exchange at once, not one run later.
     question = st.chat_input("Ask about a machine, an incident or an SOP") or picked
+
+    # Folding on (the sidebar toggle): earlier exchanges in one expander, the latest open.
+    earlier, latest = history_parts(st.session_state.shown, bool(question), fold)
+    if earlier:
+        with st.expander(earlier_label(earlier)):
+            draw_messages(st, earlier)
+    draw_messages(st, latest, newest=last_answer(latest))
+
     if not question:
         return
 
@@ -610,6 +704,8 @@ def main() -> None:
     st.session_state.shown.append({"role": "user", "text": question})
     with st.chat_message("user"):
         st.write(question)
+    import streamlit.components.v1 as components
+    components.html(scroll_script(len(st.session_state.shown)), height=0)
     with st.chat_message("assistant"):
         lg, handler = trace_logger(log_to_file=True)
         raw: list[dict] = []
