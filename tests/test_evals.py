@@ -311,6 +311,30 @@ def test_spend_falls_back_to_list_price_from_tokens():
     assert ev.spent(rs, "gpt-4o-mini") == pytest.approx(0.0018 + 0.01)
 
 
+def test_a_turn_refused_in_code_costs_nothing_not_unknown(monkeypatch, tools, capture):
+    """A guardrail refusal makes no model call, so the proxy charged nothing: $0, not
+    'unknown'. (Before 10 Nov one refused case made the whole run's proxy total read
+    'proxy cost not reported', though every call that ran had reported its cost.)"""
+    class Inner:                                  # a client that's never called
+        class with_raw_response:
+            @staticmethod
+            def create(**kw):
+                pytest.fail("the model was called for a question refused in code")
+
+    monkeypatch.setattr(app, "complete", scripted())          # no model reply scripted
+    client = ev.CostTrackingClient(type("Cl", (), {"chat": type("Ch", (), {"completions": Inner})()})())
+    refused = next(c for c in ev.load_cases(CASES)
+                   if "guardrail" in c.get("tags", []) and "out-of-scope" in c["tags"])
+    r = ev.run_case(refused, None, client, capture)
+    assert r.model_calls == 0 and client.costs == []
+    assert r.turns[0]["proxy_cost"] == 0.0 and r.proxy_cost == 0.0
+    s = ev.summary([r, ev.CaseResult("b", "PASS", proxy_cost=0.01)], "gpt-4o-mini", 1.0)
+    assert "Spend: $0.0100 as charged by the proxy" in s
+    # A call that really didn't report its cost still makes the total unknown.
+    s = ev.summary([r, ev.CaseResult("b", "PASS", proxy_cost=None)], "gpt-4o-mini", 1.0)
+    assert "proxy cost not reported" in s
+
+
 # ------------------------------------------------------- max_model_calls ---
 
 def _rec(*events, answer="Sorry, I can't help with that."):

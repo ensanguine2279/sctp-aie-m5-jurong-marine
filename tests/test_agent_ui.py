@@ -203,9 +203,55 @@ def test_the_newest_answer_is_found():
     assert ui.last_answer([]) is None and ui.last_answer([{"role": "user"}]) is None
 
 
-def test_the_usage_button_shows_model_and_cost_as_plain_text():
-    assert ui.usage_label("gpt-4o-mini", 0.0031) == r"gpt\-4o\-mini · \$0\.0031"
-    assert ui.usage_label("m", 0.0004, complete=False) == r"m · at least \$0\.0004"
+def test_the_usage_button_is_an_icon_with_model_and_cost_in_its_tooltip():
+    assert ui.USAGE_ICON.startswith(":material/")                    # no words on the button
+    assert ui.EXAMPLES_ICON.startswith(":material/") and ui.EXAMPLES_HELP   # nor on Examples
+    assert ui.usage_help("gpt-4o-mini", 0.0031) == r"gpt\-4o\-mini · \$0\.0031"
+    assert ui.usage_help("m", 0.0004, complete=False) == r"m · at least \$0\.0004"
+
+
+def test_a_new_question_is_scrolled_into_view():
+    """10 Nov 2026: a question picked from the examples was added below the visible page
+    and the user didn't see it; the page now scrolls to the newest message."""
+    a, b = ui.scroll_script(3), ui.scroll_script(5)
+    assert a != b                                  # a fresh component per question
+    assert "stChatMessage" in a and "scrollIntoView" in a and "window.parent" in a
+
+
+def test_only_the_latest_exchange_stays_open():
+    """10 Nov 2026: earlier questions fold into one expander, the latest stays open."""
+    q1, a1 = {"role": "user", "text": "q1"}, {"role": "assistant", "text": "a1"}
+    q2, a2 = {"role": "user", "text": "q2"}, {"role": "assistant", "text": "a2"}
+    assert ui.split_latest([q1, a1, q2, a2]) == ([q1, a1], [q2, a2])
+    assert ui.split_latest([q1, a1]) == ([], [q1, a1])               # nothing to fold
+    assert ui.split_latest([q1, a1, q2]) == ([q1, a1], [q2])          # answer still coming
+    assert ui.split_latest([]) == ([], [])
+    assert ui.earlier_label([q1, a1]) == "Earlier in this conversation (1 question)"
+    assert ui.earlier_label([q1, a1, q2, a2]) == "Earlier in this conversation (2 questions)"
+
+
+def test_folding_earlier_questions_can_be_switched_off():
+    """10 Nov 2026: a sidebar toggle between folding earlier questions and a plain chat."""
+    q1, a1 = {"role": "user", "text": "q1"}, {"role": "assistant", "text": "a1"}
+    q2, a2 = {"role": "user", "text": "q2"}, {"role": "assistant", "text": "a2"}
+    shown = [q1, a1, q2, a2]
+    assert ui.history_parts(shown, new_question=False, fold=True) == ([q1, a1], [q2, a2])
+    assert ui.history_parts(shown, new_question=True, fold=True) == (shown, [])
+    assert ui.history_parts(shown, new_question=False, fold=False) == ([], shown)
+    assert ui.history_parts(shown, new_question=True, fold=False) == ([], shown)
+    assert ui.history_parts(shown, False, fold=False)[1] is not shown   # a copy, not the list
+
+
+def test_the_space_above_the_title_is_reduced_and_the_usage_panel_is_wide_enough():
+    assert "padding-top" in ui.TOP_CSS and "stMainBlockContainer" in ui.TOP_CSS
+    assert "stPopoverBody" in ui.TOP_CSS and "min-width" in ui.TOP_CSS
+    # 10 Nov 2026: the icon buttons were cut off in columns of 0.7 against 10.
+    assert '[data-testid="stPopover"] button' in ui.TOP_CSS
+    # 10 Nov 2026: the two icons sat far apart; their columns now shrink to the buttons.
+    assert 'id="jme-topbar"' in ui.TOP_MARKER and ":has(#jme-topbar)" in ui.TOP_CSS
+    assert "flex: 0 0 auto" in ui.TOP_CSS
+    title, ex, usage = ui.TOP_BAR
+    assert ex / sum(ui.TOP_BAR) >= 0.1 and usage / sum(ui.TOP_BAR) >= 0.1
 
 
 def test_only_the_guardrail_example_has_a_tooltip():

@@ -202,22 +202,26 @@ in [`evals.md`](evals.md).
 `scripts/agent_ui.py` is a Streamlit chat page over the same `ask()`; it adds no logic.
 
 ```bash
-pip install streamlit          # team repo; with uv (personal repo): uv add streamlit
+pip install -r requirements-app.txt   # team repo: streamlit 1.36 or later; with uv (personal repo): uv pip install -r requirements-app.txt
 streamlit run scripts/agent_ui.py
 ```
 
-Under each answer it shows the sources the tools cited, and a **What happened** table:
-every model call (with seconds) and every tool call (the arguments the model sent, ok or
-refused, seconds), in order, and a `guardrail` row when a question was refused in code (no
-model row then) or an answer was replaced. The sidebar has the kill-shot questions as buttons,
-including the PDPA one, and a
-New conversation button. Its trace comes from the same events as the log, collected per
-question, and the page also appends them to `logs/agent_app.jsonl` (run from the folder
-you start Streamlit in), so the file has the same lines as the table. `tests/test_agent_ui.py`
-(no Streamlit needed) covers the trace table; the page itself is checked by
-running it. Setting `APP_PASSWORD` puts a password box in front of the page, and
-`AGENT_LOG_FILE=off` stops it writing the file (it still logs to stderr). To host it, see
-[`agent_ui.md`](agent_ui.md#deploying-on-google-cloud-run).
+Under each answer it shows one line with what the answer cost, then tabs for what it rests
+on: **Sources** (the sources the tools cited), **Caveats** (the tools' notes), **Photos**
+(the scans behind it) and **What happened**: every model call (with seconds and cost) and
+every tool call (the arguments the model sent, ok or refused, seconds), in order, and a
+`guardrail` row when a question was refused in code (no model row then) or an answer was
+replaced. On the newest answer What happened is the first tab, so it is open. The example
+questions, including the PDPA one, are a grid on a new conversation and a lightbulb icon in the
+top bar after that; the sidebar holds New conversation, the saved conversations and a toggle
+that folds earlier questions into one line. The layout is described in
+[`agent_ui.md`](agent_ui.md#what-the-page-shows). Its trace comes from the same events as the
+log, collected per question, and the page also appends them to `logs/agent_app.jsonl` (run from
+the folder you start Streamlit in), so the file has the same lines as the table.
+`tests/test_agent_ui.py` (no Streamlit needed) covers the trace table and the page's other
+helpers; how the page looks is checked by running it. Setting `APP_PASSWORD` puts a password
+box in front of the page, and `AGENT_LOG_FILE=off` stops it writing the file (it still logs to
+stderr). To host it, see [`agent_ui.md`](agent_ui.md#deploying-on-google-cloud-run).
 
 ## Logging (toward #7, observability)
 
@@ -276,10 +280,11 @@ python scripts/spend.py --json   # with uv: uv run python scripts/spend.py
 ```
 
 On the page, each answer has a line such as "2 model calls, 9,936 tokens, $0.0012", each
-model row in **What happened** shows its cost, and the sidebar shows the session's total and
-the key's spend against its budget, re-read from the proxy after every answer. From 80% of the
-budget the sidebar shows a warning, so a nearly spent key is seen before the demo rather than
-as a budget error during it. Team-wide spend stays with the proxy's own tools
+model row in **What happened** shows its cost, and the usage popover (the icon at the right of
+the top bar; its tooltip shows the conversation's total) shows the conversation's total and the
+key's spend against its budget, re-read from the proxy after every answer. From 80% of the
+budget a warning shows across the page, outside the popover, so a nearly spent key is seen
+before the demo rather than as a budget error during it. Team-wide spend stays with the proxy's own tools
 (`spend_report.py`, `daily_report.py`, the `/ui` dashboard; see
 [llm-budget-proxy-setup.md](llm-budget-proxy-setup.md#4-watch-spending-admin)); the app never
 holds an admin key. `spend.py` never raises: a down proxy or a refused request comes back as
