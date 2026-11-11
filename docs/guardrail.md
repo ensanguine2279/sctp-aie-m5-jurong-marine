@@ -37,8 +37,10 @@ flowchart LR
 - **Blocked answer:** the whole answer is replaced (`output_blocked` in the log, with the rule
   and kind, never the text). The model's message in `messages` is replaced too, so the next
   turn's prompt doesn't carry the leak.
-- On the demo page the **What happened** table shows a `guardrail` row for either event, and
-  the sidebar has a PDPA example button.
+- On the demo page the **What happened** tab shows a `guardrail` row for either event, and the
+  example questions (the grid on a new conversation, and the lightbulb icon in the top bar
+  after that) include a PDPA one, whose tooltip says it is refused on purpose
+  ([`agent_ui.md`](agent_ui.md#what-the-page-shows)).
 
 ## The rules
 
@@ -97,10 +99,14 @@ name for CRN-02" and "the name of the SOP" are names of things, and "Can I ignor
 work order?" or "Can I ignore the rules on tandem lifts?" are questions about the shop, not
 attempts to change the assistant's rules.
 
-`tests/test_guardrail.py` runs every in-scope question in `evals/cases.yaml` through the guard
-(they must all be allowed), plus the client brief's examples, follow-ups ("and what about last
-month?", "the old one", "yes") and near-misses like the ones above. On the real run, every
-existing eval case would also fail if the guard refused it.
+`tests/test_guardrail.py` runs every question in `evals/cases.yaml` that is expected to be
+answered through the guard: they must all be allowed. That is decided **per turn**, not per
+case: a turn is expected to be answered unless it has `max_model_calls: 0`. So a multi-turn case
+whose follow-up turns into a PDPA question contributes its first turn as allowed, and its
+refused turn is checked to be refused (`tests/test_multiturn.py`). Added to them: the client
+brief's examples, follow-ups ("and what about last month?", "the old one", "yes") and
+near-misses like the ones above. On the real run, every existing eval case would also fail if
+the guard refused it.
 
 ## The staff list: `guard_names.py`
 
@@ -174,24 +180,27 @@ Before the guard (8 Nov 2026, run through the real loop and runner with the mode
 
 ## Tests
 
-`tests/test_guardrail.py` (117 tests: one per in-scope eval question, so the count grows
-with `cases.yaml`; no model, no database; the ones that need the real staff
-names read them from `data/sql/jurongmarine_cmms.sql` and skip without it, the rest use made-up
-names): out of scope, injection and PDPA each refused in 11-13 phrasings; a staff name typed in
-a question refused (two words of it, any case, curly apostrophe, an `--extra` name), one common
-word not; every real staff name known to the guard; every in-scope eval question and 24 more
-allowed; answers with a staff name, a phone number, an NRIC or an e-mail blocked, ordinary
-answers (numbers, ids, costs, an epoch) and the three SOPs quoted whole not; the guard's own
-messages pass the output guard and hold no digits; the name list matches the dump and holds no
-plaintext; `build-names` output loadable; patterns still working without a name list; odd input
-(empty, full-width letters, non-breaking spaces) handled and deterministic; the CLI; and the 20
-guardrail eval cases passing through the real loop and runner with a model that fails the test
-if called; failing closed (`require_names` with the fix in its message; a missing, broken or
-empty name list counting as not ready). Two tests record bugs found while writing the guard: a phone number followed by a
-full stop was missed, and "forget the rules above" wasn't caught.
+`tests/test_guardrail.py` (132 tests: one per eval turn expected to be answered, every turn
+without `max_model_calls: 0`, so the count grows with `cases.yaml`; no model, no database; the
+ones that need the real staff names read them from `data/sql/jurongmarine_cmms.sql` and skip
+without it, the rest use made-up names): out of scope, injection and PDPA each refused in 11-13
+phrasings; a staff name typed in a question refused (two words of it, any case, curly
+apostrophe, an `--extra` name), one common word not; every real staff name known to the guard;
+every answered eval turn and 24 more questions allowed; answers with a staff name, a phone
+number, an NRIC or an e-mail blocked, ordinary answers (numbers, ids, costs, an epoch) and the
+three SOPs quoted whole not; the guard's own messages pass the output guard and hold no digits;
+the name list matches the dump and holds no plaintext; `build-names` output loadable; patterns
+still working without a name list; odd input (empty, full-width letters, non-breaking spaces)
+handled and deterministic; the CLI; and the 20 guardrail eval cases passing through the real
+loop and runner with a model that fails the test if called; failing closed (`require_names`
+with the fix in its message; a missing, broken or empty name list counting as not ready). Two
+tests record bugs found while writing the guard: a phone number followed by a full stop was
+missed, and "forget the rules above" wasn't caught.
 
 The wiring is tested in `tests/test_agent_app.py` (the model never called on a refusal, the
 question kept out of `messages` and a PDPA one out of the log, the conversation carrying on
 after a refusal, a leaking answer replaced in `messages` and absent from the log, every
-question refused and the app refusing to start without the name list) and
-`tests/test_agent_ui.py` (the guardrail rows, the sidebar examples).
+question refused and the app refusing to start without the name list),
+`tests/test_agent_ui.py` (the guardrail rows; every example question answered except the PDPA
+one, which is refused and the only one with a tooltip) and `tests/test_multiturn.py` (each
+multi-turn follow-up refused by the guard exactly when its case says so).

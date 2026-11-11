@@ -34,6 +34,12 @@ that agent_ui.py saves after every answer and loads back (scripts/sessions.py). 
 human-in-the-loop gate (#6): this app is read-only, so none is needed. The eval suite (#8) is separate:
 `scripts/run_evals.py` over `evals/cases.yaml`.
 
+Words the data can't take as written are handled in code too (10 Nov 2026): a year written
+short ("nov 202") gets a question back, with no model call (incomplete_year, year_question);
+"completed" work orders, which the CMMS has no status or date for, are read as status
+CLOSED by the date raised, and a note on the tool result makes the answer say so
+(completion_note).
+
 Usage
     python scripts/agent_app.py "is CNC-02 running differently now?"
     python scripts/agent_app.py                      # interactive session
@@ -87,6 +93,11 @@ guess what the data "should" say.
 - Every note in a tool result is a caveat your answer must carry: say each one in your own \
 words (e.g. that a value was read off a scan by a person, or wasn't reliably read). Never drop \
 a note to keep the answer short.
+- Never fill in a year the user didn't give. If they name a month without a year and the \
+data has that month in more than one year, ask which year.
+- Work orders have no "completed" status and no completion date: their statuses are CLOSED, \
+OPEN and AWAITING PARTS, dated when raised. For "completed" or "finished" work orders, count \
+CLOSED ones and say that's how you read it.
 - Keep answers short and direct. Do not describe which tool you used unless asked.
 """
 
@@ -139,6 +150,94 @@ def _without_scale(arguments) -> str:
     args.pop("severity_scale", None)
     args.pop("scale_quote", None)
     return json.dumps(args)
+
+
+# ================================================ words the data can't take as written ===
+# 10 Nov 2026: asked "how many work orders were completed in nov 202", the model read "202"
+# as 2026 and "completed" as closed, and said neither. A short year is now asked about in
+# code, before any model call, as a severity number with no scale is (trap C1). "Completed"
+# has only one possible reading in the CMMS (status CLOSED, dated when raised), so it is
+# answered, with a note on the tool result that makes the answer say how it was read.
+
+_MONTH = (r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
+          r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?")
+_MONTH_NO = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul",
+                                         "aug", "sep", "oct", "nov", "dec"), 1)}
+# A month, or the word "year", followed by three digits that start a year (19x, 20x) and
+# nothing after them: "nov 202", "November 202", "Nov. 202", "year 202". A day after a
+# month is at most two digits and a year four, so three digits are neither.
+_SHORT_YEAR = re.compile(rf"\b(?:(?P<month>{_MONTH})\.?\s*'?|year\s+)(?P<year>(?:19|20)\d)(?!\d)",
+                         re.I)
+
+
+def incomplete_year(question: str):
+    """(the text as written, its month number or None) for a year written short, such as
+    'nov 202'; None when the question has none."""
+    m = _SHORT_YEAR.search(question or "")
+    if not m:
+        return None
+    month = (m.group("month") or "").lower()[:3]
+    return m.group(0).strip(), _MONTH_NO.get(month)
+
+
+def year_question(found, dates: dict | None = None) -> str:
+    """The question sent back for a year written short: the two latest years the data has
+    that month in, when the month and the data's end are known."""
+    from datetime import date as _date
+    text, month = found
+    end = max(dates.values()) if dates else None
+    if month and end:
+        years = [y for y in range(end.year, end.year - 3, -1) if _date(y, month, 1) <= end][:2]
+        names = " or ".join(f"{_date(y, month, 1):%B %Y}" for y in years)
+        return (f"\"{text}\" isn't a full year, so I won't guess it. Which did you mean: "
+                f"{names}? The shop's data runs to {_day(end)}.")
+    return f"\"{text}\" isn't a full year, so I won't guess it. Which year did you mean?"
+
+
+WORK_ORDER_TOOLS = ("list_work_orders",)
+_DONE_WORDS = re.compile(r"\b(complet\w*|finish\w*)\b", re.I)
+# A question that names a status itself ends the look-back: "and open?" asks about open ones.
+_STATUS_WORDS = re.compile(r"\b(open|closed?|awaiting|pending|outstanding|unfinished|"
+                           r"incomplete)\b", re.I)
+COMPLETED_NOTE = (
+    "The user asked about \"{word}\" work orders. The CMMS has no completion date and no "
+    "'completed' status: its statuses are CLOSED, OPEN and AWAITING PARTS, and each work "
+    "order is dated when it was raised. Count CLOSED work orders as completed, and say both "
+    "in the answer: that 'completed' was read as status CLOSED, and that the date is when "
+    "each work order was raised, not when it was finished.")
+
+
+def completion_note(name: str, messages) -> str | None:
+    """The note for a work-order tool result when the question is about completed or
+    finished work orders; None otherwise. The user's questions are read newest first, so a
+    follow-up that names no status ("November 2025", after the year was asked about; "and
+    in 2024?") keeps the earlier "completed"; one that names a status itself ("and open?")
+    ends the look-back."""
+    if name not in WORK_ORDER_TOOLS:
+        return None
+    for m in reversed(messages or []):
+        if m.get("role") != "user":
+            continue
+        text = str(m.get("content") or "")
+        hit = _DONE_WORDS.search(text)
+        if hit:
+            return COMPLETED_NOTE.format(word=hit.group(1).lower())
+        if _STATUS_WORDS.search(text):
+            return None
+    return None
+
+
+def _with_note(content: str, note: str) -> str:
+    """A tool result for the model with one more note: in its `notes` when it is a JSON
+    object, else after it."""
+    try:
+        body = json.loads(content)
+    except (ValueError, TypeError):
+        body = None
+    if isinstance(body, dict):
+        body["notes"] = list(body.get("notes") or []) + [note]
+        return json.dumps(body, ensure_ascii=False, separators=(",", ":"), default=str)
+    return f"{content}\n{note}"
 
 
 class ChatError(Exception):
@@ -356,6 +455,12 @@ def run_turn(db, client, messages, *, model=MODEL, max_rounds=MAX_TOOL_ROUNDS,
                 clarify = err.get("message") or "Could you clarify your question?"
             content, extra_sources, extra_notes = period_check(
                 db, call.function.name, arguments, result, logger, round_no)
+            done_note = completion_note(call.function.name, messages)
+            if done_note:                          # "completed" read as CLOSED, said aloud
+                content = _with_note(content, done_note)
+                extra_notes = list(extra_notes) + [done_note]
+                _emit(logger, "completed_read_as_closed", round=round_no,
+                      tool=call.function.name)
             sources.extend(result.sources)
             sources.extend(extra_sources)
             if notes_out is not None:
@@ -536,7 +641,10 @@ def ask(db, client, messages, question, *, model=MODEL, logger=log, raw_sources=
         injection) never reaches a later prompt; the `turn` log line withholds a PDPA
         question's text for the same reason.
       - output: an answer with personal data is replaced, in `messages` too, so the next
-        turn's prompt doesn't carry it either."""
+        turn's prompt doesn't carry it either.
+    After the guard, a year written short ("nov 202") is asked about, also with no model
+    call: the question and the reply both go into `messages`, so the user's answer ("2025")
+    reaches the model with the question it completes."""
     tally = _new_usage()                       # this question's model calls, tokens, cost
     if usage is not None:                      # usage: a dict for the caller (the page shows
         usage.clear()                          # it under the answer); filled even on a refusal
@@ -556,6 +664,16 @@ def ask(db, client, messages, question, *, model=MODEL, logger=log, raw_sources=
         _emit(logger, "turn", question=_loggable(question, verdict.rule), tools_called=[],
               n_sources=0, refused=verdict.rule)
         return verdict.message, []
+
+    short = incomplete_year(question)          # "nov 202": asked, never guessed
+    if short:
+        reply = year_question(short, data_dates(db))
+        messages.append({"role": "user", "content": question})
+        messages.append({"role": "assistant", "content": reply})
+        _emit(logger, "year_unclear", written=short[0])
+        _emit(logger, "turn", question=question[:200], tools_called=[], n_sources=0,
+              model_calls=0, cost_usd=0.0)
+        return reply, []
 
     if db is not None and messages and messages[0].get("role") == "system":
         dates = data_dates(db)                 # what "last month" means (#5), in code

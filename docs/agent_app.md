@@ -197,6 +197,46 @@ in [`evals.md`](evals.md).
   `count_incidents` and `sensor_trend`. `compare_sensor_windows` names its windows differently,
   and `sensor_trend` already clips a period to the readings it has.
 
+## Words the data can't take as written
+
+Found 10 Nov 2026: asked "how many work orders were completed in nov 202", the app read "202"
+as 2026 and "completed" as closed, and said neither. Both are now handled in code, like the
+severity-scale guard.
+
+**A year written short is asked about, never guessed.** In `ask()`, after the guardrail and
+before any model call, `incomplete_year()` looks for a month (or the word "year") followed by
+three digits that start a year: "nov 202", "November 202", "Nov. 202", "year 202". A day after
+a month is at most two digits and a year four, so "nov 20" and "nov 2025" are left alone. The
+user gets a question back (`year_question()`), with the two latest years the data has that
+month in when the month and the data's end are known:
+
+```
+"nov 202" isn't a full year, so I won't guess it. Which did you mean: November 2025 or
+November 2024? The shop's data runs to 30 Jun 2026.
+```
+
+No model call (`year_unclear` in the log, an `app` row on the page). The question and the reply
+both go into `messages`, so the user's "2025" reaches the model with the question it completes.
+A month with no year at all ("how many in November?") is left to the system prompt, which tells
+the model to ask which year when the data has that month in more than one.
+
+**"Completed" is read as CLOSED, and the answer says so.** The CMMS has no completion date and
+no "completed" status: its statuses are `CLOSED`, `OPEN` and `AWAITING PARTS`, and each work
+order is dated when it was raised. So "completed" (or "finished") can only mean `CLOSED`,
+counted by the date raised. Asking the user every time would add a round trip for the one
+reading there is; instead, when the question says "completed" or "finished",
+`completion_note()` adds a note to every `list_work_orders` result telling the model to say
+both: that "completed" was read as status `CLOSED`, and that the date is when each work order
+was raised, not when it was finished. The note also shows under the answer with the other
+caveats (`completed_read_as_closed` in the log, an `app` row on the page). The system prompt
+says the same. The user's questions are read newest first: a follow-up that names no status
+("November 2025", after the year was asked about; "and in 2024?") keeps the earlier
+"completed", and one that names a status itself ("and open?") ends the look-back.
+
+Two eval cases check both on the real model (tag `clarify`): `wo-completed-short-year` (the
+year asked about with no model call, then "November 2025" counted as CLOSED and said) and
+`wo-completed-read-as-closed` ([evals.md](evals.md)).
+
 ## The demo front end
 
 `scripts/agent_ui.py` is a Streamlit chat page over the same `ask()`; it adds no logic.
@@ -250,6 +290,10 @@ Every line carries a UTC `ts` (ISO 8601, milliseconds):
   loop ran it again for the latest full month (`fallback`, `fallback_arguments`).
 - `period_past_data`: a tool was asked for a period that runs past the data's end; the result
   carries a note that it covers only up to that day.
+- `year_unclear`: the question had a year written short (`written`, e.g. "nov 202"); the user
+  was asked which year, with no model call.
+- `completed_read_as_closed`: the question asked about completed or finished work orders; the
+  work-order result carries the note that they were read as status `CLOSED`.
 - `turn`: one line per question — the question (truncated), every tool called, how
   many sources came back, `model_calls` and the question's `cost_usd`. A refused question has `refused` set, and a PDPA one is logged as
   `[withheld: pdpa]`, never its text (it may hold a name).
@@ -403,6 +447,15 @@ tool message, `period_after_data` logged once beside one `tool_call`, both cited
 among the caveats; a period inside the data passed through untouched; one running past the
 data's end noted (`period_past_data`) with no second query; no change without the data's dates
 (no database, or a down one).
+
+`tests/test_clarify.py` (11 tests, no database, no real LLM call): a year written short found
+in five spellings, and full years, days, ids and plain questions left alone; the question back
+offering the two latest years the data has that month in (November 2025 or 2024 for data
+ending 30 Jun 2026), and a plain question when the month or the data's end isn't known; the
+model never called for a short year, the question and reply both kept, and the user's "2025"
+reaching the model with the question it completes; the completed note for "completed",
+"complete" and "finished", only on work-order tools; carried into a follow-up that names no
+status and ended by one that does; the note reaching the model in the tool result and the page in the notes.
 
 `tests/test_read_log.py` (5 tests, standard library only): the documented example prints
 exactly as shown above; other lines skipped and an unfinished question shown; gcloud output

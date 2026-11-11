@@ -176,6 +176,15 @@ def test_a_question_refused_because_the_name_list_is_missing_shows_in_the_rows()
          "detail": "refused: the staff name list isn't loaded (fail closed)"}]
 
 
+def test_a_short_year_and_completed_read_as_closed_show_in_the_rows():
+    """10 Nov 2026: 'completed in nov 202' was read as 2026 and CLOSED without a word."""
+    rows = ui.trace_rows([{"event": "year_unclear", "written": "nov 202"},
+                          {"event": "completed_read_as_closed", "tool": "list_work_orders"}])
+    assert rows[0]["step"] == "app" and "nov 202" in rows[0]["detail"]
+    assert "not called" in rows[0]["detail"]
+    assert "CLOSED" in rows[1]["detail"]
+
+
 # ----------------------------------------------- the page layout (10 Nov 2026) ---
 
 def test_each_answer_gets_a_tab_only_for_what_it_has_with_counts():

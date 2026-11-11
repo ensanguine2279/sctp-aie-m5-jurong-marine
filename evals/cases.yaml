@@ -36,7 +36,9 @@
 # Tags: killshot (the severity question, five phrasings), severity, sop, sensors, oil,
 # spares, incidents, refusal (the correct answer says it can't / there is none), trap ids,
 # guardrail (refused in code before the model: out-of-scope, injection, pdpa), multiturn
-# (follow-ups that lean on an earlier turn: HARNESS_CHECKLIST.md section 5), dates.
+# (follow-ups that lean on an earlier turn: HARNESS_CHECKLIST.md section 5), dates,
+# clarify (words the data can't take as written: asked about in code, like a year written
+# short, or read the one way the data allows and said, like "completed").
 #
 # today: the date every run treats as today (run_evals.py passes it to the app as
 # AGENT_TODAY; --today overrides it). Frozen so that "last month" is the same month in every
@@ -333,6 +335,68 @@ cases:
           - tool: list_work_orders
             args: {machine: CNC-02, wo_type: preventive}
             equals: {data.earliest.wo_id: 10042, data.earliest.wo_date: "2024-01-25"}
+
+# ------------------------------------------------ words the data can't take as written ---
+# 10 Nov 2026, asked on the page: "how many work orders were completed in nov 202". The app
+# read "202" as 2026 and "completed" as CLOSED, and said neither. Fixed in code
+# (agent_app.incomplete_year, year_question, completion_note; agent_app.md, "Words the data
+# can't take as written"). Tagged clarify, not multiturn or dates: in those, a turn with
+# max_model_calls 0 must be a guardrail refusal (tests/test_multiturn.py), and a year written
+# short is asked about in code without one.
+
+- id: wo-completed-short-year
+  tags: [work-orders, clarify]
+  note: >
+    Turn 1 must be settled in code: the year asked about, offering the two latest years the
+    data has November in, with no model call and no guardrail refusal. Not grounded: the
+    years offered come from where the data ends, read in code, not from a tool result.
+    Turn 2 gives only the year; "completed" carries from turn 1 (completion_note reads back
+    to it), so the count is of CLOSED work orders and the answer must say so and that the
+    dates are when each was raised.
+  turns:
+    - ask: how many work orders were completed in nov 202
+      expect:
+        max_model_calls: 0
+        events_present: [year_unclear]
+        events_absent: [input_refused]
+        answer_matches: ["isn't a full year", "November 2025"]
+        grounded: false
+        sources_min: 0
+    - ask: November 2025
+      expect:
+        tools_ok: [list_work_orders]
+        tool_args:
+          - {tool: list_work_orders, args: {status: closed, date_from: "2025-11-01",
+                                            date_to: "2025-11-30"}}
+        events_present: [completed_read_as_closed]
+        answer_matches: ["closed", "raised|opened|created|logged|reported"]
+        sources_match: ["CMMS work orders"]
+        oracle:
+          - tool: list_work_orders
+            args: {status: closed, date_from: "2025-11-01", date_to: "2025-11-30"}
+            must_appear: [data.count]
+
+- id: wo-completed-read-as-closed
+  tags: [work-orders, clarify]
+  note: >
+    The year is full, so no question: "completed" is read as status CLOSED (the CMMS has no
+    completion date and no 'completed' status), counted by the date each work order was
+    raised, and the answer must say both. The count comes from the oracle.
+  turns:
+    - ask: How many work orders were completed in November 2025?
+      expect:
+        tools_ok: [list_work_orders]
+        tool_args:
+          - {tool: list_work_orders, args: {status: closed, date_from: "2025-11-01",
+                                            date_to: "2025-11-30"}}
+        events_present: [completed_read_as_closed]
+        events_absent: [year_unclear]
+        answer_matches: ["closed", "raised|opened|created|logged|reported"]
+        sources_match: ["CMMS work orders"]
+        oracle:
+          - tool: list_work_orders
+            args: {status: closed, date_from: "2025-11-01", date_to: "2025-11-30"}
+            must_appear: [data.count]
 
 # --------------------------------------------------------------------------- spares ---
 

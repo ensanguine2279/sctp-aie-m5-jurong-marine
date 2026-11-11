@@ -512,6 +512,14 @@ def trace_rows(events: list[dict]) -> list[dict]:
         elif kind == "guard_not_ready":
             rows.append({"step": "guardrail", "seconds": None,
                          "detail": "refused: the staff name list isn't loaded (fail closed)"})
+        elif kind == "year_unclear":
+            rows.append({"step": "app", "seconds": None,
+                         "detail": f"year written short ({e.get('written')}): asked which "
+                                   f"year; the model was not called"})
+        elif kind == "completed_read_as_closed":
+            rows.append({"step": "app", "seconds": None,
+                         "detail": "'completed' read as status CLOSED (the CMMS has no "
+                                   "completion date); the answer must say so"})
         elif kind == "output_blocked":
             rows.append({"step": "guardrail", "seconds": None,
                          "detail": f"answer replaced before it was shown ({e.get('rule')}: "

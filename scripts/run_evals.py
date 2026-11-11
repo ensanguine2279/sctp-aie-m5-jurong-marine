@@ -13,7 +13,8 @@ each turn checks, from what actually happened (not from what the model says happ
     grounding  nothing in the answer that no tool returned: every number, date and
                id-like token (CNC-02, BRG-6310, SOP-CONFINED-03) must appear in a tool result
                of this conversation, in the dates the app gave the model (where the data
-               ends, what "last month" is: agent_app.dates_note), or in the user's own words
+               ends, what "last month" is: agent_app.dates_note), in the period a successful
+               tool call ran for (its date arguments), or in the user's own words
     events     log events that must or must not happen (e.g. scale_guess_blocked)
     calls      how many model calls the turn may make (max_model_calls; 0 = answered in
                code, e.g. a guardrail refusal), counted from the chat_call events
@@ -253,7 +254,8 @@ def _decimals(tok: str) -> int:
 class Evidence:
     """Everything a grounded answer may draw on: the tool results of this conversation,
     the source labels, the dates the app gave the model in its system prompt (where the
-    data ends, what "last month" is), and the user's own messages."""
+    data ends, what "last month" is), the period each successful tool call ran for, and the
+    user's own messages."""
 
     def __init__(self, texts: list[str]):
         self.text = "\n".join(t for t in texts if t)
@@ -566,14 +568,44 @@ def _as_list(x):
     return x if isinstance(x, list) else [] if x is None else [x]
 
 
+def call_periods(messages: list[dict]) -> list[str]:
+    """The period each SUCCESSFUL tool call ran for: its date arguments (date_from, date_to,
+    ...), as text. Found on the eval run of 10 Nov 2026 (wo-completed-read-as-closed): the
+    answer said the work orders were 'raised between 1 November 2025 and 30 November 2025',
+    which is exactly the period the tool ran for, and failed grounding because no work order
+    fell on either day. Only date arguments, and only of a call that returned ok: a refused
+    call's period isn't evidence, and no other argument is, so the model can't ground a
+    number by putting it in its own tool call."""
+    ok_ids = set()
+    for m in messages:
+        if m.get("role") == "tool":
+            body = _parse(m.get("content"))
+            if isinstance(body, dict) and body.get("ok") is True:
+                ok_ids.add(m.get("tool_call_id"))
+    out = []
+    for m in messages:
+        if m.get("role") != "assistant":
+            continue
+        for c in m.get("tool_calls") or []:
+            if c.get("id") not in ok_ids:
+                continue
+            args = _parse((c.get("function") or {}).get("arguments"))
+            if isinstance(args, dict):
+                out += [str(v) for k, v in args.items()
+                        if k.startswith("date") and isinstance(v, str)]
+    return out
+
+
 def evidence_for(messages: list[dict]) -> Evidence:
     """The tool results and the user's words, plus the system prompt: its only numbers are
     the dates agent_app.dates_note() gives the model (today, what "last month" is, where the
-    data ends), so "no data for October 2026; it runs to 30 Jun 2026" is grounded."""
+    data ends), so "no data for October 2026; it runs to 30 Jun 2026" is grounded. Plus the
+    period each successful tool call ran for (call_periods)."""
     texts = []
     for m in messages:
         if m.get("role") in ("tool", "user", "system"):
             texts.append(str(m.get("content") or ""))
+    texts.append(" ".join(call_periods(messages)))
     return Evidence(texts)
 
 

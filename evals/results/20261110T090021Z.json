@@ -1,0 +1,1344 @@
+{
+  "run": "20261110T090021Z",
+  "model": "gpt-4o-mini",
+  "cases_file": "/home/hakngrow/Projects/sctp/module5/jurong-marine/evals/cases.yaml",
+  "repeat": 1,
+  "summary": "Cases: 2  passed 2  failed 0  errors 0  skipped 0\nModel calls: 4 (gpt-4o-mini)  tokens: 20668 in + 216 out  time: 49 s\nSpend: $0.0025 as charged by the proxy (x-litellm-response-cost); $0.0032 at list price",
+  "results": [
+    {
+      "id": "wo-completed-short-year",
+      "status": "PASS",
+      "turns": [
+        {
+          "question": "how many work orders were completed in nov 202",
+          "answer": "\"nov 202\" isn't a full year, so I won't guess it. Which did you mean: November 2025 or November 2024? The shop's data runs to 30 Jun 2026.",
+          "sources": [],
+          "notes": [],
+          "tools": [],
+          "events": [
+            {
+              "ts": "2026-11-10T09:00:21.538+00:00",
+              "event": "year_unclear",
+              "written": "nov 202"
+            },
+            {
+              "ts": "2026-11-10T09:00:21.538+00:00",
+              "event": "turn",
+              "question": "how many work orders were completed in nov 202",
+              "tools_called": [],
+              "n_sources": 0,
+              "model_calls": 0,
+              "cost_usd": 0.0
+            }
+          ],
+          "seconds": 0.3,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "proxy_cost": 0.0,
+          "model_calls": 0,
+          "oracle": {},
+          "failures": [],
+          "warnings": []
+        },
+        {
+          "question": "November 2025",
+          "answer": "In November 2025, there were 43 work orders that were closed. \n\nPlease note:\n- The CMMS does not have a \"completed\" status; I counted CLOSED work orders as completed.\n- The date refers to when each work order was raised, not when it was finished.",
+          "sources": [
+            "CMMS work orders: jurongmarine_cmms.sql, lines 1292, 1293, 1294, 1295, 1296, 1297, 1298, 1299, 1300, 1301, 1302, 1303, 1304, 1305, 1306 and 28 more (cmms_work_orders_audit), SHA-256 cbedcaebeb37…"
+          ],
+          "notes": [
+            "Same machine, day and type more than once: possibly double-entered (trap list C9). Counts and costs include them.",
+            "Work orders record no parts used (trap list C11).",
+            "The user asked about \"completed\" work orders. The CMMS has no completion date and no 'completed' status: its statuses are CLOSED, OPEN and AWAITING PARTS, and each work order is dated when it was raised. Count CLOSED work orders as completed, and say both in the answer: that 'completed' was read as status CLOSED, and that the date is when each work order was raised, not when it was finished."
+          ],
+          "tools": [
+            {
+              "name": "list_work_orders",
+              "arguments": {
+                "date_from": "2025-11-01",
+                "date_to": "2025-11-30",
+                "status": "closed"
+              },
+              "sent": {
+                "date_from": "2025-11-01",
+                "date_to": "2025-11-30",
+                "status": "closed"
+              },
+              "ok": true,
+              "error_code": null,
+              "result": {
+                "tool": "list_work_orders",
+                "ok": true,
+                "data": {
+                  "machine_id": null,
+                  "count": 43,
+                  "by_type": {
+                    "corrective": 19,
+                    "preventive": 16,
+                    "breakdown": 8
+                  },
+                  "by_status": {
+                    "closed": 43
+                  },
+                  "hours_total": 229.5,
+                  "cost_closed_sgd": 44101.96,
+                  "cost_not_closed_sgd": 0.0,
+                  "possible_double_entries": [
+                    [
+                      11220,
+                      11223
+                    ],
+                    [
+                      11206,
+                      11207
+                    ]
+                  ],
+                  "work_orders": [
+                    {
+                      "wo_id": 11248,
+                      "wo_date": "2025-11-29",
+                      "machine_id": "CNC-02",
+                      "wo_type": "corrective",
+                      "description": "weld porosity complaints - recalibrate",
+                      "hours": 5.8,
+                      "cost_sgd": 575.4,
+                      "status": "closed",
+                      "dump_line": 1334
+                    },
+                    {
+                      "wo_id": 11247,
+                      "wo_date": "2025-11-29",
+                      "machine_id": "PMP-T01",
+                      "wo_type": "corrective",
+                      "description": "weld porosity complaints - recalibrate",
+                      "hours": 4.7,
+                      "cost_sgd": 2101.6,
+                      "status": "closed",
+                      "dump_line": 1333
+                    },
+                    {
+                      "wo_id": 11246,
+                      "wo_date": "2025-11-29",
+                      "machine_id": "BLAST-01",
+                      "wo_type": "breakdown",
+                      "description": "weld porosity complaints - recalibrate",
+                      "hours": 2.1,
+                      "cost_sgd": 316.79,
+                      "status": "closed",
+                      "dump_line": 1332
+                    },
+                    {
+                      "wo_id": 11245,
+                      "wo_date": "2025-11-28",
+                      "machine_id": "CNC-02",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 8.7,
+                      "cost_sgd": 374.75,
+                      "status": "closed",
+                      "dump_line": 1331
+                    },
+                    {
+                      "wo_id": 11244,
+                      "wo_date": "2025-11-28",
+                      "machine_id": "CNC-01",
+                      "wo_type": "breakdown",
+                      "description": "VFD fault code E-07",
+                      "hours": 7.3,
+                      "cost_sgd": 1044.23,
+                      "status": "closed",
+                      "dump_line": 1330
+                    },
+                    {
+                      "wo_id": 11243,
+                      "wo_date": "2025-11-27",
+                      "machine_id": "CRN-01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 8.8,
+                      "cost_sgd": 1654.09,
+                      "status": "closed",
+                      "dump_line": 1329
+                    },
+                    {
+                      "wo_id": 11242,
+                      "wo_date": "2025-11-27",
+                      "machine_id": "CRN-02",
+                      "wo_type": "breakdown",
+                      "description": "compressor overheat trip",
+                      "hours": 3.8,
+                      "cost_sgd": 2495.97,
+                      "status": "closed",
+                      "dump_line": 1328
+                    },
+                    {
+                      "wo_id": 11241,
+                      "wo_date": "2025-11-27",
+                      "machine_id": "CNC-02",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 11.1,
+                      "cost_sgd": 1219.81,
+                      "status": "closed",
+                      "dump_line": 1327
+                    },
+                    {
+                      "wo_id": 11240,
+                      "wo_date": "2025-11-26",
+                      "machine_id": "LTH-01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 5.3,
+                      "cost_sgd": 877.54,
+                      "status": "closed",
+                      "dump_line": 1326
+                    },
+                    {
+                      "wo_id": 11239,
+                      "wo_date": "2025-11-22",
+                      "machine_id": "WELD-02",
+                      "wo_type": "corrective",
+                      "description": "tool changer jam",
+                      "hours": 1.6,
+                      "cost_sgd": 1686.07,
+                      "status": "closed",
+                      "dump_line": 1325
+                    },
+                    {
+                      "wo_id": 11238,
+                      "wo_date": "2025-11-22",
+                      "machine_id": "PMP-T01",
+                      "wo_type": "corrective",
+                      "description": "coolant leak",
+                      "hours": 0.6,
+                      "cost_sgd": 284.39,
+                      "status": "closed",
+                      "dump_line": 1324
+                    },
+                    {
+                      "wo_id": 11237,
+                      "wo_date": "2025-11-22",
+                      "machine_id": "BLAST-01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 5.4,
+                      "cost_sgd": 4057.24,
+                      "status": "closed",
+                      "dump_line": 1323
+                    },
+                    {
+                      "wo_id": 11236,
+                      "wo_date": "2025-11-22",
+                      "machine_id": "CMP-01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 17.6,
+                      "cost_sgd": 1437.51,
+                      "status": "closed",
+                      "dump_line": 1322
+                    },
+                    {
+                      "wo_id": 11235,
+                      "wo_date": "2025-11-21",
+                      "machine_id": "WELD-01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 2.4,
+                      "cost_sgd": 792.05,
+                      "status": "closed",
+                      "dump_line": 1321
+                    },
+                    {
+                      "wo_id": 11234,
+                      "wo_date": "2025-11-21",
+                      "machine_id": "PMP-T01",
+                      "wo_type": "corrective",
+                      "description": "bearing noise - gearbox",
+                      "hours": 9.6,
+                      "cost_sgd": 869.21,
+                      "status": "closed",
+                      "dump_line": 1320
+                    },
+                    {
+                      "wo_id": 11233,
+                      "wo_date": "2025-11-21",
+                      "machine_id": "CRN-01",
+                      "wo_type": "breakdown",
+                      "description": "compressor overheat trip",
+                      "hours": 2.1,
+                      "cost_sgd": 463.49,
+                      "status": "closed",
+                      "dump_line": 1319
+                    },
+                    {
+                      "wo_id": 11232,
+                      "wo_date": "2025-11-20",
+                      "machine_id": "CNC-02",
+                      "wo_type": "corrective",
+                      "description": "spindle vibration high",
+                      "hours": 5.9,
+                      "cost_sgd": 591.22,
+                      "status": "closed",
+                      "dump_line": 1318
+                    },
+                    {
+                      "wo_id": 11231,
+                      "wo_date": "2025-11-19",
+                      "machine_id": "CNC-02",
+                      "wo_type": "corrective",
+                      "description": "crane limit switch fault",
+                      "hours": 6.9,
+                      "cost_sgd": 471.2,
+                      "status": "closed",
+                      "dump_line": 1317
+                    },
+                    {
+                      "wo_id": 11230,
+                      "wo_date": "2025-11-16",
+                      "machine_id": "MILL-01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 5.8,
+                      "cost_sgd": 337.97,
+                      "status": "closed",
+                      "dump_line": 1316
+                    },
+                    {
+                      "wo_id": 11229,
+                      "wo_date": "2025-11-16",
+                      "machine_id": "CMP-01",
+                      "wo_type": "corrective",
+                      "description": "hydraulic pressure drop",
+                      "hours": 5.4,
+                      "cost_sgd": 705.95,
+                      "status": "closed",
+                      "dump_line": 1315
+                    },
+                    {
+                      "wo_id": 11228,
+                      "wo_date": "2025-11-15",
+                      "machine_id": "CNC-01",
+                      "wo_type": "corrective",
+                      "description": "emergency stop replaced",
+                      "hours": 1.2,
+                      "cost_sgd": 67.09,
+                      "status": "closed",
+                      "dump_line": 1314
+                    },
+                    {
+                      "wo_id": 11227,
+                      "wo_date": "2025-11-15",
+                      "machine_id": "CNC-03",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 4.3,
+                      "cost_sgd": 195.87,
+                      "status": "closed",
+                      "dump_line": 1313
+                    },
+                    {
+                      "wo_id": 11226,
+                      "wo_date": "2025-11-14",
+                      "machine_id": "MILL-01",
+                      "wo_type": "corrective",
+                      "description": "hydraulic pressure drop",
+                      "hours": 3.4,
+                      "cost_sgd": 399.27,
+                      "status": "closed",
+                      "dump_line": 1312
+                    },
+                    {
+                      "wo_id": 11225,
+                      "wo_date": "2025-11-14",
+                      "machine_id": "CNC-01",
+                      "wo_type": "corrective",
+                      "description": "emergency stop replaced",
+                      "hours": 6.6,
+                      "cost_sgd": 1900.2,
+                      "status": "closed",
+                      "dump_line": 1311
+                    },
+                    {
+                      "wo_id": 11224,
+                      "wo_date": "2025-11-14",
+                      "machine_id": "CNC-01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 1.1,
+                      "cost_sgd": 1113.52,
+                      "status": "closed",
+                      "dump_line": 1310
+                    },
+                    {
+                      "wo_id": 11223,
+                      "wo_date": "2025-11-12",
+                      "machine_id": "CRN-01",
+                      "wo_type": "corrective",
+                      "description": "VFD fault code E-07",
+                      "hours": 5.9,
+                      "cost_sgd": 490.01,
+                      "status": "closed",
+                      "dump_line": 1309
+                    },
+                    {
+                      "wo_id": 11222,
+                      "wo_date": "2025-11-12",
+                      "machine_id": "CNC-01",
+                      "wo_type": "corrective",
+                      "description": "chuck runout out of tolerance",
+                      "hours": 2.8,
+                      "cost_sgd": 220.01,
+                      "status": "closed",
+                      "dump_line": 1308
+                    },
+                    {
+                      "wo_id": 11221,
+                      "wo_date": "2025-11-12",
+                      "machine_id": "LTH-01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 3.9,
+                      "cost_sgd": 335.15,
+                      "status": "closed",
+                      "dump_line": 1307
+                    },
+                    {
+                      "wo_id": 11220,
+                      "wo_date": "2025-11-12",
+                      "machine_id": "CRN-01",
+                      "wo_type": "corrective",
+                      "description": "emergency stop replaced",
+                      "hours": 8.4,
+                      "cost_sgd": 883.27,
+                      "status": "closed",
+                      "dump_line": 1306
+                    },
+                    {
+                      "wo_id": 11219,
+                      "wo_date": "2025-11-10",
+                      "machine_id": "CMP-01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 1.7,
+                      "cost_sgd": 1706.62,
+                      "status": "closed",
+                      "dump_line": 1305
+                    },
+                    {
+                      "wo_id": 11218,
+                      "wo_date": "2025-11-08",
+                      "machine_id": "MILL-01",
+                      "wo_type": "breakdown",
+                      "description": "VFD fault code E-07",
+                      "hours": 6.4,
+                      "cost_sgd": 1117.1,
+                      "status": "closed",
+                      "dump_line": 1304
+                    },
+                    {
+                      "wo_id": 11217,
+                      "wo_date": "2025-11-08",
+                      "machine_id": "CMP-01",
+                      "wo_type": "corrective",
+                      "description": "emergency stop replaced",
+                      "hours": 7.2,
+                      "cost_sgd": 2997.03,
+                      "status": "closed",
+                      "dump_line": 1303
+                    },
+                    {
+                      "wo_id": 11216,
+                      "wo_date": "2025-11-08",
+                      "machine_id": "CNC-03",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 2.1,
+                      "cost_sgd": 1183.36,
+                      "status": "closed",
+                      "dump_line": 1302
+                    },
+                    {
+                      "wo_id": 11215,
+                      "wo_date": "2025-11-07",
+                      "machine_id": "WELD-02",
+                      "wo_type": "corrective",
+                      "description": "crane limit switch fault",
+                      "hours": 9.6,
+                      "cost_sgd": 223.91,
+                      "status": "closed",
+                      "dump_line": 1301
+                    },
+                    {
+                      "wo_id": 11214,
+                      "wo_date": "2025-11-06",
+                      "machine_id": "LTH-01",
+                      "wo_type": "corrective",
+                      "description": "way cover damaged",
+                      "hours": 2.6,
+                      "cost_sgd": 1376.91,
+                      "status": "closed",
+                      "dump_line": 1300
+                    },
+                    {
+                      "wo_id": 11213,
+                      "wo_date": "2025-11-06",
+                      "machine_id": "CRN-02",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 1.1,
+                      "cost_sgd": 1140.03,
+                      "status": "closed",
+                      "dump_line": 1299
+                    },
+                    {
+                      "wo_id": 11212,
+                      "wo_date": "2025-11-06",
+                      "machine_id": "CRN-01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 4.2,
+                      "cost_sgd": 1160.13,
+                      "status": "closed",
+                      "dump_line": 1298
+                    },
+                    {
+                      "wo_id": 11211,
+                      "wo_date": "2025-11-06",
+                      "machine_id": "CMP-01",
+                      "wo_type": "corrective",
+                      "description": "crane limit switch fault",
+                      "hours": 9.3,
+                      "cost_sgd": 310.89,
+                      "status": "closed",
+                      "dump_line": 1297
+                    },
+                    {
+                      "wo_id": 11210,
+                      "wo_date": "2025-11-04",
+                      "machine_id": "CNC-02",
+                      "wo_type": "breakdown",
+                      "description": "spindle vibration high",
+                      "hours": 4.9,
+                      "cost_sgd": 150.68,
+                      "status": "closed",
+                      "dump_line": 1296
+                    },
+                    {
+                      "wo_id": 11209,
+                      "wo_date": "2025-11-04",
+                      "machine_id": "CNC-02",
+                      "wo_type": "corrective",
+                      "description": "bearing noise - gearbox",
+                      "hours": 2.4,
+                      "cost_sgd": 1849.07,
+                      "status": "closed",
+                      "dump_line": 1295
+                    },
+                    {
+                      "wo_id": 11208,
+                      "wo_date": "2025-11-03",
+                      "machine_id": "PMP-T01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 6.5,
+                      "cost_sgd": 1079.33,
+                      "status": "closed",
+                      "dump_line": 1294
+                    },
+                    {
+                      "wo_id": 11207,
+                      "wo_date": "2025-11-03",
+                      "machine_id": "CRN-02",
+                      "wo_type": "breakdown",
+                      "description": "tool changer jam",
+                      "hours": 10.0,
+                      "cost_sgd": 1308.82,
+                      "status": "closed",
+                      "dump_line": 1293
+                    },
+                    {
+                      "wo_id": 11206,
+                      "wo_date": "2025-11-03",
+                      "machine_id": "CRN-02",
+                      "wo_type": "breakdown",
+                      "description": "bearing noise - gearbox",
+                      "hours": 3.0,
+                      "cost_sgd": 537.21,
+                      "status": "closed",
+                      "dump_line": 1292
+                    }
+                  ],
+                  "earliest": {
+                    "wo_id": 11206,
+                    "wo_date": "2025-11-03",
+                    "machine_id": "CRN-02",
+                    "wo_type": "breakdown",
+                    "description": "bearing noise - gearbox",
+                    "hours": 3.0,
+                    "cost_sgd": 537.21,
+                    "status": "closed",
+                    "dump_line": 1292
+                  },
+                  "latest": {
+                    "wo_id": 11248,
+                    "wo_date": "2025-11-29",
+                    "machine_id": "CNC-02",
+                    "wo_type": "corrective",
+                    "description": "weld porosity complaints - recalibrate",
+                    "hours": 5.8,
+                    "cost_sgd": 575.4,
+                    "status": "closed",
+                    "dump_line": 1334
+                  }
+                },
+                "sources": [
+                  {
+                    "kind": "file",
+                    "object": "cmms_work_orders_audit",
+                    "file": "jurongmarine_cmms.sql",
+                    "locator": "lines 1292, 1293, 1294, 1295, 1296, 1297, 1298, 1299, 1300, 1301, 1302, 1303, 1304, 1305, 1306 and 28 more",
+                    "sha256": "cbedcaebeb379109dd968ea79f56218d961e71a8dbe8b177bdbdda6f60343b79",
+                    "what": "CMMS work orders",
+                    "label": "CMMS work orders: jurongmarine_cmms.sql, lines 1292, 1293, 1294, 1295, 1296, 1297, 1298, 1299, 1300, 1301, 1302, 1303, 1304, 1305, 1306 and 28 more (cmms_work_orders_audit), SHA-256 cbedcaebeb37…"
+                  }
+                ],
+                "notes": [
+                  "Same machine, day and type more than once: possibly double-entered (trap list C9). Counts and costs include them.",
+                  "Work orders record no parts used (trap list C11).",
+                  "The user asked about \"completed\" work orders. The CMMS has no completion date and no 'completed' status: its statuses are CLOSED, OPEN and AWAITING PARTS, and each work order is dated when it was raised. Count CLOSED work orders as completed, and say both in the answer: that 'completed' was read as status CLOSED, and that the date is when each work order was raised, not when it was finished."
+                ],
+                "error": null,
+                "ms": 54
+              }
+            }
+          ],
+          "events": [
+            {
+              "ts": "2026-11-10T09:00:59.053+00:00",
+              "event": "chat_call",
+              "round": 1,
+              "model": "gpt-4o-mini",
+              "prompt_tokens": 3521,
+              "completion_tokens": 35,
+              "tool_calls": [
+                "list_work_orders"
+              ],
+              "cost_usd": 0.00054915,
+              "ms": 35735.1
+            },
+            {
+              "ts": "2026-11-10T09:00:59.108+00:00",
+              "event": "tool_call",
+              "round": 1,
+              "tool": "list_work_orders",
+              "arguments": "{\"date_from\":\"2025-11-01\",\"date_to\":\"2025-11-30\",\"status\":\"closed\"}",
+              "ok": true,
+              "error_code": null,
+              "n_sources": 1,
+              "ms": 54.6
+            },
+            {
+              "ts": "2026-11-10T09:00:59.109+00:00",
+              "event": "completed_read_as_closed",
+              "round": 1,
+              "tool": "list_work_orders"
+            },
+            {
+              "ts": "2026-11-10T09:01:06.694+00:00",
+              "event": "chat_call",
+              "round": 2,
+              "model": "gpt-4o-mini",
+              "prompt_tokens": 6867,
+              "completion_tokens": 60,
+              "tool_calls": [],
+              "cost_usd": 0.00080685,
+              "ms": 7585.2
+            },
+            {
+              "ts": "2026-11-10T09:01:06.695+00:00",
+              "event": "turn",
+              "question": "November 2025",
+              "tools_called": [
+                "list_work_orders"
+              ],
+              "n_sources": 1,
+              "model_calls": 2,
+              "cost_usd": 0.001356
+            }
+          ],
+          "seconds": 43.4,
+          "prompt_tokens": 10388,
+          "completion_tokens": 95,
+          "proxy_cost": 0.001356,
+          "model_calls": 2,
+          "oracle": {
+            "list_work_orders.data.count": [
+              43
+            ]
+          },
+          "failures": [],
+          "warnings": []
+        }
+      ],
+      "failures": [],
+      "warnings": [],
+      "seconds": 43.7,
+      "prompt_tokens": 10388,
+      "completion_tokens": 95,
+      "proxy_cost": 0.001356,
+      "model_calls": 2
+    },
+    {
+      "id": "wo-completed-read-as-closed",
+      "status": "PASS",
+      "turns": [
+        {
+          "question": "How many work orders were completed in November 2025?",
+          "answer": "In November 2025, there were 43 work orders that were marked as CLOSED. This count is interpreted as \"completed\" since the CMMS does not have a specific completion status. \n\nPlease note:\n- The count includes possible double entries for the same machine, day, and type.\n- Work orders do not record parts used.\n- The date reflects when each work order was raised, not when it was finished.",
+          "sources": [
+            "CMMS work orders: jurongmarine_cmms.sql, lines 1292, 1293, 1294, 1295, 1296, 1297, 1298, 1299, 1300, 1301, 1302, 1303, 1304, 1305, 1306 and 28 more (cmms_work_orders_audit), SHA-256 cbedcaebeb37…"
+          ],
+          "notes": [
+            "Same machine, day and type more than once: possibly double-entered (trap list C9). Counts and costs include them.",
+            "Work orders record no parts used (trap list C11).",
+            "The user asked about \"completed\" work orders. The CMMS has no completion date and no 'completed' status: its statuses are CLOSED, OPEN and AWAITING PARTS, and each work order is dated when it was raised. Count CLOSED work orders as completed, and say both in the answer: that 'completed' was read as status CLOSED, and that the date is when each work order was raised, not when it was finished."
+          ],
+          "tools": [
+            {
+              "name": "list_work_orders",
+              "arguments": {
+                "date_from": "2025-11-01",
+                "date_to": "2025-11-30",
+                "status": "closed"
+              },
+              "sent": {
+                "date_from": "2025-11-01",
+                "date_to": "2025-11-30",
+                "status": "closed"
+              },
+              "ok": true,
+              "error_code": null,
+              "result": {
+                "tool": "list_work_orders",
+                "ok": true,
+                "data": {
+                  "machine_id": null,
+                  "count": 43,
+                  "by_type": {
+                    "corrective": 19,
+                    "preventive": 16,
+                    "breakdown": 8
+                  },
+                  "by_status": {
+                    "closed": 43
+                  },
+                  "hours_total": 229.5,
+                  "cost_closed_sgd": 44101.96,
+                  "cost_not_closed_sgd": 0.0,
+                  "possible_double_entries": [
+                    [
+                      11220,
+                      11223
+                    ],
+                    [
+                      11206,
+                      11207
+                    ]
+                  ],
+                  "work_orders": [
+                    {
+                      "wo_id": 11248,
+                      "wo_date": "2025-11-29",
+                      "machine_id": "CNC-02",
+                      "wo_type": "corrective",
+                      "description": "weld porosity complaints - recalibrate",
+                      "hours": 5.8,
+                      "cost_sgd": 575.4,
+                      "status": "closed",
+                      "dump_line": 1334
+                    },
+                    {
+                      "wo_id": 11247,
+                      "wo_date": "2025-11-29",
+                      "machine_id": "PMP-T01",
+                      "wo_type": "corrective",
+                      "description": "weld porosity complaints - recalibrate",
+                      "hours": 4.7,
+                      "cost_sgd": 2101.6,
+                      "status": "closed",
+                      "dump_line": 1333
+                    },
+                    {
+                      "wo_id": 11246,
+                      "wo_date": "2025-11-29",
+                      "machine_id": "BLAST-01",
+                      "wo_type": "breakdown",
+                      "description": "weld porosity complaints - recalibrate",
+                      "hours": 2.1,
+                      "cost_sgd": 316.79,
+                      "status": "closed",
+                      "dump_line": 1332
+                    },
+                    {
+                      "wo_id": 11245,
+                      "wo_date": "2025-11-28",
+                      "machine_id": "CNC-02",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 8.7,
+                      "cost_sgd": 374.75,
+                      "status": "closed",
+                      "dump_line": 1331
+                    },
+                    {
+                      "wo_id": 11244,
+                      "wo_date": "2025-11-28",
+                      "machine_id": "CNC-01",
+                      "wo_type": "breakdown",
+                      "description": "VFD fault code E-07",
+                      "hours": 7.3,
+                      "cost_sgd": 1044.23,
+                      "status": "closed",
+                      "dump_line": 1330
+                    },
+                    {
+                      "wo_id": 11243,
+                      "wo_date": "2025-11-27",
+                      "machine_id": "CRN-01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 8.8,
+                      "cost_sgd": 1654.09,
+                      "status": "closed",
+                      "dump_line": 1329
+                    },
+                    {
+                      "wo_id": 11242,
+                      "wo_date": "2025-11-27",
+                      "machine_id": "CRN-02",
+                      "wo_type": "breakdown",
+                      "description": "compressor overheat trip",
+                      "hours": 3.8,
+                      "cost_sgd": 2495.97,
+                      "status": "closed",
+                      "dump_line": 1328
+                    },
+                    {
+                      "wo_id": 11241,
+                      "wo_date": "2025-11-27",
+                      "machine_id": "CNC-02",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 11.1,
+                      "cost_sgd": 1219.81,
+                      "status": "closed",
+                      "dump_line": 1327
+                    },
+                    {
+                      "wo_id": 11240,
+                      "wo_date": "2025-11-26",
+                      "machine_id": "LTH-01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 5.3,
+                      "cost_sgd": 877.54,
+                      "status": "closed",
+                      "dump_line": 1326
+                    },
+                    {
+                      "wo_id": 11239,
+                      "wo_date": "2025-11-22",
+                      "machine_id": "WELD-02",
+                      "wo_type": "corrective",
+                      "description": "tool changer jam",
+                      "hours": 1.6,
+                      "cost_sgd": 1686.07,
+                      "status": "closed",
+                      "dump_line": 1325
+                    },
+                    {
+                      "wo_id": 11238,
+                      "wo_date": "2025-11-22",
+                      "machine_id": "PMP-T01",
+                      "wo_type": "corrective",
+                      "description": "coolant leak",
+                      "hours": 0.6,
+                      "cost_sgd": 284.39,
+                      "status": "closed",
+                      "dump_line": 1324
+                    },
+                    {
+                      "wo_id": 11237,
+                      "wo_date": "2025-11-22",
+                      "machine_id": "BLAST-01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 5.4,
+                      "cost_sgd": 4057.24,
+                      "status": "closed",
+                      "dump_line": 1323
+                    },
+                    {
+                      "wo_id": 11236,
+                      "wo_date": "2025-11-22",
+                      "machine_id": "CMP-01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 17.6,
+                      "cost_sgd": 1437.51,
+                      "status": "closed",
+                      "dump_line": 1322
+                    },
+                    {
+                      "wo_id": 11235,
+                      "wo_date": "2025-11-21",
+                      "machine_id": "WELD-01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 2.4,
+                      "cost_sgd": 792.05,
+                      "status": "closed",
+                      "dump_line": 1321
+                    },
+                    {
+                      "wo_id": 11234,
+                      "wo_date": "2025-11-21",
+                      "machine_id": "PMP-T01",
+                      "wo_type": "corrective",
+                      "description": "bearing noise - gearbox",
+                      "hours": 9.6,
+                      "cost_sgd": 869.21,
+                      "status": "closed",
+                      "dump_line": 1320
+                    },
+                    {
+                      "wo_id": 11233,
+                      "wo_date": "2025-11-21",
+                      "machine_id": "CRN-01",
+                      "wo_type": "breakdown",
+                      "description": "compressor overheat trip",
+                      "hours": 2.1,
+                      "cost_sgd": 463.49,
+                      "status": "closed",
+                      "dump_line": 1319
+                    },
+                    {
+                      "wo_id": 11232,
+                      "wo_date": "2025-11-20",
+                      "machine_id": "CNC-02",
+                      "wo_type": "corrective",
+                      "description": "spindle vibration high",
+                      "hours": 5.9,
+                      "cost_sgd": 591.22,
+                      "status": "closed",
+                      "dump_line": 1318
+                    },
+                    {
+                      "wo_id": 11231,
+                      "wo_date": "2025-11-19",
+                      "machine_id": "CNC-02",
+                      "wo_type": "corrective",
+                      "description": "crane limit switch fault",
+                      "hours": 6.9,
+                      "cost_sgd": 471.2,
+                      "status": "closed",
+                      "dump_line": 1317
+                    },
+                    {
+                      "wo_id": 11230,
+                      "wo_date": "2025-11-16",
+                      "machine_id": "MILL-01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 5.8,
+                      "cost_sgd": 337.97,
+                      "status": "closed",
+                      "dump_line": 1316
+                    },
+                    {
+                      "wo_id": 11229,
+                      "wo_date": "2025-11-16",
+                      "machine_id": "CMP-01",
+                      "wo_type": "corrective",
+                      "description": "hydraulic pressure drop",
+                      "hours": 5.4,
+                      "cost_sgd": 705.95,
+                      "status": "closed",
+                      "dump_line": 1315
+                    },
+                    {
+                      "wo_id": 11228,
+                      "wo_date": "2025-11-15",
+                      "machine_id": "CNC-01",
+                      "wo_type": "corrective",
+                      "description": "emergency stop replaced",
+                      "hours": 1.2,
+                      "cost_sgd": 67.09,
+                      "status": "closed",
+                      "dump_line": 1314
+                    },
+                    {
+                      "wo_id": 11227,
+                      "wo_date": "2025-11-15",
+                      "machine_id": "CNC-03",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 4.3,
+                      "cost_sgd": 195.87,
+                      "status": "closed",
+                      "dump_line": 1313
+                    },
+                    {
+                      "wo_id": 11226,
+                      "wo_date": "2025-11-14",
+                      "machine_id": "MILL-01",
+                      "wo_type": "corrective",
+                      "description": "hydraulic pressure drop",
+                      "hours": 3.4,
+                      "cost_sgd": 399.27,
+                      "status": "closed",
+                      "dump_line": 1312
+                    },
+                    {
+                      "wo_id": 11225,
+                      "wo_date": "2025-11-14",
+                      "machine_id": "CNC-01",
+                      "wo_type": "corrective",
+                      "description": "emergency stop replaced",
+                      "hours": 6.6,
+                      "cost_sgd": 1900.2,
+                      "status": "closed",
+                      "dump_line": 1311
+                    },
+                    {
+                      "wo_id": 11224,
+                      "wo_date": "2025-11-14",
+                      "machine_id": "CNC-01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 1.1,
+                      "cost_sgd": 1113.52,
+                      "status": "closed",
+                      "dump_line": 1310
+                    },
+                    {
+                      "wo_id": 11223,
+                      "wo_date": "2025-11-12",
+                      "machine_id": "CRN-01",
+                      "wo_type": "corrective",
+                      "description": "VFD fault code E-07",
+                      "hours": 5.9,
+                      "cost_sgd": 490.01,
+                      "status": "closed",
+                      "dump_line": 1309
+                    },
+                    {
+                      "wo_id": 11222,
+                      "wo_date": "2025-11-12",
+                      "machine_id": "CNC-01",
+                      "wo_type": "corrective",
+                      "description": "chuck runout out of tolerance",
+                      "hours": 2.8,
+                      "cost_sgd": 220.01,
+                      "status": "closed",
+                      "dump_line": 1308
+                    },
+                    {
+                      "wo_id": 11221,
+                      "wo_date": "2025-11-12",
+                      "machine_id": "LTH-01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 3.9,
+                      "cost_sgd": 335.15,
+                      "status": "closed",
+                      "dump_line": 1307
+                    },
+                    {
+                      "wo_id": 11220,
+                      "wo_date": "2025-11-12",
+                      "machine_id": "CRN-01",
+                      "wo_type": "corrective",
+                      "description": "emergency stop replaced",
+                      "hours": 8.4,
+                      "cost_sgd": 883.27,
+                      "status": "closed",
+                      "dump_line": 1306
+                    },
+                    {
+                      "wo_id": 11219,
+                      "wo_date": "2025-11-10",
+                      "machine_id": "CMP-01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 1.7,
+                      "cost_sgd": 1706.62,
+                      "status": "closed",
+                      "dump_line": 1305
+                    },
+                    {
+                      "wo_id": 11218,
+                      "wo_date": "2025-11-08",
+                      "machine_id": "MILL-01",
+                      "wo_type": "breakdown",
+                      "description": "VFD fault code E-07",
+                      "hours": 6.4,
+                      "cost_sgd": 1117.1,
+                      "status": "closed",
+                      "dump_line": 1304
+                    },
+                    {
+                      "wo_id": 11217,
+                      "wo_date": "2025-11-08",
+                      "machine_id": "CMP-01",
+                      "wo_type": "corrective",
+                      "description": "emergency stop replaced",
+                      "hours": 7.2,
+                      "cost_sgd": 2997.03,
+                      "status": "closed",
+                      "dump_line": 1303
+                    },
+                    {
+                      "wo_id": 11216,
+                      "wo_date": "2025-11-08",
+                      "machine_id": "CNC-03",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 2.1,
+                      "cost_sgd": 1183.36,
+                      "status": "closed",
+                      "dump_line": 1302
+                    },
+                    {
+                      "wo_id": 11215,
+                      "wo_date": "2025-11-07",
+                      "machine_id": "WELD-02",
+                      "wo_type": "corrective",
+                      "description": "crane limit switch fault",
+                      "hours": 9.6,
+                      "cost_sgd": 223.91,
+                      "status": "closed",
+                      "dump_line": 1301
+                    },
+                    {
+                      "wo_id": 11214,
+                      "wo_date": "2025-11-06",
+                      "machine_id": "LTH-01",
+                      "wo_type": "corrective",
+                      "description": "way cover damaged",
+                      "hours": 2.6,
+                      "cost_sgd": 1376.91,
+                      "status": "closed",
+                      "dump_line": 1300
+                    },
+                    {
+                      "wo_id": 11213,
+                      "wo_date": "2025-11-06",
+                      "machine_id": "CRN-02",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 1.1,
+                      "cost_sgd": 1140.03,
+                      "status": "closed",
+                      "dump_line": 1299
+                    },
+                    {
+                      "wo_id": 11212,
+                      "wo_date": "2025-11-06",
+                      "machine_id": "CRN-01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 4.2,
+                      "cost_sgd": 1160.13,
+                      "status": "closed",
+                      "dump_line": 1298
+                    },
+                    {
+                      "wo_id": 11211,
+                      "wo_date": "2025-11-06",
+                      "machine_id": "CMP-01",
+                      "wo_type": "corrective",
+                      "description": "crane limit switch fault",
+                      "hours": 9.3,
+                      "cost_sgd": 310.89,
+                      "status": "closed",
+                      "dump_line": 1297
+                    },
+                    {
+                      "wo_id": 11210,
+                      "wo_date": "2025-11-04",
+                      "machine_id": "CNC-02",
+                      "wo_type": "breakdown",
+                      "description": "spindle vibration high",
+                      "hours": 4.9,
+                      "cost_sgd": 150.68,
+                      "status": "closed",
+                      "dump_line": 1296
+                    },
+                    {
+                      "wo_id": 11209,
+                      "wo_date": "2025-11-04",
+                      "machine_id": "CNC-02",
+                      "wo_type": "corrective",
+                      "description": "bearing noise - gearbox",
+                      "hours": 2.4,
+                      "cost_sgd": 1849.07,
+                      "status": "closed",
+                      "dump_line": 1295
+                    },
+                    {
+                      "wo_id": 11208,
+                      "wo_date": "2025-11-03",
+                      "machine_id": "PMP-T01",
+                      "wo_type": "preventive",
+                      "description": "scheduled PM as per OEM manual",
+                      "hours": 6.5,
+                      "cost_sgd": 1079.33,
+                      "status": "closed",
+                      "dump_line": 1294
+                    },
+                    {
+                      "wo_id": 11207,
+                      "wo_date": "2025-11-03",
+                      "machine_id": "CRN-02",
+                      "wo_type": "breakdown",
+                      "description": "tool changer jam",
+                      "hours": 10.0,
+                      "cost_sgd": 1308.82,
+                      "status": "closed",
+                      "dump_line": 1293
+                    },
+                    {
+                      "wo_id": 11206,
+                      "wo_date": "2025-11-03",
+                      "machine_id": "CRN-02",
+                      "wo_type": "breakdown",
+                      "description": "bearing noise - gearbox",
+                      "hours": 3.0,
+                      "cost_sgd": 537.21,
+                      "status": "closed",
+                      "dump_line": 1292
+                    }
+                  ],
+                  "earliest": {
+                    "wo_id": 11206,
+                    "wo_date": "2025-11-03",
+                    "machine_id": "CRN-02",
+                    "wo_type": "breakdown",
+                    "description": "bearing noise - gearbox",
+                    "hours": 3.0,
+                    "cost_sgd": 537.21,
+                    "status": "closed",
+                    "dump_line": 1292
+                  },
+                  "latest": {
+                    "wo_id": 11248,
+                    "wo_date": "2025-11-29",
+                    "machine_id": "CNC-02",
+                    "wo_type": "corrective",
+                    "description": "weld porosity complaints - recalibrate",
+                    "hours": 5.8,
+                    "cost_sgd": 575.4,
+                    "status": "closed",
+                    "dump_line": 1334
+                  }
+                },
+                "sources": [
+                  {
+                    "kind": "file",
+                    "object": "cmms_work_orders_audit",
+                    "file": "jurongmarine_cmms.sql",
+                    "locator": "lines 1292, 1293, 1294, 1295, 1296, 1297, 1298, 1299, 1300, 1301, 1302, 1303, 1304, 1305, 1306 and 28 more",
+                    "sha256": "cbedcaebeb379109dd968ea79f56218d961e71a8dbe8b177bdbdda6f60343b79",
+                    "what": "CMMS work orders",
+                    "label": "CMMS work orders: jurongmarine_cmms.sql, lines 1292, 1293, 1294, 1295, 1296, 1297, 1298, 1299, 1300, 1301, 1302, 1303, 1304, 1305, 1306 and 28 more (cmms_work_orders_audit), SHA-256 cbedcaebeb37…"
+                  }
+                ],
+                "notes": [
+                  "Same machine, day and type more than once: possibly double-entered (trap list C9). Counts and costs include them.",
+                  "Work orders record no parts used (trap list C11).",
+                  "The user asked about \"completed\" work orders. The CMMS has no completion date and no 'completed' status: its statuses are CLOSED, OPEN and AWAITING PARTS, and each work order is dated when it was raised. Count CLOSED work orders as completed, and say both in the answer: that 'completed' was read as status CLOSED, and that the date is when each work order was raised, not when it was finished."
+                ],
+                "error": null,
+                "ms": 16
+              }
+            }
+          ],
+          "events": [
+            {
+              "ts": "2026-11-10T09:01:08.609+00:00",
+              "event": "chat_call",
+              "round": 1,
+              "model": "gpt-4o-mini",
+              "prompt_tokens": 3467,
+              "completion_tokens": 35,
+              "tool_calls": [
+                "list_work_orders"
+              ],
+              "cost_usd": 0.00032985,
+              "ms": 1878.3
+            },
+            {
+              "ts": "2026-11-10T09:01:08.626+00:00",
+              "event": "tool_call",
+              "round": 1,
+              "tool": "list_work_orders",
+              "arguments": "{\"date_from\":\"2025-11-01\",\"date_to\":\"2025-11-30\",\"status\":\"closed\"}",
+              "ok": true,
+              "error_code": null,
+              "n_sources": 1,
+              "ms": 16.3
+            },
+            {
+              "ts": "2026-11-10T09:01:08.626+00:00",
+              "event": "completed_read_as_closed",
+              "round": 1,
+              "tool": "list_work_orders"
+            },
+            {
+              "ts": "2026-11-10T09:01:11.877+00:00",
+              "event": "chat_call",
+              "round": 2,
+              "model": "gpt-4o-mini",
+              "prompt_tokens": 6813,
+              "completion_tokens": 86,
+              "tool_calls": [],
+              "cost_usd": 0.0008143499999999999,
+              "ms": 3250.3
+            },
+            {
+              "ts": "2026-11-10T09:01:11.878+00:00",
+              "event": "turn",
+              "question": "How many work orders were completed in November 2025?",
+              "tools_called": [
+                "list_work_orders"
+              ],
+              "n_sources": 1,
+              "model_calls": 2,
+              "cost_usd": 0.001144
+            }
+          ],
+          "seconds": 5.1,
+          "prompt_tokens": 10280,
+          "completion_tokens": 121,
+          "proxy_cost": 0.0011442,
+          "model_calls": 2,
+          "oracle": {
+            "list_work_orders.data.count": [
+              43
+            ]
+          },
+          "failures": [],
+          "warnings": []
+        }
+      ],
+      "failures": [],
+      "warnings": [],
+      "seconds": 5.1,
+      "prompt_tokens": 10280,
+      "completion_tokens": 121,
+      "proxy_cost": 0.0011442,
+      "model_calls": 2
+    }
+  ]
+}
