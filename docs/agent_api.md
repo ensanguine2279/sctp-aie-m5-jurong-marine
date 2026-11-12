@@ -117,6 +117,69 @@ page.
 Not done: hosting it. The Cloud Run service runs the page; the API would be a second
 service (or a second process) with the same image and secrets plus `AGENT_API_KEY`.
 
+## Why there's no endpoint per tool
+
+The API exposes the **agent**, not the tools it calls. There is no `/tools/list_incidents` or
+`/tools/find_sop`: every request goes through `agent_app.ask()`, the same door the page and
+the eval suite use. This is on purpose (decided 12 Nov 2026), because of where the app's
+safeguards live:
+
+```mermaid
+flowchart LR
+    C["client"] --> ASK["POST /ask"]
+    subgraph ASKF["agent_app.ask(): every rule below"]
+        GI["guardrail on the question<br/>injection, PDPA, out of scope"]
+        SY["short year asked back"]
+        LOOP["model + tools<br/>scale guard, period_check,<br/>completion_note"]
+        GO["guardrail on the answer<br/>names, NRIC, phone, e-mail"]
+        GI --> SY --> LOOP --> GO
+    end
+    ASK --> GI
+    LOOP --> RT["agent_tools.run_tool<br/>argument checks, fixed SQL,<br/>agent_ro, sources"]
+    C -. "a tool route would<br/>enter here, past every<br/>rule above" .-> RT
+```
+
+`agent_tools.run_tool()` enforces a lot by itself: it checks the arguments, runs fixed SQL as
+the read-only `agent_ro` user (which the database stops from reading names), and returns
+sources. But several of the rules the client and the auditor care about are in `ask()`, not in
+the tools:
+
+| Rule | Where it lives | What a tool route would skip |
+|---|---|---|
+| Guardrail on the question (prompt injection, PDPA, out of scope) | `ask()` → `guardrail.check_input` | Every refusal |
+| Guardrail on the answer (staff names, NRIC, phone, e-mail) | `ask()` → `guardrail.check_output` | The last check before anything is shown |
+| A severity scale the user never named is removed, so the tool asks (trap C1, the kill-shot) | `agent_app.tool_round` → `scale_guessed` | The guard on the scale |
+| A period after the data ends is run again for the latest full month, with a note | `agent_app.period_check` | The June fallback and its note |
+| "Completed" read as CLOSED, and said | `agent_app.completion_note` | The note that makes the answer say so |
+| A year written short is asked back | `agent_app.before_model` | The question back |
+| The eval suite, the trace table, the `turn` log line, the spend | the path through `ask()` | All the evidence; a second way in that no eval covers |
+
+So one door means every client, whatever it is, gets the protections the brief asks for
+(sources cited, "say so instead of guessing", PDPA), and the 52 eval cases test exactly what
+it serves. The brief's client is non-technical and asks in plain English; nothing in the
+brief or the checklist asks for raw data over HTTP.
+
+### When tool routes would make sense, and how to add them
+
+Structured data without a model call is worth having for a dashboard or a scripted report
+(the same number every time, no cost), for testing a tool on its own, or for another backend
+that wants data rather than prose. If that need comes up, the plan is:
+
+- **One generic route**, `POST /tools/{name}` with the tool's arguments as the body, and
+  `GET /tools` for the definitions (`agent_tools.tool_schemas()`). Not one hand-written route
+  per tool, so a tool changed in `agent_tools.py` can't drift from its endpoint.
+- **The same `X-API-Key`**, straight through `agent_tools.run_tool()`: still `agent_ro`, the
+  same argument checks, the result with its `sources`, `notes` and `error` as the tool gives them.
+- **`query_sql` left out.** The model's SQL is checked and capped; a client sending free SQL is
+  a different risk and nothing in the brief needs it.
+- **A severity number only with its scale**, so the kill-shot can't be bypassed: the tool's own
+  `needs_clarification` comes back as a 422, never a guessed count.
+- **Tests** that no tool route ever returns a name, that a refusal stays a refusal, and that
+  `query_sql` is refused; and a line in this file saying these answers are data, not checked by
+  the eval suite.
+
+About an hour with its tests. Not built, because nothing needs it yet.
+
 ## Tests
 
 `tests/test_agent_api.py` (28 tests; no database, no real LLM call; the service tested with
