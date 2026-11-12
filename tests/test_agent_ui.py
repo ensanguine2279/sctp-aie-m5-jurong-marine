@@ -432,3 +432,115 @@ def test_each_recent_conversation_line_and_the_open_one():
     assert ui.recent_label(r, "a" * 32, now).endswith(r"\(2 questions, open now\)")
     one = ss.Recent("c" * 32, "cost *was* $5 [x]", 1, None)
     assert ui.recent_label(one, None, now) == r"cost \*was\* \$5 \[x\] \(1 question\)"
+
+
+# ------------------- a question cut off by a click, and deleting (11 Nov 2026) ---
+
+def test_a_question_left_without_an_answer_is_taken_off_the_page_and_named():
+    """A click while a question ran: Streamlit stopped the script after the question was
+    drawn and before its answer. ask() kept the conversation as it was, so the page drops
+    the question too, and says so once."""
+    q1, a1 = {"role": "user", "text": "q1"}, {"role": "assistant", "text": "a1"}
+    shown = [q1, a1, {"role": "user", "text": "Is CNC-02 running differently now?"}]
+    assert ui.drop_unanswered(shown) == "Is CNC-02 running differently now?"
+    assert shown == [q1, a1]
+    assert ui.drop_unanswered(shown) is None and shown == [q1, a1]   # answered: left alone
+    assert ui.drop_unanswered([]) is None
+    pdpa = [{"role": "user", "text": "What is the name of employee EMP015?"}]
+    assert ui.drop_unanswered(pdpa) == "[question withheld by the guardrail: pdpa]"
+    line = ui.interrupted_line("Is CNC-02 running differently now?")
+    assert r"CNC\-02" in line and "wasn't answered" in line and "Ask it again" in line
+
+
+def test_the_page_and_the_models_history_agree_after_a_cut_off_question(monkeypatch):
+    """End to end: the turn is stopped between the tool call and its result; the next
+    question reaches the model with no orphan tool call, and the page shows no orphan
+    question."""
+    class Stopped(BaseException):
+        pass
+
+    call = FakeToolCall("c1", "list_machines", "{}")
+    sent = []
+
+    def model(client, model, messages, tools):
+        sent.append([dict(m) for m in messages])
+        if len(sent) == 1:
+            return FakeResponse(FakeMessage(content=None, tool_calls=[call]))
+        return FakeResponse(FakeMessage(content="CNC-02 is running."))
+    monkeypatch.setattr(app, "complete", model)
+
+    def stopped(db, name, args):
+        raise Stopped()
+    monkeypatch.setattr(app.at, "run_tool", stopped)
+    messages, shown = app.new_conversation(), [{"role": "user", "text": "how many machines?"}]
+    try:
+        app.ask(None, None, messages, "how many machines?")
+    except Stopped:
+        pass
+    assert ui.drop_unanswered(shown) == "how many machines?" and shown == []
+    assert messages == app.new_conversation()
+    answer, _ = app.ask(None, None, messages, "is CNC-02 running?")
+    assert answer == "CNC-02 is running."
+    assert not any(m.get("tool_calls") for m in sent[1])
+    assert [m["content"] for m in sent[1][1:]] == ["is CNC-02 running?"]
+
+
+def test_a_mended_conversation_shows_in_the_rows():
+    rows = ui.trace_rows([{"event": "history_repaired", "dropped": 1}])
+    assert rows == [{"step": "app", "seconds": None,
+                     "detail": "conversation mended: 1 unanswered tool call(s) or stray "
+                               "result(s) from a cut-off question removed"}]
+
+
+def test_delete_this_conversation_removes_it_from_the_store():
+    import sqlite3
+    import sessions as ss
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE agent_sessions (session_id TEXT PRIMARY KEY, messages TEXT, "
+                 "display TEXT, turns INTEGER, created_at TEXT, updated_at TEXT)")
+    store = ss.SessionStore(ss.sqlite_run(conn))
+    sid = ss.new_session_id()
+    store.save(sid, [{"role": "user", "content": "q"}], [{"role": "user", "text": "q"}])
+    assert ui.delete_conversation(store, sid) is None
+    assert ui.restored(store.load(sid)) is None          # its link now opens a new one
+    assert store.recent(10) == []
+
+    def down(sql, params):
+        raise ConnectionError("Can't connect to MySQL server")
+    why = ui.delete_conversation(ss.SessionStore(down), sid)
+    assert why.startswith("couldn't delete") and "MySQL server" not in why
+    assert "for good" in ui.DELETE_WARNING and ui.DELETE_LABEL == "Delete this conversation"
+
+
+def test_the_bin_sits_left_of_the_question_box_once_there_is_something_to_delete():
+    """11 Nov 2026: Delete moved from the sidebar to an icon left of the chat box."""
+    q, a = {"role": "user", "text": "q"}, {"role": "assistant", "text": "a"}
+    assert ui.show_delete(True, [q, a])
+    assert not ui.show_delete(True, [])                  # a new conversation: nothing saved
+    assert not ui.show_delete(True, [q])                 # no answer yet, so not saved yet
+    assert not ui.show_delete(False, [q, a])             # conversations aren't being saved
+    assert ui.DELETE_ICON.startswith(":material/")       # an icon; the tooltip says what
+    assert 'id="jme-inputbar"' in ui.INPUT_MARKER and ":has(#jme-inputbar)" in ui.INPUT_CSS
+    assert "display: none" in ui.INPUT_CSS               # the marker itself takes no room
+    assert "flex: 0 0 auto" in ui.INPUT_CSS              # the bin's column shrinks to the icon
+    # The bin as tall as the question box, set from the box's measured height (CSS alone
+    # didn't, 11 Nov 2026), and kept so as the box grows; a fresh component per run.
+    js = ui.fit_bin_script(4)
+    assert "stChatInput" in js and "stPopover" in js and "window.parent" in js
+    assert "getBoundingClientRect().height" in js and "ResizeObserver" in js
+    assert js != ui.fit_bin_script(5)
+    # 11 Nov 2026: no down arrow on the bin, also when Streamlit redraws it.
+    assert "expand_more" in js and "expand_less" in js and "MutationObserver" in js
+    # 20:30-20:38: a square, not a thin bar: the width set with priority, and the wrappers up
+    # to the bin's column given room (a narrow, clipping column had kept it thin).
+    assert "['width', h]" in js and "'important'" in js and "['min-width', h]" in js
+    assert "['overflow', 'visible']" in js and "e === col" in js
+    # 21:12: a shorter question box (the bin follows it): its padding and line height trimmed.
+    assert f"padding-top: {ui.INPUT_PAD} !important" in ui.INPUT_CSS
+    assert f"line-height: {ui.INPUT_LINE} !important" in ui.INPUT_CSS
+    assert "PAD" not in ui.INPUT_CSS and "LINE" not in ui.INPUT_CSS   # both filled in
+    # 22:42: a bigger bin icon, sized from the button's height.
+    assert "t === 'delete'" in js and f"* {ui.DELETE_ICON_SCALE})" in js
+    assert 0.4 <= ui.DELETE_ICON_SCALE <= 0.9
+    bin_col, box = ui.INPUT_BAR
+    assert box > 10 * bin_col                            # without :has(), the box still wide

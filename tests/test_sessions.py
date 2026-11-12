@@ -392,3 +392,35 @@ def test_a_long_first_question_is_shortened_for_its_title():
     assert len(t) <= ss.TITLE_CHARS and t.endswith("…") and "  " not in t
     assert t.startswith("how many incidents")
     assert ss.title_of([]) == "(no question yet)"
+
+
+# ------------------------------------------- deleting a conversation (11 Nov 2026) ---
+
+def test_delete_removes_only_that_conversation(store, conn):
+    gone, kept = ss.new_session_id(), ss.new_session_id()
+    store.save(gone, CONVO, DISPLAY)
+    store.save(kept, CONVO, DISPLAY)
+    assert store.delete(gone) == (True, None)
+    assert row(conn, gone) is None and row(conn, kept) is not None
+    got = store.load(gone)                     # its link now starts a new conversation
+    assert got.ok and not got.found
+    assert [r.sid for r in store.recent(10)] == [kept]
+
+
+def test_deleting_one_that_isnt_there_is_fine_and_a_bad_id_never_reaches_the_database():
+    seen = []
+    s = ss.SessionStore(lambda sql, p: seen.append((sql, p)) or ([], 0))
+    sid = ss.new_session_id()
+    assert s.delete(sid) == (True, None)       # never saved, or purged already: gone either way
+    assert seen == [("DELETE FROM agent_sessions WHERE session_id = :sid", {"sid": sid})]
+    seen.clear()
+    for bad in ("'; DELETE FROM agent_sessions; --", "", None, "0" * 31):
+        assert s.delete(bad) == (False, "not a session id")
+    assert seen == []
+
+
+def test_a_failed_delete_never_raises_and_says_so():
+    def down(sql, params):
+        raise ConnectionError("Can't connect to MySQL server")
+    ok, err = ss.SessionStore(down).delete(ss.new_session_id())
+    assert not ok and "couldn't delete" in err and "MySQL server" not in err

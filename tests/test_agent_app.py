@@ -522,3 +522,94 @@ def test_a_refused_question_costs_nothing(monkeypatch):
     app.ask(None, client=None, messages=app.new_conversation(), question="Who is EMP026?",
             usage=usage)
     assert usage["model_calls"] == 0 and usage["cost_usd"] == 0 and usage["cost_complete"]
+
+
+# ------------------------------- a turn cut off half way (found 11 Nov 2026) ---
+# On the page: "400 - An assistant message with 'tool_calls' must be followed by tool
+# messages responding to each 'tool_call_id'", on every question after one point. A click
+# while a question ran made Streamlit stop the script between the model's tool call and the
+# tool's result; `messages` kept the call with no result, and the API refused the rest of
+# the conversation (and it was saved like that).
+
+class Stopped(BaseException):
+    """Like Streamlit's StopException / RerunException: raised into the running script."""
+
+
+def _call(cid, name="list_machines"):
+    return {"id": cid, "type": "function", "function": {"name": name, "arguments": "{}"}}
+
+
+BROKEN = [{"role": "system", "content": "s"},
+          {"role": "user", "content": "how many machines?"},
+          {"role": "assistant", "content": None, "tool_calls": [_call("c1")]},
+          # the tool's result never came: the script was stopped here
+          {"role": "user", "content": "and CNC-02?"}]
+
+
+def test_a_turn_stopped_half_way_leaves_the_conversation_as_it_was(monkeypatch):
+    call = FakeToolCall("c1", "list_machines", "{}")
+    monkeypatch.setattr(app, "complete", scripted(
+        FakeResponse(FakeMessage(content=None, tool_calls=[call]))))
+
+    def stopped(db, name, args):
+        raise Stopped()                        # between the tool call and its result
+    monkeypatch.setattr(app.at, "run_tool", stopped)
+    messages = app.new_conversation() + [{"role": "user", "content": "q1"},
+                                         {"role": "assistant", "content": "a1"}]
+    before = json.dumps(messages)
+    with pytest.raises(Stopped):
+        app.ask(None, None, messages, "how many machines?")
+    assert json.dumps(messages) == before      # no call without a result, not even the question
+
+
+def test_a_conversation_saved_with_a_call_and_no_result_works_again(monkeypatch, caplog):
+    sent = []
+
+    def model(client, model, messages, tools):
+        sent.append([dict(m) for m in messages])
+        return FakeResponse(FakeMessage(content="CNC-02 is running."))
+    monkeypatch.setattr(app, "complete", model)
+    messages = [dict(m) for m in BROKEN]
+    with caplog.at_level("INFO", logger="agent_app"):
+        answer, _ = app.ask(None, None, messages, "is CNC-02 running?")
+    assert answer == "CNC-02 is running."
+    assert not any(m.get("tool_calls") for m in sent[0])        # the API gets no orphan call
+    assert [m["content"] for m in sent[0][1:]] == ["how many machines?", "and CNC-02?",
+                                                   "is CNC-02 running?"]
+    assert not any(m.get("tool_calls") for m in messages)       # and it's mended for next time
+    repaired = [json.loads(r.message) for r in caplog.records if "history_repaired" in r.message]
+    assert repaired and repaired[0]["dropped"] == 1
+
+
+def test_answered_only_keeps_answered_calls_and_drops_the_rest():
+    msgs = [{"role": "user", "content": "q"},
+            {"role": "assistant", "content": None, "tool_calls": [_call("c1"), _call("c2")]},
+            {"role": "tool", "tool_call_id": "c1", "content": "r1"},       # c2 never answered
+            {"role": "tool", "tool_call_id": "c1", "content": "again"},    # a second result
+            {"role": "tool", "tool_call_id": "zz", "content": "r?"},       # for no call
+            {"role": "assistant", "content": "a"},
+            {"role": "tool", "tool_call_id": "c9", "content": "stray"},    # after no call at all
+            {"role": "assistant", "content": "Let me check.", "tool_calls": [_call("c3")]},
+            {"role": "user", "content": "q2"}]
+    out, dropped = app.answered_only(msgs)
+    assert out == [{"role": "user", "content": "q"},
+                   {"role": "assistant", "content": None, "tool_calls": [_call("c1")]},
+                   {"role": "tool", "tool_call_id": "c1", "content": "r1"},
+                   {"role": "assistant", "content": "a"},
+                   {"role": "assistant", "content": "Let me check."},  # text kept, call gone
+                   {"role": "user", "content": "q2"}]
+    assert dropped == 5                        # c2, the second c1 result, zz, c9, c3
+    assert msgs[1]["tool_calls"] == [_call("c1"), _call("c2")]       # the input isn't changed
+
+
+def test_a_whole_conversation_is_left_alone():
+    good = [{"role": "system", "content": "s"}, {"role": "user", "content": "q"},
+            {"role": "assistant", "content": None, "tool_calls": [_call("c1"), _call("c2")]},
+            {"role": "tool", "tool_call_id": "c2", "content": "r2"},       # any order
+            {"role": "tool", "tool_call_id": "c1", "content": "r1"},
+            {"role": "assistant", "content": "a"}]
+    out, dropped = app.answered_only(good)
+    assert dropped == 0 and len(out) == len(good)
+    assert out[2]["tool_calls"] == good[2]["tool_calls"]
+    assert {m["tool_call_id"] for m in out[3:5]} == {"c1", "c2"}
+    assert app.answered_only([]) == ([], 0)

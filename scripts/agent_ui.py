@@ -12,6 +12,7 @@ Layout (10 Nov 2026: the sidebar held examples, recent conversations and spend, 
 congested). Each part has one place:
 - sidebar: conversations only (New conversation, the newest saved ones, whether this one
   is saved);
+- bottom bar: a bin icon (Delete this conversation) left of the question box;
 - top bar: the title, an Examples popover once a conversation has started, and a usage
   popover (model, this conversation's cost, the key's spend against its cap). Near or over
   the cap, or with the proxy unreachable, a warning also shows across the page;
@@ -23,7 +24,14 @@ The conversation survives a restart (#5): its id is in the page's link (?session
 after every answer it is saved through sessions.py (a table only the agent_sessions user can
 touch). Opening the link again, after a redeploy or on another device, reloads it, so a
 follow-up still has the earlier context. If the store isn't set up or is down, the sidebar
-says conversations aren't being saved and the page carries on in memory.
+says conversations aren't being saved and the page carries on in memory. The bin left of the
+question box, Delete this conversation (11 Nov 2026), removes it from the store at once, after
+a confirm, and starts a new one; its old link then opens a new conversation too.
+
+A click while a question is being answered makes Streamlit stop the script and run it
+again, so that question is never answered. agent_app.ask() leaves the conversation as it
+was (11 Nov 2026: it used to keep half a turn, and the model refused every later question);
+the page drops the unanswered question from what it shows and says so (drop_unanswered).
 
 The conversation's spend is added up from the answers on the page (conversation_spend), so a
 conversation reopened from its link or from the list shows what it cost, not $0.
@@ -382,7 +390,7 @@ def scroll_script(nonce: int) -> str:
     question's component different, so Streamlit runs it again rather than reusing the last."""
     return (f"<script>/* {nonce} */"
             "const d = window.parent.document;"
-            "const m = d.querySelectorAll('[data-testid=\"stChatMessage\"]');"
+            "const m = d.querySelectorAll('[data-testid=\\\"stChatMessage\\\"]');"
             "if (m.length) m[m.length - 1].scrollIntoView({behavior: 'smooth', block: 'start'});"
             "</script>")
 
@@ -424,6 +432,159 @@ def restored(loaded) -> tuple[list[dict], list[dict]] | None:
     shown = [_kept(m) for m in loaded.display if isinstance(m, dict) and m.get("role") in
              ("user", "assistant") and isinstance(m.get("text"), str)]
     return app.new_conversation() + loaded.messages, shown
+
+
+def drop_unanswered(shown: list[dict]) -> str | None:
+    """At the start of a run: a question left at the end of the page with no answer was cut
+    off (the page was clicked while it was being answered, and Streamlit stopped the script).
+    It is taken off the page, in place, and returned (as kept_question gives it) for the page
+    to say so; None when there is none. agent_app.ask() never put it in the conversation, so
+    the page and the model's history stay in step (11 Nov 2026)."""
+    if shown and isinstance(shown[-1], dict) and shown[-1].get("role") == "user":
+        return kept_question(str(shown.pop().get("text") or ""))
+    return None
+
+
+def interrupted_line(question: str) -> str:
+    """The note shown once after a question was cut off, escaped for Streamlit."""
+    return md_plain(f"\"{question}\" wasn't answered: the page was clicked while it was "
+                    f"being worked on. Ask it again if you still need it.")
+
+
+def delete_conversation(store, sid: str) -> str | None:
+    """Delete the conversation on the page from the store (Delete this conversation).
+    None when it is gone, else why it couldn't be deleted. Never raises."""
+    ok, error = store.delete(sid)
+    return None if ok else (error or "couldn't delete the conversation")
+
+
+DELETE_LABEL = "Delete this conversation"
+DELETE_ICON = ":material/delete:"      # the bin left of the question box; its tooltip says what
+INPUT_PLACEHOLDER = "Ask about a machine, an incident or an SOP"
+# The bottom bar: the bin, then the question box. Streamlit pins st.chat_input to the bottom
+# only at the top level of the page; inside columns it is drawn where it is, so both go in
+# Streamlit's pinned bottom container, st.bottom. (It was st._bottom at first; Streamlit
+# warned that st._bottom will be removed after 2026-07-01 and to use st.bottom, 11 Nov 2026.)
+# A Streamlit without st.bottom gets the bin in the sidebar instead.
+INPUT_MARKER = '<span id="jme-inputbar"></span>'
+INPUT_BAR = [1, 14]                   # used as-is only by a browser without :has()
+# A shorter question box (11 Nov 2026, 21:12: "make the text input and delete button height
+# smaller"). Its height comes from the textarea's padding and line height, so those are
+# trimmed; the box still grows with a long question. The bin follows the box's height
+# (fit_bin_script), so it shrinks with it. Tune the two numbers here.
+INPUT_PAD = "0.1rem"                  # above and below the text (Streamlit's is larger)
+INPUT_LINE = "1"                      # line height of the text
+INPUT_CSS = """<style>
+[data-testid="stChatInput"] textarea {
+  padding-top: PAD !important; padding-bottom: PAD !important;
+  line-height: LINE !important; min-height: 0 !important;
+}
+[data-testid="stChatInput"] > div, [data-testid="stChatInput"] [data-baseweb="textarea"],
+[data-testid="stChatInput"] [data-baseweb="base-input"] {
+  min-height: 0 !important;
+}
+[data-testid="stChatInputSubmitButton"] {
+  height: auto !important; min-height: 0 !important; align-self: center;
+}
+[data-testid="stElementContainer"]:has(#jme-inputbar), .element-container:has(#jme-inputbar) {
+  display: none;
+}
+[data-testid="stVerticalBlock"]:has(#jme-inputbar) [data-testid="stHorizontalBlock"] {
+  gap: 0.5rem; align-items: flex-end !important;
+}
+[data-testid="stVerticalBlock"]:has(#jme-inputbar) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:first-child,
+[data-testid="stVerticalBlock"]:has(#jme-inputbar) [data-testid="stHorizontalBlock"] > [data-testid="column"]:first-child {
+  flex: 0 0 auto !important; width: auto !important; min-width: 0 !important;
+}
+</style>""".replace("PAD", INPUT_PAD).replace("LINE", INPUT_LINE)
+
+
+DELETE_ICON_SCALE = 0.4               # the bin icon's size, as a share of the button's height
+
+
+def fit_bin_script(nonce: int) -> str:
+    """HTML for an invisible component that makes the bin exactly as tall as the question
+    box, and keeps it so when the box grows with a long question.
+
+    CSS alone didn't (11 Nov 2026: "delete button is not the same height as the text
+    input"): the popover's button sits inside wrappers whose heights Streamlit sets itself.
+    So the script, in a component's iframe that shares the page's origin (as scroll_script),
+    finds the question box, the row it is in, and the popover button in that row, and sets
+    the button's height to the box's measured height; a ResizeObserver repeats it whenever
+    the box changes size. `nonce` makes each run's component new, so Streamlit runs it.
+
+    It also hides the popover's down arrow on the bin (asked for 11 Nov 2026): Streamlit
+    draws it as a Material icon ("expand_more", "expand_less" when open) or, in older
+    versions, an SVG; the bin itself is a Material icon font, not an SVG, so it stays. A
+    MutationObserver hides the arrow again if Streamlit redraws it (on opening the panel).
+    Without the arrow the button was thin, so its width is set to its height too: a square,
+    the icon centred (asked for 11 Nov 2026, 20:30). On the page the plain width didn't take
+    (20:38): something between the button and its column kept it narrow. So the width is set
+    with priority ('important'), and every element from the button up to its column is given
+    room for it (min-width = the height, no max-width, no clipping, not flexed narrower).
+    The bin icon is drawn at DELETE_ICON_SCALE of the button's height (asked for bigger,
+    11 Nov 2026, 22:42), so it stays in proportion when the bar's height changes."""
+    return (f"<script>/* {nonce} */"
+            "const d = window.parent.document;"
+            "function fit() {"
+            "  const box = d.querySelector('[data-testid=stChatInput]');"
+            "  if (!box) return null;"
+            "  const row = box.closest('[data-testid=stHorizontalBlock]');"
+            "  const btn = row && row.querySelector('[data-testid=stPopover] button');"
+            "  if (!btn) return null;"
+            "  const h = Math.round(box.getBoundingClientRect().height) + 'px';"
+            "  btn.style.height = h; btn.style.minHeight = h;"
+            "  btn.style.paddingTop = '0'; btn.style.paddingBottom = '0';"
+            "  for (const [k, v] of [['width', h], ['min-width', h], ['max-width', h],"
+            "                        ['padding-left', '0'], ['padding-right', '0'],"
+            "                        ['justify-content', 'center']])"
+            "    btn.style.setProperty(k, v, 'important');"
+            "  const col = btn.closest('[data-testid=stColumn], [data-testid=column]');"
+            "  for (let e = btn.parentElement; e; e = e.parentElement) {"
+            "    for (const [k, v] of [['min-width', h], ['width', 'auto'], ['max-width', 'none'],"
+            "                          ['flex', '0 0 auto'], ['overflow', 'visible']])"
+            "      e.style.setProperty(k, v, 'important');"
+            "    if (e === col) break;"
+            "  }"
+            "  noArrow(btn);"
+            "  if (!btn.dataset.jmeWatched) {"
+            "    btn.dataset.jmeWatched = '1';"
+            "    new MutationObserver(() => noArrow(btn))"
+            "      .observe(btn, {childList: true, subtree: true, characterData: true});"
+            "  }"
+            "  return box;"
+            "}"
+            "function noArrow(btn) {"
+            "  btn.querySelectorAll('svg').forEach(e => { e.style.display = 'none'; });"
+            "  btn.querySelectorAll('span').forEach(e => {"
+            "    const t = (e.textContent || '').trim();"
+            "    if (t === 'expand_more' || t === 'expand_less') e.style.display = 'none';"
+            "    if (t === 'delete') {"
+            "      const px = Math.round((parseFloat(btn.style.height) || 40) * "
+            f"{DELETE_ICON_SCALE}) + 'px';"
+            "      e.style.setProperty('font-size', px, 'important');"
+            "      e.style.setProperty('line-height', '1', 'important');"
+            "      e.style.setProperty('width', 'auto', 'important');"
+            "      e.style.setProperty('height', 'auto', 'important');"
+            "    }"
+            "  });"
+            "}"
+            "let tries = 0;"
+            "const t = setInterval(() => {"
+            "  const box = fit();"
+            "  if (box) { clearInterval(t); new ResizeObserver(fit).observe(box); }"
+            "  else if (++tries > 50) clearInterval(t);"
+            "}, 100);"
+            "</script>")
+
+
+def show_delete(store_on: bool, shown: list[dict]) -> bool:
+    """The bin shows once the conversation has an answer and conversations are saved:
+    before that there is nothing in the store to delete."""
+    return bool(store_on) and any(isinstance(m, dict) and m.get("role") == "assistant"
+                                  for m in shown or [])
+DELETE_WARNING = ("Deletes this conversation from the saved conversations now, for good, and "
+                  "starts a new one. Its link will open a new conversation.")
 
 
 RECENT = 8                       # saved conversations listed in the sidebar
@@ -520,6 +681,10 @@ def trace_rows(events: list[dict]) -> list[dict]:
             rows.append({"step": "app", "seconds": None,
                          "detail": "'completed' read as status CLOSED (the CMMS has no "
                                    "completion date); the answer must say so"})
+        elif kind == "history_repaired":
+            rows.append({"step": "app", "seconds": None,
+                         "detail": f"conversation mended: {e.get('dropped')} unanswered tool "
+                                   f"call(s) or stray result(s) from a cut-off question removed"})
         elif kind == "output_blocked":
             rows.append({"step": "guardrail", "seconds": None,
                          "detail": f"answer replaced before it was shown ({e.get('rule')}: "
@@ -532,6 +697,7 @@ def main() -> None:
 
     st.set_page_config(page_title=TITLE, page_icon=None, layout="wide")
     st.markdown(TOP_CSS, unsafe_allow_html=True)
+    st.markdown(INPUT_CSS, unsafe_allow_html=True)
 
     expected = os.environ.get("APP_PASSWORD")
     if expected and not st.session_state.get("authed"):
@@ -602,6 +768,11 @@ def main() -> None:
             elif not loaded.ok:
                 st.session_state.save_error = loaded.error
 
+    # A question the last run never finished (the page was clicked while it was answered).
+    cut = drop_unanswered(st.session_state.shown)
+    if cut:
+        st.session_state.interrupted = cut
+
     def open_saved(sid: str) -> None:
         """Switch the page to a saved conversation, as if its link had been opened."""
         loaded = store.load(sid)
@@ -641,6 +812,21 @@ def main() -> None:
                               "fold into one line. Off: the whole conversation, as a chat.")
         save_box = st.empty()                      # is this conversation being kept (#5)
 
+    def delete_control():
+        """The bin icon left of the question box: deleted at once, after a confirm in its
+        popover (11 Nov 2026; moved there from the sidebar the same day)."""
+        with st.popover(DELETE_ICON, help=DELETE_LABEL):
+            st.markdown(f"**{DELETE_LABEL}**")
+            st.caption(DELETE_WARNING)
+            if st.button("Delete", type="primary", key="delete_confirm",
+                         use_container_width=True):
+                why = delete_conversation(store, st.session_state.sid)
+                if why is None:
+                    start_fresh()
+                    st.session_state.delete_error = None
+                    st.rerun()
+                st.session_state.delete_error = why
+
     def show_saved():
         ok, text = save_line(store is not None, store_why, st.session_state.get("save_error"))
         (save_box.caption if ok else save_box.warning)(text)
@@ -662,6 +848,9 @@ def main() -> None:
     with use_col:
         usage_box = st.empty()                     # filled now, and again after an answer
     warn_box = st.empty()                          # the key near or over its cap (#7)
+    interrupted = st.session_state.pop("interrupted", None)
+    if interrupted:
+        st.info(interrupted_line(interrupted))
 
     def show_spend():
         # Spend (#7): this conversation's cost, added up from each answer's cost header
@@ -696,7 +885,26 @@ def main() -> None:
     # ---- the conversation -----------------------------------------------------------
     # Read before the history is drawn (the box stays pinned to the bottom wherever it is
     # called), so a new question folds the previous exchange at once, not one run later.
-    question = st.chat_input("Ask about a machine, an incident or an SOP") or picked
+    # The Delete icon (a bin) sits left of the box, in the pinned bottom bar.
+    bottom = getattr(st, "bottom", None)           # Streamlit's pinned bottom container
+    if show_delete(store is not None, st.session_state.shown) and bottom is not None:
+        with bottom:
+            st.markdown(INPUT_MARKER, unsafe_allow_html=True)   # for INPUT_CSS; hidden
+            del_col, box_col = st.columns(INPUT_BAR)
+            with del_col:
+                delete_control()
+            with box_col:
+                typed = st.chat_input(INPUT_PLACEHOLDER)
+        import streamlit.components.v1 as components
+        components.html(fit_bin_script(len(st.session_state.shown)), height=0)  # bin height
+    else:
+        typed = st.chat_input(INPUT_PLACEHOLDER)
+        if show_delete(store is not None, st.session_state.shown):
+            with st.sidebar:                       # no bottom bar in this Streamlit: fall back
+                delete_control()
+    if st.session_state.get("delete_error"):
+        st.warning(f"Not deleted: {st.session_state.delete_error}.")
+    question = typed or picked
 
     # Folding on (the sidebar toggle): earlier exchanges in one expander, the latest open.
     earlier, latest = history_parts(st.session_state.shown, bool(question), fold)
