@@ -3,7 +3,8 @@
 Asked "how many work orders were completed in nov 202", the app read "202" as 2026 and
 "completed" as closed, and said neither. A year written short is now asked about in code,
 with no model call; "completed" is read as status CLOSED (the CMMS has no completion date),
-with a note on the tool result that makes the answer say so. No database, no real model."""
+with a note on the tool result that makes the answer say so. No database, no real model.
+"""
 from __future__ import annotations
 
 import json
@@ -83,7 +84,7 @@ def test_a_short_year_is_asked_about_and_the_model_is_never_called(monkeypatch):
     # the question and the reply are both kept, so "2025" reaches the model with its question
     assert [m["role"] for m in messages[1:]] == ["user", "assistant"]
     assert messages[1]["content"].endswith("nov 202") and messages[2]["content"] == answer
-    kinds = [e["event"] for e in h.events]
+    kinds = [e["event"] for e in h.events if e["event"] != "graph_step"]
     assert kinds == ["year_unclear", "turn"] and h.events[0]["written"] == "nov 202"
 
 
@@ -144,8 +145,9 @@ def test_the_note_reaches_the_model_and_the_page(monkeypatch):
         FakeResponse(FakeMessage(content="12 work orders were closed."))))
     monkeypatch.setattr(app.at, "run_tool", lambda db, name, args: FakeToolResult())
     lg, h = _logger()
-    messages, notes = _user("how many work orders were completed in November 2025?"), []
-    app.run_turn(None, None, messages, logger=lg, notes_out=notes)
+    messages, notes = app.new_conversation(), []
+    app.ask(None, None, messages, "how many work orders were completed in November 2025?",
+            logger=lg, notes=notes)
     tool_msg = next(m for m in messages if m["role"] == "tool")
     assert "read as status CLOSED" in tool_msg["content"]
     assert any("read as status CLOSED" in n for n in notes)
@@ -194,3 +196,64 @@ def test_a_refused_call_and_other_arguments_ground_nothing():
                         {"ok": True, "data": {"count": 3}})
     fails, _ = ev.grounding("There were 7 such incidents.", ev.evidence_for(own))
     assert "number 7 is in no tool result" in fails
+
+
+# ---------------------------------- what the answer must say, enforced in code ---
+# 12 Nov 2026, eval run (wo-completed-short-year, turn 2): the model said "completed" was
+# read as CLOSED but not that the dates are when work orders were raised, though the note
+# told it to say both. The graph's guard_out now adds a fixed sentence when either is missing.
+
+def test_the_sentence_is_added_only_when_something_is_missing():
+    both = "43 work orders were closed; dates are when each was raised."
+    assert app.completion_said(both) == both
+    for missing in ("43 work orders were closed in November 2025.",          # no "raised"
+                    "43 work orders were raised in November 2025 and are done."):  # no CLOSED
+        out = app.completion_said(missing)
+        assert out.startswith(missing) and out.endswith(app.COMPLETED_SAY)
+    assert app.completion_said("") == "" and app.completion_said(None) is None
+
+
+def _completed_turn(monkeypatch, model_answer, run_tool=None):
+    call = FakeToolCall("c1", "list_work_orders",
+                        '{"status": "closed", "date_from": "2025-11-01", "date_to": "2025-11-30"}')
+    monkeypatch.setattr(app, "complete", scripted(
+        FakeResponse(FakeMessage(content=None, tool_calls=[call])),
+        FakeResponse(FakeMessage(content=model_answer))))
+    monkeypatch.setattr(app.at, "run_tool", run_tool or (lambda db, name, args: FakeToolResult()))
+    lg, h = _logger()
+    messages = app.new_conversation()
+    answer, _ = app.ask(None, None, messages,
+                        "how many work orders were completed in November 2025?", logger=lg)
+    return answer, messages, [e["event"] for e in h.events]
+
+
+def test_an_answer_that_leaves_out_the_raised_date_gets_it_in_code(monkeypatch):
+    said = "In November 2025, 43 work orders were closed."
+    answer, messages, events = _completed_turn(monkeypatch, said)
+    assert answer == f"{said}\n\n{app.COMPLETED_SAY}"
+    assert messages[-1] == {"role": "assistant", "content": answer}       # the history too
+    assert "caveat_added" in events
+
+
+def test_an_answer_that_says_both_is_left_alone(monkeypatch):
+    said = ("43 work orders were closed (read as completed); they are dated when they were "
+            "raised.")
+    answer, _, events = _completed_turn(monkeypatch, said)
+    assert answer == said and "caveat_added" not in events
+
+
+def test_a_question_back_from_the_tool_gets_no_caveat(monkeypatch):
+    asked = FakeToolResult()
+    asked.ok, asked.error = False, {"code": "ambiguous_machine", "message": "Which CNC?"}
+    answer, _, events = _completed_turn(monkeypatch, "unused", lambda db, n, a: asked)
+    assert answer == "Which CNC?" and "caveat_added" not in events
+
+
+def test_other_questions_get_no_caveat(monkeypatch):
+    monkeypatch.setattr(app, "complete", scripted(
+        FakeResponse(FakeMessage(content=None, tool_calls=[
+            FakeToolCall("c1", "get_nameplate", '{"machine": "CNC-03"}')])),
+        FakeResponse(FakeMessage(content="CNC-03 takes ISO VG68."))))
+    monkeypatch.setattr(app.at, "run_tool", lambda db, name, args: FakeToolResult())
+    answer, _ = app.ask(None, None, app.new_conversation(), "what oil does CNC-03 take?")
+    assert answer == "CNC-03 takes ISO VG68."

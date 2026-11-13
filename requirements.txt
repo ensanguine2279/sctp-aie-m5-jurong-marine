@@ -1,3 +1,5 @@
+fastapi>=0.162.4
+langgraph>=1.2.20
 numpy>=2.5.4
 openai>=0.27.0
 opencv-python-headless>=5.0.0.93
@@ -10,3 +12,4 @@ python-dotenv>=1.0
 sqlalchemy>=2.0
 sqlglot>=12.0.0
 streamlit>=1.36
+uvicorn>=0.54.0

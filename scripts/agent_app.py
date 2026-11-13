@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""The agent's loop: the thing a person actually talks to.
+"""The agent's pieces, and ask(): the thing the CLI, the eval suite and the tests talk to.
 
-Wires an LLM to `agent_tools.py` with a plain OpenAI-style function-calling loop (no
-LangGraph, no vector store, no memory beyond this process) and three rules from the
-harness checklist, enforced in code rather than hoped for from the prompt:
+The agent itself is a LangGraph graph (agent_graph.py, 12 Nov 2026: the only engine; the
+plain loop that came first was retired once the graph matched it on every test and on the
+eval suite, 52/52). Its nodes use what is defined here: the system prompt, the chat call
+(complete, with the proxy's cost), the severity-scale guard, the date rules, the
+"completed" and short-year rules, and the formatting of sources and notes. `ask()` runs the
+graph once on a conversation. The rules from the harness checklist, enforced in code rather
+than hoped for from the prompt:
 
     1. Grounding (#1): every fact in the answer comes from a tool call made just now.
        The model never answers from memory; it can only pick a tool and fill in its
@@ -27,12 +31,18 @@ tool result goes back to the model with the follow-up. A relative period ("and w
 last month?") is resolved in code: `ask()` puts today's date (Singapore) and the dates the
 data runs to into the system prompt (today, data_dates, dates_note), so "last month" is the
 calendar's, never the model's guess. A tool asked for a period after the data ends is run
-again by the loop for the latest full month the data has (period_check), so the model gets
-both results and can't stop at "nothing found". Cross-restart state is kept by the page,
-not here: `messages` is a plain list
-that agent_ui.py saves after every answer and loads back (scripts/sessions.py). No
+again in code (the graph's tools node) for the latest full month the data has (period_check), so the model gets
+both results and can't stop at "nothing found". Cross-restart state is kept by the caller,
+not here: `messages` is a plain list that is saved after every answer and loaded back. No
 human-in-the-loop gate (#6): this app is read-only, so none is needed. The eval suite (#8) is separate:
 `scripts/run_evals.py` over `evals/cases.yaml`.
+
+A turn is all or nothing for the conversation (11 Nov 2026): `ask()` works on a copy and
+puts it back only when the turn has finished, so a turn cut off half way (the page clicked
+while it ran: Streamlit stops the script where it is) leaves `messages` as it was. Before
+that, it could leave a tool call with no result, and the chat API then refused every later
+question in that conversation (400: "tool_calls must be followed by tool messages"). A
+conversation saved like that is mended when it is next asked (answered_only).
 
 Words the data can't take as written are handled in code too (10 Nov 2026): a year written
 short ("nov 202") gets a question back, with no model call (incomplete_year, year_question);
@@ -58,7 +68,6 @@ import logging
 import os
 import re
 import sys
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -207,6 +216,63 @@ COMPLETED_NOTE = (
     "each work order was raised, not when it was finished.")
 
 
+# What the answer must say when "completed" was read as CLOSED, checked in code after the
+# model (12 Nov 2026: on an eval run the model said "read as CLOSED" and left out that the
+# date is when each work order was raised, though the note told it to say both).
+_SAYS_CLOSED = re.compile(r"\bclosed\b", re.I)
+_SAYS_RAISED = re.compile(r"\b(raised|opened|created|logged|reported)\b", re.I)
+COMPLETED_SAY = ("(\"Completed\" was read as status CLOSED, since the CMMS has no completion "
+                 "status or date, and work orders are dated when they were raised, not when "
+                 "they were finished.)")
+
+
+def completion_said(answer: str | None) -> str | None:
+    """The answer with COMPLETED_SAY added when it doesn't already say both that
+    "completed" was read as CLOSED and that the dates are when work orders were raised;
+    the answer unchanged when it does (or is empty)."""
+    if not answer or (_SAYS_CLOSED.search(answer) and _SAYS_RAISED.search(answer)):
+        return answer
+    return f"{answer.rstrip()}\n\n{COMPLETED_SAY}"
+
+
+# An answer that states facts must rest on a tool call made this turn (#1). 13 Nov 2026, eval
+# run (mt-last-month-work-orders, turn 3): "Which of those are still open?" was answered from
+# the previous turn's tool result in the conversation, with no tool call and no sources. A
+# digit is the test for "states facts": a count, a date, a cost, a work order or a machine id.
+_FACT = re.compile(r"\d")
+
+
+def states_facts(answer: str | None) -> bool:
+    """True when an answer holds anything a tool would have to give: a number, a date, an
+    id ("CNC-02", "11591"). A greeting or a plain sentence with no digit does not."""
+    return bool(answer and _FACT.search(answer))
+
+
+# "Still open", "currently", "now": the data is a snapshot that ends before today, so an
+# answer about how things stand now can only say how they stood when the data ends (13 Nov
+# 2026, same eval run: "still open" answered as if it were today). Not "current": "the
+# current scale" is a severity scale, not a time.
+_NOW_WORDS = re.compile(r"\b(still|currently|now|today|right now|at the moment|at present|"
+                        r"presently|as it stands|as of today)\b", re.I)
+
+
+def as_of_said(answer: str | None, question: str | None, dates: dict | None,
+               today_=None) -> str | None:
+    """The answer with a sentence saying the data's end date added, when the question asks
+    how things stand now, the data ends before today, and the answer doesn't already give
+    that date; else the answer unchanged."""
+    if not answer or not question or not dates or not _NOW_WORDS.search(question):
+        return answer
+    end = max(dates.values())
+    if end >= (today_ or today()):
+        return answer
+    for said in (_day(end), f"{end.day} {end:%B %Y}", f"{end:%B} {end.day}", end.isoformat()):
+        if said.lower() in answer.lower():
+            return answer
+    return (f"{answer.rstrip()}\n\n(The shop's data runs to {_day(end)}, so this is how things "
+            f"stood on that date; it may have changed since.)")
+
+
 def completion_note(name: str, messages) -> str | None:
     """The note for a work-order tool result when the question is about completed or
     finished work orders; None otherwise. The user's questions are read newest first, so a
@@ -266,12 +332,15 @@ def _cost(headers) -> float | None:
         return None
 
 
-def complete(client, model, messages, tools):
+def complete(client, model, messages, tools, tool_choice="auto"):
     """One call to the chat API. Wraps SDK/network errors as ChatError, so a failed
     call degrades honestly (#4) instead of raising out of the loop. Returns the response
     with the proxy's cost for it (#7): the SDK's raw-response API gives the headers, and a
-    client without it (a stand-in, another provider) just gives cost None."""
-    kw = dict(model=model, messages=messages, tools=tools, tool_choice="auto", temperature=0)
+    client without it (a stand-in, another provider) just gives cost None. tool_choice:
+    "auto" (the model decides), or "required" (it must call a tool: used when it answered
+    with facts but called none, see states_facts)."""
+    kw = dict(model=model, messages=messages, tools=tools, tool_choice=tool_choice,
+              temperature=0)
     try:
         raw_api = getattr(client.chat.completions, "with_raw_response", None)
         if raw_api is None:
@@ -294,6 +363,48 @@ def _assistant_message(msg) -> dict:
             for c in calls
         ]
     return out
+
+
+def answered_only(messages) -> tuple[list[dict], int]:
+    """(a copy of the conversation the chat API will accept, how many pieces were dropped).
+
+    The API refuses a whole conversation if any tool call in it has no tool message
+    answering it, or if a tool message answers no call (400, seen on the page 11 Nov 2026:
+    a turn cut off between the model's tool call and the tool's result). So: a tool call
+    with no result right after it is dropped, an assistant message left with no calls and
+    no text goes with it, and a tool message that answers no call just before it is dropped.
+    Everything else is copied as it is (each message a new dict, so the caller's list isn't
+    changed until ask() puts the finished turn back)."""
+    out, dropped, i, n = [], 0, 0, len(messages or [])
+    while i < n:
+        m = messages[i]
+        if not isinstance(m, dict) or m.get("role") == "tool":
+            dropped += 1                           # a result for no call just before it
+            i += 1
+            continue
+        calls = m.get("tool_calls") if m.get("role") == "assistant" else None
+        if not calls:
+            out.append(dict(m))
+            i += 1
+            continue
+        j, answers = i + 1, {}
+        while j < n and isinstance(messages[j], dict) and messages[j].get("role") == "tool":
+            cid = messages[j].get("tool_call_id")
+            if cid in answers:
+                dropped += 1                       # a second result for the same call
+            else:
+                answers[cid] = messages[j]
+            j += 1
+        kept = [c for c in calls if isinstance(c, dict) and c.get("id") in answers]
+        dropped += len(calls) - len(kept)          # calls nobody answered
+        dropped += len(answers) - len(kept)        # results for calls that aren't there
+        if kept:
+            out.append({**m, "tool_calls": kept})
+            out.extend(dict(answers[c["id"]]) for c in kept)
+        elif m.get("content"):
+            out.append({k: v for k, v in m.items() if k != "tool_calls"})
+        i = j
+    return out, dropped
 
 
 def format_notes(notes: list[str]) -> list[str]:
@@ -388,93 +499,10 @@ def period_check(db, name, arguments, result, logger=log, round_no=None):
             [note] + list(getattr(fallback, "notes", None) or []))
 
 
-def run_turn(db, client, messages, *, model=MODEL, max_rounds=MAX_TOOL_ROUNDS,
-             complete_fn=None, logger=log, notes_out=None, usage_out=None):
-    """Run one user turn to completion: call the model, run any tools it picks, feed
-    the results back, repeat until it answers in plain text or `max_rounds` is hit.
-    Returns (answer_text, sources, tool_names_called). Mutates `messages` in place, so
-    the caller's conversation keeps growing turn to turn.
-
-    Never raises: a chat-API failure or an exhausted round budget both return a plain
-    English message instead (#4), and the per-tool honesty (never invented, cited,
-    clarify-don't-guess) already comes from agent_tools.run_tool, which also never
-    raises."""
-    complete_fn = complete_fn or complete   # looked up here, not at def time, so a
-                                             # monkeypatched module-level `complete` is honoured
-    sources: list[dict] = []
-    tool_names: list[str] = []
-    tally = usage_out if usage_out is not None else _new_usage()   # (`usage` is the API's)
-    for round_no in range(1, max_rounds + 1):
-        t0 = time.monotonic()
-        try:
-            resp = complete_fn(client, model, messages, at.tool_schemas())
-        except ChatError as e:
-            _emit(logger, "chat_error", round=round_no, model=model, error=str(e))
-            return ("I couldn't reach the language model just now, so I can't answer "
-                    "this turn. Please try again in a moment."), sources, tool_names
-
-        msg = resp.choices[0].message
-        usage = getattr(resp, "usage", None)
-        messages.append(_assistant_message(msg))
-        calls = getattr(msg, "tool_calls", None) or []
-        cost = getattr(resp, "cost_usd", None)
-        pt, ct = getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None)
-        _emit(logger, "chat_call", round=round_no, model=model,
-              prompt_tokens=pt, completion_tokens=ct,
-              tool_calls=[c.function.name for c in calls],
-              cost_usd=cost, ms=round((time.monotonic() - t0) * 1000, 1))
-        tally["model_calls"] += 1
-        tally["prompt_tokens"] += pt or 0
-        tally["completion_tokens"] += ct or 0
-        if cost is None:
-            tally["cost_complete"] = False         # a call the proxy didn't price
-        else:
-            tally["cost_usd"] += cost
-
-        if not calls:
-            return msg.content, sources, tool_names
-
-        clarify = None
-        for call in calls:
-            t1 = time.monotonic()
-            arguments = call.function.arguments
-            if scale_guessed(call.function.name, arguments, messages):
-                _emit(logger, "scale_guess_blocked", round=round_no,
-                      tool=call.function.name, arguments=str(arguments)[:500])
-                arguments = _without_scale(arguments)
-            result = at.run_tool(db, call.function.name, arguments)
-            err = getattr(result, "error", None)
-            _emit(logger, "tool_call", round=round_no, tool=call.function.name,
-                  arguments=str(arguments)[:500],
-                  ok=getattr(result, "ok", None),
-                  error_code=err.get("code") if isinstance(err, dict) else None,
-                  n_sources=len(result.sources),
-                  ms=round((time.monotonic() - t1) * 1000, 1))
-            tool_names.append(call.function.name)
-            if clarify is None and isinstance(err, dict) and err.get("code") in CLARIFY_CODES:
-                clarify = err.get("message") or "Could you clarify your question?"
-            content, extra_sources, extra_notes = period_check(
-                db, call.function.name, arguments, result, logger, round_no)
-            done_note = completion_note(call.function.name, messages)
-            if done_note:                          # "completed" read as CLOSED, said aloud
-                content = _with_note(content, done_note)
-                extra_notes = list(extra_notes) + [done_note]
-                _emit(logger, "completed_read_as_closed", round=round_no,
-                      tool=call.function.name)
-            sources.extend(result.sources)
-            sources.extend(extra_sources)
-            if notes_out is not None:
-                notes_out.extend(getattr(result, "notes", None) or [])
-                notes_out.extend(extra_notes)
-            messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
-        if clarify:
-            _emit(logger, "clarification_returned", round=round_no)
-            messages.append({"role": "assistant", "content": clarify})
-            return clarify, sources, tool_names
-
-    _emit(logger, "max_rounds_exceeded", rounds=max_rounds)
-    return ("I wasn't able to settle on an answer within the allowed number of tool "
-            "calls. Try asking a narrower question."), sources, tool_names
+CHAT_FAILED = ("I couldn't reach the language model just now, so I can't answer "
+               "this turn. Please try again in a moment.")
+ROUNDS_EXHAUSTED = ("I wasn't able to settle on an answer within the allowed number of tool "
+                    "calls. Try asking a narrower question.")
 
 
 def _loggable(question: str, rule: str | None) -> str:
@@ -624,79 +652,47 @@ def dates_note(dates: dict | None, today_=None) -> str:
 
 
 def ask(db, client, messages, question, *, model=MODEL, logger=log, raw_sources=None,
-        notes=None, usage=None):
-    """Append the user's question, run it to completion, return (answer, source
-    labels). `messages` is mutated in place so the caller can keep the conversation.
-    raw_sources: a list to extend with the tools' source records (agent_ui.py shows the
-    photo behind each image source from them). notes: a list to extend with the tools'
-    notes, the caveats the page shows under the answer whether or not the model said them.
-    usage: a dict to fill with this question's model_calls, prompt_tokens, completion_tokens
-    and cost_usd (as the LiteLLM proxy charged it; cost_complete is False if any call came
-    back without a cost, so the total is then a lower bound).
+        notes=None, usage=None, on_step=None, max_rounds=MAX_TOOL_ROUNDS):
+    """Ask one question: run the agent graph (agent_graph.py) once on this conversation and
+    return (answer, source labels). `messages` is changed in place so the caller can keep the
+    conversation. A thin wrapper for the CLI, the eval suite and the tests; the API runs the
+    graph the same way, through this function.
+    raw_sources: a list to extend with the tools' source records (the page shows the photo
+    behind each image source from them). notes: a list to extend with the tools' notes, the
+    caveats shown under the answer whether or not the model said them. usage: a dict to fill
+    with this question's model_calls, prompt_tokens, completion_tokens and cost_usd (as the
+    LiteLLM proxy charged it; cost_complete is False if any call came back without a cost, so
+    the total is then a lower bound). on_step: called with each graph step as it finishes
+    (no question or answer text). max_rounds: model calls allowed for this question.
 
-    The guardrail (#3) runs here, on both sides of the model, so every caller (the CLI, the
-    page, the eval suite) gets it:
-      - input: a refused question gets the guard's own message and no model call. Only a
-        placeholder goes into `messages`, so the question (which may hold a name or an
-        injection) never reaches a later prompt; the `turn` log line withholds a PDPA
-        question's text for the same reason.
-      - output: an answer with personal data is replaced, in `messages` too, so the next
-        turn's prompt doesn't carry it either.
-    After the guard, a year written short ("nov 202") is asked about, also with no model
-    call: the question and the reply both go into `messages`, so the user's answer ("2025")
-    reaches the model with the question it completes."""
-    tally = _new_usage()                       # this question's model calls, tokens, cost
-    if usage is not None:                      # usage: a dict for the caller (the page shows
-        usage.clear()                          # it under the answer); filled even on a refusal
-        usage.update(tally)
-        tally = usage
-    if not guardrail.names_loaded():           # fail closed: no name list, no answers
-        _emit(logger, "guard_not_ready")
-        _emit(logger, "turn", question="[withheld: guard not ready]", tools_called=[],
-              n_sources=0, refused="not_ready")
-        return guardrail.MESSAGES["not_ready"], []
-    verdict = guardrail.check_input(question)
-    if not verdict.allowed:
-        messages.append({"role": "user", "content": f"[question withheld by the guardrail: "
-                                                    f"{verdict.rule}]"})
-        messages.append({"role": "assistant", "content": verdict.message})
-        _emit(logger, "input_refused", rule=verdict.rule, reason=verdict.reason)
-        _emit(logger, "turn", question=_loggable(question, verdict.rule), tools_called=[],
-              n_sources=0, refused=verdict.rule)
-        return verdict.message, []
+    All or nothing (11 Nov 2026): the graph runs on a copy of `messages`, mended first
+    (answered_only: a tool call with no result, left by a turn cut off half way, makes the
+    chat API refuse the whole conversation), and the copy is put back only when the turn has
+    finished. A turn stopped half way (Streamlit stops the script when the page is clicked
+    while it runs; a bug that raises) leaves `messages` as it was. `history_repaired` is
+    logged when mending was needed.
 
-    short = incomplete_year(question)          # "nov 202": asked, never guessed
-    if short:
-        reply = year_question(short, data_dates(db))
-        messages.append({"role": "user", "content": question})
-        messages.append({"role": "assistant", "content": reply})
-        _emit(logger, "year_unclear", written=short[0])
-        _emit(logger, "turn", question=question[:200], tools_called=[], n_sources=0,
-              model_calls=0, cost_usd=0.0)
-        return reply, []
-
-    if db is not None and messages and messages[0].get("role") == "system":
-        dates = data_dates(db)                 # what "last month" means (#5), in code
-        if dates is None:
-            _emit(logger, "dates_unknown")
-        messages[0]["content"] = SYSTEM_PROMPT + dates_note(dates)
-    messages.append({"role": "user", "content": question})
-    answer, sources, tool_names = run_turn(db, client, messages, model=model, logger=logger,
-                                           notes_out=notes, usage_out=tally)
-    out = guardrail.check_output(answer or "")
-    if not out.allowed:
-        _emit(logger, "output_blocked", rule=out.rule, reason=out.reason)   # never the text
-        answer = out.message
-        for m in reversed(messages):              # the leaked text leaves the history too
-            if m.get("role") == "assistant" and m.get("content"):
-                m["content"] = answer
-                break
-    _emit(logger, "turn", question=question[:200],
-          tools_called=tool_names, n_sources=len(sources), model_calls=tally["model_calls"],
-          cost_usd=round(tally["cost_usd"], 6) if tally["cost_complete"] else None)
+    The guardrail (#3) runs inside the graph, on both sides of the model, so every caller
+    gets it: a refused question gets the guard's own message, no model call, and only a
+    placeholder in `messages`; an answer with personal data is replaced, in `messages` too.
+    A year written short ("nov 202") is asked about, also with no model call."""
+    import agent_graph                         # here, not at the top: it imports this module
+    work, dropped = answered_only(messages)
+    if dropped:
+        _emit(logger, "history_repaired", dropped=dropped)
+    ctx = agent_graph.AgentContext(db=db, client=client, model=model, logger=logger,
+                                   max_rounds=max_rounds)
+    final = agent_graph.run(work, question, ctx, on_step=on_step)
+    sources = list(final.get("sources") or [])
+    if usage is not None:                      # filled even on a refusal
+        usage.clear()
+        usage.update(final.get("usage") or _new_usage())
     if raw_sources is not None:
         raw_sources.extend(sources)
-    return answer, format_sources(sources)
+    if notes is not None:
+        notes.extend(final.get("notes") or [])
+    messages[:] = final["messages"]            # the finished turn, all at once
+    return final["answer"], format_sources(sources)
 
 
 def build_client():

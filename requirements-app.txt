@@ -9,3 +9,6 @@ pymysql
 cryptography      # PyMySQL needs it for MySQL 8's default login method (caching_sha2_password)
 sqlglot           # without it, the query_sql tool is switched off
 python-dotenv
+uvicorn>=0.54.0
+fastapi>=0.162.4
+langgraph>=1.2.20

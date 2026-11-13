@@ -476,14 +476,15 @@ def test_a_name_placeholder_is_filled_from_the_dump_and_never_recorded(monkeypat
         seen.append(messages[-1]["content"])
         return Resp(Msg(content=f"I heard: {messages[-1]['content']}"))
     monkeypatch.setattr(app, "complete", echo)
-    case = {"id": "x", "turns": [{"ask": "{name:EMP001} says CNC-02 is hot",
+    # no digits: an echoed answer with facts and no tool call would be re-asked
+    case = {"id": "x", "turns": [{"ask": "{name:EMP001} says the lathe is hot",
                                   "expect": {"grounded": False, "sources_min": 0}}]}
     r = ev.run_case(case, None, None, capture, employees=STAFF)
     if seen:                                   # without the input guard, the name reaches the model
-        assert seen == ["Tan Mei Ling says CNC-02 is hot"]
+        assert seen == ["Tan Mei Ling says the lathe is hot"]
         assert r.status == "FAIL"               # ... and the echoed name fails the PDPA check
         assert r.failures == ["turn 1: PDPA: an employee's name is in the answer (EMP001)"]
-    assert r.turns[0]["question"] == "{name:EMP001} says CNC-02 is hot"
+    assert r.turns[0]["question"] == "{name:EMP001} says the lathe is hot"
     assert "Tan" not in json.dumps(r.turns)    # not in the question, the answer or anywhere saved
 
 

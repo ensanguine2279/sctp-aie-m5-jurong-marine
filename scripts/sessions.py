@@ -20,7 +20,8 @@ a light copy of what the page shows under each answer (text, sources, caveats, c
 photos). A question the guardrail refused is already only a placeholder in the messages,
 and an answer it blocked is already replaced. The page puts the same placeholder in its
 display copy (agent_ui.kept_question), so a refused question is never stored as typed.
-Conversations not touched for AGENT_SESSION_DAYS days (default 7) are deleted.
+Conversations not touched for AGENT_SESSION_DAYS days (default 7) are deleted, and the
+page's Delete button deletes one at once (SessionStore.delete).
 
 The page's sidebar lists the newest conversations (SessionStore.recent). Each is titled by
 its first question as the MESSAGES keep it, so a refused question shows only as its
@@ -203,6 +204,19 @@ class SessionStore:
             out.append(Recent(r["session_id"], title_of(messages), int(r.get("turns") or 0),
                               r.get("updated_at")))
         return out
+
+    def delete(self, sid: str) -> tuple[bool, str | None]:
+        """Delete one conversation, on the user's request (the page's Delete button).
+        (ok, error). A conversation that isn't there, never saved or already deleted or
+        purged, is ok: either way it is gone. Never raises; a bad id never reaches the
+        database. Uses the DELETE the session user already has, for purge."""
+        if not valid_id(sid):
+            return False, "not a session id"
+        try:
+            self._run(f"DELETE FROM {self.table} WHERE session_id = :sid", {"sid": sid})
+        except Exception as e:
+            return False, f"couldn't delete the conversation ({type(e).__name__})"
+        return True, None
 
     def purge(self, now: datetime | None = None) -> int | None:
         """Delete conversations not touched for `days` days. How many, or None on error."""
