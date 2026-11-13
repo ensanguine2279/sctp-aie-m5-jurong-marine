@@ -4,8 +4,8 @@
 the Streamlit page and the eval suite use, for a client that isn't the page: another
 front end, a backend service, a script, a test harness. It adds no agent logic. Grounding,
 citations, the guardrail on both sides of the model, honest degradation and the date rules
-all happen inside `ask()`, exactly as on the page, on whichever engine `AGENT_ENGINE` picks
-([loop or graph](agent_graph.md)).
+all happen inside `ask()`, exactly as on the page, which runs the agent's
+[LangGraph graph](agent_graph.md).
 
 ```bash
 # personal repo
@@ -35,7 +35,7 @@ time). Errors are JSON, `{"error": {"code": ..., "message": ...}}`, never a stac
 
 | Route | Body / query | Returns |
 |---|---|---|
-| `GET /health` | (no key) | `status`, `guard_ready`, `sessions` (on / off and why), `model`, `engine` (asked for), `engine_in_use`, `version`. 503 when the guard's name list isn't loaded |
+| `GET /health` | (no key) | `status`, `guard_ready`, `sessions` (on / off and why), `model`, `agent` (`langgraph`), `version`. 503 when the guard's name list isn't loaded |
 | `POST /ask` | `{"question": "...", "session_id": optional}` | `answer`, `sources`, `notes` (the tools' caveats), `refused` (the guardrail's rule, or null), `answer_replaced` (rule, or null), `usage` (model calls, tokens, cost from the proxy), `cost_line`, `trace` (the page's What happened rows), `session_id`, `turns`, `saved`, `save_error` |
 | `POST /ask/stream` | the same body | `text/event-stream`: a `step` event per step of the turn as it happens, then one `answer` (the `/ask` body) or `error` (`{"status", "error"}`) |
 | `GET /sessions?limit=8` | | the newest saved conversations: `session_id`, `title`, `turns`, `updated_at` |
@@ -60,10 +60,10 @@ Without the session store the API still answers; `session_id` is then null and `
 one step in this process, so two requests on the same conversation can't both append and lose
 one on save. (Two API processes would need the lock in the database; one is enough here.)
 
-**Streaming.** Each `step` is what the [graph engine](agent_graph.md#what-each-step-reports)
+**Streaming.** Each `step` is what the [graph](agent_graph.md#what-each-step-reports)
 reports per node (`guard_in`, `model`, `tools`, `guard_out`: which tools ran, which round,
-whether the answer was replaced), never the question or answer text. On the loop engine
-there are no steps, only the answer. The question runs in its own thread, so it finishes and
+whether the answer was replaced), never the question or answer text. A refused question is
+one step (`guard_in`, not passed) and then the answer. The question runs in its own thread, so it finishes and
 is saved even if the client disconnects; if nothing happens for 300 s (`STREAM_TIMEOUT`) the
 stream ends with a 504 `timeout` error, and the question may still finish and be saved.
 
@@ -184,8 +184,8 @@ About an hour with its tests. Not built, because nothing needs it yet.
 
 `tests/test_agent_api.py` (28 tests; no database, no real LLM call; the service tested with
 the real `ask()`, a scripted model, stubbed tools and an in-memory session store). **Access**:
-the key compared exactly, no key no service. **Health**: the engine asked for and the one in
-use (the loop when langgraph is missing), sessions on/off. **Ask**: empty, non-text and
+the key compared exactly, no key no service. **Health**: whether it can answer (the guard's name
+list), the agent, sessions on/off. **Ask**: empty, non-text and
 over-long questions and bad session ids refused with nothing asked; a question starting a
 saved conversation (answer, sources, usage, trace, display copy); a follow-up reaching the
 model with the earlier question; a refused question stored only as its placeholder; an answer
@@ -193,8 +193,8 @@ with personal data reported as replaced; unknown, unreadable and unsaved convers
 503); answered but not saved without a store; a failed save reported, not hidden; a bug as a
 500 with no internals; two questions at once on one conversation both kept. **Conversations**:
 one read back with its spend, the recent list newest first, its limit clamped and checked.
-**Streaming**: on the graph, five steps then the answer, saved, with no question text in the
-steps; on the loop, only the answer; a bad request as one error event; a stalled question
+**Streaming**: five steps then the answer, saved, with no question text in the steps; a refused
+question as one step then the answer; a bad request as one error event; a stalled question
 ending the stream with a 504 while it still finishes and is saved; the SSE format. **HTTP**
 (only with FastAPI and httpx installed): every route but `/health` refusing a missing key,
 `/ask` and `/sessions/{id}` end to end, `/ask/stream` as `text/event-stream` with five steps

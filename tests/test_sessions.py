@@ -297,7 +297,8 @@ def test_a_follow_up_after_a_restart_still_has_the_earlier_conversation(conn, mo
 
     def model(client, model, messages, tools):
         prompts.append([dict(m) for m in messages])
-        return _Resp("CNC-02 is running." if len(prompts) == 1 else "CNC-03 is idle.")
+        # no digits: an answer with facts and no tool call is re-asked (13 Nov 2026)
+        return _Resp("Yes, it is running." if len(prompts) == 1 else "No, it is idle.")
     monkeypatch.setattr(app, "complete", model)
 
     # Before the restart: one question, saved.
@@ -316,7 +317,7 @@ def test_a_follow_up_after_a_restart_still_has_the_earlier_conversation(conn, mo
     second = prompts[1]
     assert second[0] == {"role": "system", "content": app.SYSTEM_PROMPT}
     assert [m["content"] for m in second[1:]] == [
-        "is CNC-02 running?", "CNC-02 is running.", "and what about CNC-03?"]
+        "is CNC-02 running?", "Yes, it is running.", "and what about CNC-03?"]
     assert sum(m["role"] == "system" for m in second) == 1
 
 

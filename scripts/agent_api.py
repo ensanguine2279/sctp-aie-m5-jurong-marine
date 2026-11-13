@@ -18,12 +18,11 @@ is only what HTTP needs:
       two requests can't both append to the same conversation and lose one on save;
     - errors as JSON with a code, never a stack trace;
     - /ask/stream (11 Nov 2026): the same question as /ask, as server-sent events, one per
-      step of the turn as it happens (the graph engine's guard_in, model, tools, guard_out;
-      with the loop, only the answer), then the answer itself. Steps carry no question or
-      answer text, only what kind of step it was and which tools ran.
+      step of the turn as it happens (the graph's guard_in, model, tools, guard_out), then
+      the answer itself. Steps carry no question or answer text, only what kind of step it
+      was and which tools ran.
 
-Engine: AGENT_ENGINE=graph runs each question through the LangGraph engine (agent_graph.py),
-anything else through the loop; /health says which is in use. Both give the same answers.
+The agent is the LangGraph graph in agent_graph.py (the only engine since 12 Nov 2026).
 
 Design (11 Nov 2026): the routes are a thin shell over `AgentService`, whose methods take and
 return plain Python (a `Reply`: status code and JSON body). So the tests need neither
@@ -197,12 +196,9 @@ class AgentService:
     # ---------------------------------------------------------------- routes ---
     def health(self) -> Reply:
         guard = app.guardrail.names_loaded() > 0
-        engine = app.engine()
         body = {"status": "ok" if guard else "guard_not_ready", "guard_ready": guard,
                 "sessions": "on" if self.store else f"off ({self.store_why or 'no store'})",
-                "model": self.model, "engine": engine,
-                "engine_in_use": "loop" if engine == "graph" and not app.graph_ready() else engine,
-                "version": API_VERSION}
+                "model": self.model, "agent": "langgraph", "version": API_VERSION}
         return Reply(200 if guard else 503, body)
 
     def ask(self, question, session_id: str | None = None, on_step=None) -> Reply:

@@ -466,8 +466,8 @@ def test_the_page_and_the_models_history_agree_after_a_cut_off_question(monkeypa
         sent.append([dict(m) for m in messages])
         if len(sent) == 1:
             return FakeResponse(FakeMessage(content=None, tool_calls=[call]))
-        return FakeResponse(FakeMessage(content="CNC-02 is running."))
-    monkeypatch.setattr(app, "complete", model)
+        return FakeResponse(FakeMessage(content="Yes, it is running."))  # no digits:
+    monkeypatch.setattr(app, "complete", model)  # facts with no tool call are re-asked
 
     def stopped(db, name, args):
         raise Stopped()
@@ -480,7 +480,7 @@ def test_the_page_and_the_models_history_agree_after_a_cut_off_question(monkeypa
     assert ui.drop_unanswered(shown) == "how many machines?" and shown == []
     assert messages == app.new_conversation()
     answer, _ = app.ask(None, None, messages, "is CNC-02 running?")
-    assert answer == "CNC-02 is running."
+    assert answer == "Yes, it is running."
     assert not any(m.get("tool_calls") for m in sent[1])
     assert [m["content"] for m in sent[1][1:]] == ["is CNC-02 running?"]
 

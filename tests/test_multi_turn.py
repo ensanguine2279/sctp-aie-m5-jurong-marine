@@ -211,7 +211,8 @@ def test_a_refused_question_reads_no_dates(monkeypatch):
 
 @needs_names
 def test_a_follow_up_reaches_the_model_with_the_earlier_turns_and_one_system_prompt(monkeypatch):
-    seen = model_that_records(monkeypatch, ["CNC-02 had 4.", "None in October; in June 2026, 1."])
+    # answers without digits: one with facts and no tool call would be sent back to the model
+    seen = model_that_records(monkeypatch, ["It had four.", "None in October; one in June."])
     db = FakeDb(DATA)
     messages = app.new_conversation()
     app.ask(db, None, messages, "How many work orders did CNC-02 have this year?")
@@ -219,7 +220,7 @@ def test_a_follow_up_reaches_the_model_with_the_earlier_turns_and_one_system_pro
     second = seen[1]
     assert [m["role"] for m in second] == ["system", "user", "assistant", "user"]
     assert [m["content"] for m in second[1:]] == [
-        "How many work orders did CNC-02 have this year?", "CNC-02 had 4.",
+        "How many work orders did CNC-02 have this year?", "It had four.",
         "And what about last month?"]
     assert second[0]["content"].count("\nDates:\n") == 1   # refreshed, not stacked
 
@@ -319,7 +320,8 @@ def test_check_shows_the_frozen_date(capsys):
 # ------------------------------- a period after the data ends, in code ---
 # 10 Nov 2026, first real eval run: "and what about last month?" queried October 2026 (right),
 # got nothing, and the model answered "no work orders in October", ignoring the prompt's rule
-# to fall back to June. The loop now does the fallback itself (agent_app.period_check).
+# to fall back to June. The agent now does the fallback itself (agent_app.period_check, run
+# by the graph's tools node).
 
 class _Fn:
     def __init__(self, name, arguments):
@@ -337,7 +339,7 @@ class _ToolMsg:
 
 
 class _R:
-    """A ToolResult stand-in: what run_turn and period_check read."""
+    """A ToolResult stand-in: what the tools node and period_check read."""
 
     def __init__(self, data, sources=(), notes=(), ok=True):
         self.ok, self.error, self.data = ok, None, data
@@ -349,8 +351,9 @@ class _R:
 
 
 def _loop(monkeypatch, arguments, db):
-    """One run_turn: the model calls list_work_orders with `arguments`, then answers.
-    Returns (the tool runs, the tool message's content as JSON, events, notes, sources)."""
+    """One question through ask(): the model calls list_work_orders with `arguments`, then
+    answers. Returns (the tool runs, the tool message's content as JSON, events, notes,
+    source records). Until 12 Nov 2026 this drove the old loop (run_turn) directly."""
     runs = []
 
     def run_tool(db_, name, args):
@@ -361,10 +364,10 @@ def _loop(monkeypatch, arguments, db):
                   sources=[{"label": f"CMMS work orders {args.get('date_from')}"}],
                   notes=["Work orders record no parts used (trap list C11)."])
     monkeypatch.setattr(app.at, "run_tool", run_tool)
-    replies = iter([_Resp(None), _Resp("done")])
-    replies_first = next(replies)
-    replies_first.choices[0].message = _ToolMsg([_Call("c1", "list_work_orders", arguments)])
-    seq = iter([replies_first, next(replies)])
+    first = _Resp(None)
+    first.choices[0].message = _ToolMsg([_Call("c1", "list_work_orders", arguments)])
+    seq = iter([first, _Resp("done")])
+    monkeypatch.setattr(app, "complete", lambda *a: next(seq))
     events = []
 
     class Grab(logging.Handler):
@@ -372,15 +375,16 @@ def _loop(monkeypatch, arguments, db):
             events.append(json.loads(r.getMessage()))
     lg = logging.getLogger(f"test_multiturn.period.{id(runs)}")
     lg.setLevel(logging.INFO)
+    lg.propagate = False
     lg.addHandler(Grab())
-    messages = [{"role": "user", "content": "and what about last month?"}]
-    notes = []
-    _, sources, _ = app.run_turn(db, None, messages, complete_fn=lambda *a: next(seq),
-                                 logger=lg, notes_out=notes)
+    messages, notes, raw = app.new_conversation(), [], []
+    app.ask(db, None, messages, "and what about last month?", logger=lg, notes=notes,
+            raw_sources=raw)
     tool_msg = next(m for m in messages if m.get("role") == "tool")
-    return runs, json.loads(tool_msg["content"]), events, notes, sources
+    return runs, json.loads(tool_msg["content"]), events, notes, raw
 
 
+@needs_names
 def test_a_period_after_the_data_ends_is_run_again_for_the_latest_full_month(monkeypatch):
     runs, body, events, notes, sources = _loop(
         monkeypatch, '{"machine": "CNC-02", "date_from": "2026-10-01", "date_to": "2026-10-31"}',
@@ -401,6 +405,7 @@ def test_a_period_after_the_data_ends_is_run_again_for_the_latest_full_month(mon
     assert note in notes and len(sources) == 2                           # both cited
 
 
+@needs_names
 def test_a_period_inside_the_data_is_passed_through_unchanged(monkeypatch):
     runs, body, events, notes, _ = _loop(
         monkeypatch, {"machine": "CNC-02", "date_from": "2026-06-01", "date_to": "2026-06-30"},
@@ -409,6 +414,7 @@ def test_a_period_inside_the_data_is_passed_through_unchanged(monkeypatch):
     assert not [e for e in events if e["event"].startswith("period_")]
 
 
+@needs_names
 def test_a_period_running_past_the_data_says_where_it_stops(monkeypatch):
     runs, body, events, notes, _ = _loop(
         monkeypatch, {"machine": "CNC-02", "date_from": "2026-01-01", "date_to": "2026-11-10"},
@@ -419,8 +425,76 @@ def test_a_period_running_past_the_data_says_where_it_stops(monkeypatch):
     assert [e["event"] for e in events if e["event"].startswith("period_")] == ["period_past_data"]
 
 
+@needs_names
 def test_without_the_datas_dates_nothing_is_changed(monkeypatch):
     for db in (None, FakeDb(fail=True)):
         runs, body, events, _, _ = _loop(
             monkeypatch, {"date_from": "2026-10-01", "date_to": "2026-10-31"}, db)
         assert len(runs) == 1 and "latest_full_month" not in body
+
+
+# ------------------------------------ "still open" on data that ends in June ---
+# 13 Nov 2026, eval run (mt-last-month-work-orders, turn 3): "Which of those are still open?"
+# was answered as if the June data were today's. The agent now adds the data's end date
+# when a question asks how things stand now and the answer doesn't give it.
+
+def test_a_question_about_now_gets_the_datas_end_date():
+    out = app.as_of_said("Open: 11591 and 11572.", "Which of those are still open?", DATES, NOV10)
+    assert out.startswith("Open: 11591 and 11572.") and "runs to 30 Jun 2026" in out
+    assert "may have changed since" in out
+    for q in ("what is CNC-02's status now?", "is anything currently awaiting parts?",
+              "what's open at the moment?", "any open today?"):
+        assert app.as_of_said("x", q, DATES, NOV10) != "x", q
+
+
+def test_no_end_date_needed_when_given_not_about_now_or_on_live_data():
+    for said in ("Open as of 30 Jun 2026: 11591.", "Open on 30 June 2026: 11591.",
+                 "As of June 30, 11591.", "Open on 2026-06-30: 11591."):
+        assert app.as_of_said(said, "which are still open?", DATES, NOV10) == said, said
+    assert app.as_of_said("x", "how many in June 2026?", DATES, NOV10) == "x"
+    assert app.as_of_said("x", "severity 4 on the current scale?", DATES, NOV10) == "x"
+    assert app.as_of_said("x", "which are still open?", None, NOV10) == "x"
+    assert app.as_of_said("x", "which are still open?", DATES, date(2026, 6, 30)) == "x"
+    assert app.as_of_said("", "which are still open?", DATES, NOV10) == ""
+
+
+def _now_turn(monkeypatch, question, answer, run_tool=None):
+    from test_agent_app import FakeMessage, FakeResponse, FakeToolCall, FakeToolResult, scripted
+    monkeypatch.setenv("AGENT_TODAY", "2026-11-10")
+    call = FakeToolCall("c1", "list_work_orders", '{"machine": "CNC-02", "status": "open"}')
+    monkeypatch.setattr(app, "complete", scripted(
+        FakeResponse(FakeMessage(content=None, tool_calls=[call])),
+        FakeResponse(FakeMessage(content=answer))))
+    monkeypatch.setattr(app.at, "run_tool", run_tool or (lambda db, n, a: FakeToolResult()))
+    events = []
+
+    class Grab(logging.Handler):
+        def emit(self, r):
+            events.append(json.loads(r.getMessage()))
+    lg = logging.getLogger(f"test_multiturn.now.{id(events)}")
+    lg.setLevel(logging.INFO)
+    lg.propagate = False
+    lg.addHandler(Grab())
+    messages = app.new_conversation()
+    out, _ = app.ask(FakeDb(DATA), None, messages, question, logger=lg)
+    return out, messages, events
+
+
+@needs_names
+def test_the_end_date_reaches_the_answer_and_the_history(monkeypatch):
+    out, messages, events = _now_turn(monkeypatch, "Which of CNC-02's work orders are still open?",
+                                      "Open: 11591 and 11572.")
+    assert out.startswith("Open: 11591 and 11572.") and "runs to 30 Jun 2026" in out
+    assert messages[-1] == {"role": "assistant", "content": out}
+    assert {"event": "caveat_added", "caveat": "data_end"} in [
+        {k: e[k] for k in ("event", "caveat") if k in e} for e in events]
+
+
+@needs_names
+def test_no_end_date_on_a_question_back_from_the_tool(monkeypatch):
+    from test_agent_app import FakeToolResult
+    asked = FakeToolResult()
+    asked.ok, asked.error = False, {"code": "ambiguous_machine", "message": "Which CNC?"}
+    out, _, events = _now_turn(monkeypatch, "which are still open on the CNC?", "unused",
+                               lambda db, n, a: asked)
+    assert out == "Which CNC?" and "caveat_added" not in [e["event"] for e in events]

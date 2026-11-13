@@ -13,14 +13,10 @@ from types import SimpleNamespace
 
 import pytest
 
-import mini_langgraph
-
-mini_langgraph.install()
-
-import agent_api as api  # noqa: E402
-import agent_app as app  # noqa: E402
-import sessions  # noqa: E402
-from test_agent_graph import model_says, result  # noqa: E402
+import agent_api as api
+import agent_app as app
+import sessions
+from test_agent_graph import model_says, result
 
 KEY = "k" * 32
 
@@ -64,8 +60,7 @@ class MemStore:
 def scripted(monkeypatch):
     """Make the model and tools answer as told: scripted("Hello.") or
     scripted([("c1", "list_machines", "{}")], "Twelve.", sources=[...])."""
-    def _set(*replies, sources=(), engine="loop"):
-        monkeypatch.setenv("AGENT_ENGINE", engine)
+    def _set(*replies, sources=()):
         monkeypatch.setattr(app, "complete", model_says(*replies))
         monkeypatch.setattr(app.at, "run_tool",
                             lambda db, name, args: result(sources=[{"label": s} for s in sources]))
@@ -93,18 +88,11 @@ def test_no_key_no_service():
 
 # ------------------------------------------------------------------- health ---
 
-def test_health_says_which_engine_runs(monkeypatch):
-    monkeypatch.setenv("AGENT_ENGINE", "graph")
+def test_health_says_whether_it_can_answer():
     r = service(MemStore()).health()
     assert r.status == 200 and r.body["guard_ready"] is True
-    assert r.body["engine"] == "graph" and r.body["engine_in_use"] == "graph"
-    assert r.body["sessions"] == "on"
-    monkeypatch.setattr(app, "graph_ready", lambda: False)
-    assert service().health().body["engine_in_use"] == "loop"
-    monkeypatch.delenv("AGENT_ENGINE")
-    body = service().health().body
-    assert body["engine"] == body["engine_in_use"] == "loop"
-    assert body["sessions"].startswith("off")
+    assert r.body["agent"] == "langgraph" and r.body["sessions"] == "on"
+    assert service().health().body["sessions"].startswith("off")
 
 
 # ---------------------------------------------------------------------- ask ---
@@ -148,13 +136,13 @@ def test_a_question_starts_a_saved_conversation(scripted):
 def test_a_follow_up_continues_the_conversation(scripted, monkeypatch):
     store = MemStore()
     svc = service(store)
-    scripted("CNC-02 has 3 open work orders.")
+    scripted("Three are open.")           # no digits: facts with no tool call are re-asked
     sid = svc.ask("open work orders on CNC-02?").body["session_id"]
     seen = []
 
     def complete(client, model, messages, tools):
         seen.append([m.get("content") for m in messages if m.get("role") == "user"])
-        return model_says("And 1 on CNC-03.")(client, model, messages, tools)
+        return model_says("And one on that machine.")(client, model, messages, tools)
     monkeypatch.setattr(app, "complete", complete)
     r = svc.ask("and CNC-03?", sid)
     assert r.status == 200 and r.body["session_id"] == sid and r.body["turns"] == 2
@@ -263,9 +251,8 @@ def test_listing_recent_conversations(scripted):
 
 # ------------------------------------------------------------------ streaming ---
 
-def test_streaming_on_the_graph_sends_each_step_then_the_answer(scripted):
-    scripted([("c1", "list_machines", "{}")], "Twelve machines.", sources=["CMMS machines"],
-             engine="graph")
+def test_streaming_sends_each_step_then_the_answer(scripted):
+    scripted([("c1", "list_machines", "{}")], "Twelve machines.", sources=["CMMS machines"])
     store = MemStore()
     events = list(service(store).ask_stream("how many machines?"))
     kinds = [e["event"] for e in events]
@@ -278,10 +265,11 @@ def test_streaming_on_the_graph_sends_each_step_then_the_answer(scripted):
     assert "machines?" not in json.dumps([e["data"] for e in events[:-1]])   # no text in steps
 
 
-def test_streaming_on_the_loop_sends_only_the_answer(scripted):
-    scripted("Hello.")
-    events = list(service(MemStore()).ask_stream("hello"))
-    assert [e["event"] for e in events] == ["answer"]
+def test_streaming_a_refused_question_sends_one_step_then_the_answer(scripted):
+    scripted(AssertionError("the model was called"))
+    events = list(service(MemStore()).ask_stream("What is the name of employee EMP015?"))
+    assert [e["event"] for e in events] == ["step", "answer"]
+    assert events[0]["data"]["passed"] is False and events[1]["data"]["refused"] == "pdpa"
 
 
 def test_streaming_a_bad_request_sends_one_error():
@@ -345,7 +333,7 @@ def test_ask_over_http(client, scripted):
 
 
 def test_ask_stream_over_http(client, scripted):
-    scripted([("c1", "list_machines", "{}")], "Twelve.", engine="graph")
+    scripted([("c1", "list_machines", "{}")], "Twelve.")
     r = client.post("/ask/stream", json={"question": "how many?"},
                     headers={api.KEY_HEADER: KEY})
     assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
