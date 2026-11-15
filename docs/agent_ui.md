@@ -110,7 +110,7 @@ A question the guardrail refuses is saved, and drawn again after a reload, only 
 placeholder (`kept_question()`), the same as in `messages`. Before 9 Nov 2026 the saved
 display copy kept it as typed ([`sessions.md`](sessions.md#what-is-stored)).
 
-If `AGENT_SESSION_DB_PASSWORD` isn't set, or MySQL is down, the sidebar says the conversation
+If `CMMS_DB_SESSION_PASSWORD` isn't set, or MySQL is down, the sidebar says the conversation
 isn't being saved, and the page carries on in memory as before. Details, setup and the check in
 [`sessions.md`](sessions.md).
 
@@ -182,13 +182,16 @@ stop Streamlit (Ctrl+C) and start it again; refreshing the browser is not enough
 
 ## Configuration
 
-All settings come from environment variables, or from `.env` when you run locally.
+All settings come from environment variables, or from `.env` when you run locally. The
+database settings start with `CMMS_DB_` (since 14 Nov 2026; before that `DB_*`, `AGENT_DB_*`
+and `AGENT_SESSION_DB_*`, which are no longer read: see
+[Settings](README.md#settings-one-prefix-per-database)).
 
 | Variable | Used for |
 |---|---|
-| `DB_HOST`, `DB_PORT`, `DB_NAME` | The MySQL database (Aiven) |
-| `AGENT_DB_USERNAME`, `AGENT_DB_PASSWORD` | The read-only `agent_ro` user. `agent_tools.connect()` refuses the owner account (`DB_USERNAME`/`DB_PASSWORD`) |
-| `AGENT_SESSION_DB_USERNAME`, `AGENT_SESSION_DB_PASSWORD` | The `agent_sessions` user, for saved conversations ([`sessions.md`](sessions.md)). Username defaults to `agent_sessions`. Without the password, conversations aren't saved and the sidebar says so |
+| `CMMS_DB_HOST`, `CMMS_DB_PORT`, `CMMS_DB_NAME` | The MySQL database (Aiven: `jme_cmms` since 15 Nov 2026) |
+| `CMMS_DB_AGENT_USERNAME`, `CMMS_DB_AGENT_PASSWORD` | The read-only `agent_ro` user. `agent_tools.connect()` refuses the owner account (`CMMS_DB_USERNAME`/`CMMS_DB_PASSWORD`). Without the password the page stops with "Set CMMS_DB_AGENT_PASSWORD" |
+| `CMMS_DB_SESSION_USERNAME`, `CMMS_DB_SESSION_PASSWORD` | The `agent_sessions` user, for saved conversations ([`sessions.md`](sessions.md)). Username defaults to `agent_sessions`. Without the password, conversations aren't saved and the sidebar says so |
 | `AGENT_SESSION_DAYS` | How long a saved conversation is kept after its last answer (default 7) |
 | `OPENAI_API_KEY` | Your LiteLLM proxy member key |
 | `OPENAI_BASE_URL` | The proxy URL |
@@ -260,7 +263,9 @@ flowchart LR
 ```
 
 **Deployed end to end on 9 Nov 2026**, with conversations saved to `agent_sessions` from the
-hosted page. The problems hit on the way are in [Troubleshooting](#troubleshooting).
+hosted page. The problems hit on the way are in [Troubleshooting](#troubleshooting). For the
+redeploy after the settings rename and the move to `jme_cmms` (15 Nov 2026), see
+[Redeploying after the rename](#redeploying-after-the-rename-15-nov-2026).
 
 ## Files
 
@@ -275,11 +280,12 @@ The image holds no secrets and no data. Settings come from the environment and d
 Aiven.
 
 `.dockerignore` keeps `.env` out of the image, but `gcloud run deploy --source .` first uploads
-the whole folder to a Cloud Build bucket. Keep no `.env` in the deploy folder, or add a
-`.gcloudignore` containing:
+the whole folder to a Cloud Build bucket. Keep no `.env` (or `.env.aiven`) in the deploy folder,
+or add a `.gcloudignore` containing:
 
 ```
 .env
+.env.*
 .git
 __pycache__/
 ```
@@ -361,15 +367,18 @@ done
 The secret names use **hyphens**, exactly as above, and the deploy command refers to them by
 these names. Check with `gcloud secrets list --format='value(name)'`; a secret made with
 underscores (`agent_session_db_password`) is a different secret, and the grant above doesn't
-cover it.
+cover it. The secrets' names didn't change with the settings rename: only the environment
+variable each one is attached to did (section 2).
 
-Use the **agent_ro** password, never the owner's. `DB_USERNAME` and `DB_PASSWORD` are not set
-on Cloud Run, and `connect()` refuses the owner account anyway. The session password is the one
-you gave `AGENT_SESSION_DB_PASSWORD` when you ran `python scripts/sessions.py setup` against
-Aiven from your computer; run that (and `check`) before the first deploy. To confirm the secret
-holds the same password without printing either, compare
+Use the **agent_ro** password, never the owner's. `CMMS_DB_USERNAME` and `CMMS_DB_PASSWORD`
+are not set on Cloud Run, and `connect()` refuses the owner account anyway. The agent_ro
+password is the `CMMS_DB_AGENT_PASSWORD` that `agent_user.py` (or `pipeline.py --agent setup`)
+used against Aiven; the session password is the `CMMS_DB_SESSION_PASSWORD` that
+`sessions.py setup` used. Run both (and their checks) from your computer before the first
+deploy, with `--env-file` pointing at your Aiven settings. To confirm a secret holds the same
+password without printing either, compare
 `gcloud secrets versions access latest --secret=agent-session-db-password | sha256sum` with the
-SHA-256 of the `.env` value.
+SHA-256 of the value in your settings file.
 
 ## 2. Deploy (from the folder with the `Dockerfile`, section 0)
 
@@ -377,19 +386,24 @@ SHA-256 of the `.env` value.
 gcloud run deploy jme-agent --source . --region $REGION \
   --allow-unauthenticated --session-affinity \
   --min-instances 0 --max-instances 1 --memory 1Gi --timeout 600 \
-  --set-env-vars "DB_HOST=YOUR-SERVICE.aivencloud.com,DB_PORT=12345,DB_NAME=defaultdb,AGENT_DB_USERNAME=agent_ro,AGENT_SESSION_DB_USERNAME=agent_sessions,OPENAI_BASE_URL=https://35-240-177-226.sslip.io,AGENT_LOG_FILE=off" \
-  --set-secrets "AGENT_DB_PASSWORD=agent-db-password:latest,AGENT_SESSION_DB_PASSWORD=agent-session-db-password:latest,OPENAI_API_KEY=openai-api-key:latest,APP_PASSWORD=app-password:latest"
+  --set-env-vars "CMMS_DB_HOST=YOUR-SERVICE.aivencloud.com,CMMS_DB_PORT=12345,CMMS_DB_NAME=jme_cmms,CMMS_DB_AGENT_USERNAME=agent_ro,CMMS_DB_SESSION_USERNAME=agent_sessions,OPENAI_BASE_URL=https://35-240-177-226.sslip.io,AGENT_LOG_FILE=off" \
+  --set-secrets "CMMS_DB_AGENT_PASSWORD=agent-db-password:latest,CMMS_DB_SESSION_PASSWORD=agent-session-db-password:latest,OPENAI_API_KEY=openai-api-key:latest,APP_PASSWORD=app-password:latest"
 ```
 
-**Replace `YOUR-SERVICE.aivencloud.com` and `12345`** with the `DB_HOST` and `DB_PORT` from your
-`.env`. The deploy succeeds with the placeholders, but the page then can't reach MySQL. Keep
-the filled-in command in a script in Cloud Shell (it holds no passwords) so every redeploy uses
-the same values. To fix only the settings on a running service, without a rebuild:
+**Replace `YOUR-SERVICE.aivencloud.com` and `12345`** with the `CMMS_DB_HOST` and
+`CMMS_DB_PORT` from your Aiven settings. The deploy succeeds with the placeholders, but the
+page then can't reach MySQL. Keep the filled-in command in a script in Cloud Shell (it holds no
+passwords) so every redeploy uses the same values. To fix only the settings on a running
+service, without a rebuild:
 
 ```bash
 gcloud run services update jme-agent --region $REGION \
-  --update-env-vars "DB_HOST=...,DB_PORT=...,DB_NAME=..."
+  --update-env-vars "CMMS_DB_HOST=...,CMMS_DB_PORT=...,CMMS_DB_NAME=..."
 ```
+
+`--set-env-vars` and `--set-secrets` **replace** the service's whole list, so a deploy with the
+command above also removes any old variables (`DB_HOST`, `AGENT_DB_PASSWORD`, ...) left from an
+earlier deploy. `--update-env-vars` only adds or changes the ones named.
 
 `--allow-unauthenticated` makes the URL public, so **`APP_PASSWORD` is what protects the page**.
 The page shows a password box first, and nothing connects until the password is right. If the
@@ -408,6 +422,41 @@ saved in MySQL after every answer.
 
 `AGENT_LOG_FILE=off` stops the page writing the log file. The container's disk is temporary, so
 the file would be lost anyway, and the same lines already go to Cloud Logging through stderr.
+
+## Redeploying after the rename (15 Nov 2026)
+
+The page deployed on 9 and 11 Nov reads the old setting names and the `defaultdb` database.
+The current code reads only `CMMS_DB_*`, and the hosted data is now in `jme_cmms`, loaded by
+the `ingest` owner. A redeploy with the old settings would not start ("Set
+CMMS_DB_AGENT_PASSWORD"). In order:
+
+1. **On your computer, against Aiven** (your Aiven settings file, e.g. `.env.aiven`):
+   `pipeline.py --recreate --foreign-keys --agent setup` (creates `agent_ro` on `jme_cmms`),
+   `agent_user.py --check`, `sessions.py setup` and `sessions.py check`, then
+   `run_evals.py` (52/52). Done on 15 Nov 2026.
+2. **Make the two secrets match the passwords those scripts used** (each adds a new version;
+   `latest` is what the deploy reads):
+
+   ```bash
+   printf '%s' 'THE_CMMS_DB_AGENT_PASSWORD'   | gcloud secrets versions add agent-db-password --data-file=-
+   printf '%s' 'THE_CMMS_DB_SESSION_PASSWORD' | gcloud secrets versions add agent-session-db-password --data-file=-
+   ```
+
+   Check without printing them: compare `gcloud secrets versions access latest
+   --secret=agent-db-password | sha256sum` with the SHA-256 of `CMMS_DB_AGENT_PASSWORD` in your
+   Aiven settings.
+3. **Put the current files in the deploy folder** (section 0): `scripts/` from the repo (the
+   whole folder: `db_config.py`, `agent_tools.py`, `sessions.py`, `agent_app.py`,
+   `agent_graph.py`, `agent_ui.py` all changed), `requirements-app.txt` (it has `langgraph`),
+   `Dockerfile`, `.dockerignore`.
+4. **Deploy with the section 2 command**, with `CMMS_DB_NAME=jme_cmms` and your real host and
+   port. It replaces every old variable.
+5. **Check the page**: the sidebar says conversations are saved; ask one of the kill-shot
+   questions and the CNC-02 question; open the What happened tab. In Cloud Run's logs, no
+   `Missing setting(s)` or `Access denied` lines.
+6. **Then clean up on Aiven**, as `avnadmin`, once the page answers from `jme_cmms`: the old
+   tables and views in `defaultdb` are no longer used. Conversations saved in `defaultdb`'s
+   `agent_sessions` stay behind there: the page's Recent list starts empty on `jme_cmms`.
 
 ## 3. Before the demo
 
@@ -440,16 +489,19 @@ For the MySQL error code, search Cloud Run → jme-agent → Logs for the error 
 | `TypeError` mentioning `vertical_alignment`, or `AttributeError: ... has no attribute 'popover'` | Local | Streamlit is older than 1.36. Run `pip install -U -r requirements-app.txt` |
 | No password box | Both | `APP_PASSWORD` is not set (or, on Cloud Run, the secret isn't attached) |
 | "Wrong password." when the password is right | Cloud Run | The secret was stored with a trailing newline. Recreate it with `printf '%s'` |
-| Page shows "Couldn't connect as the agent user" | Both | One of these: wrong `DB_HOST`/`DB_PORT`; Aiven's allow-list blocks Cloud Run (Cloud Run has no fixed IP, so allow all addresses or add a static egress IP); or Aiven is powered off |
-| Log: `(2003, "Can't connect to MySQL server on 'YOUR-SERVICE.aivencloud.com' ([Errno -2] Name or service not known)")` | Cloud Run | The deploy went out with the placeholder host. Set the real `DB_HOST`/`DB_PORT` with `gcloud run services update ... --update-env-vars` (section 2). Happened 9 Nov 2026 |
-| Log: `(1045, "Access denied for user 'agent_sessions'...")` | Cloud Run | The `agent-session-db-password` secret differs from the password `sessions.py setup` used. Compare SHA-256s (section 1), add a corrected version, then start a new revision |
-| The connection error mentions secure transport / SSL | Both | Aiven requires TLS, and `db_config.py` has no SSL option yet. Add a `DB_SSL_CA` setting (a small change, with a test) |
+| Page shows "Couldn't connect as the agent user: Set CMMS_DB_AGENT_PASSWORD ..." | Both | The settings still have the old names (`AGENT_DB_PASSWORD`, `DB_HOST`, ...), which aren't read since 14 Nov 2026. Locally rename them in `.env`; on Cloud Run deploy with the section 2 command |
+| Page shows "Couldn't connect as the agent user" | Both | One of these: wrong `CMMS_DB_HOST`/`CMMS_DB_PORT`; Aiven's allow-list blocks Cloud Run (Cloud Run has no fixed IP, so allow all addresses or add a static egress IP); or Aiven is powered off |
+| Log: `(2003, "Can't connect to MySQL server on 'YOUR-SERVICE.aivencloud.com' ([Errno -2] Name or service not known)")` | Cloud Run | The deploy went out with the placeholder host. Set the real `CMMS_DB_HOST`/`CMMS_DB_PORT` with `gcloud run services update ... --update-env-vars` (section 2). Happened 9 Nov 2026 |
+| Log: `(1045, "Access denied for user 'agent_ro'...")` or `'agent_sessions'` | Cloud Run | The secret differs from the password `agent_user.py` / `sessions.py setup` used (both recreate their user with the password in the settings file). Compare SHA-256s (section 1), add a corrected version, then start a new revision |
+| Log: `(1044, "Access denied for user 'agent_ro'@'%' to database ...")` | Cloud Run | `CMMS_DB_NAME` isn't the database `agent_ro` was granted on (`jme_cmms` since 15 Nov 2026) |
+| The connection error mentions secure transport / SSL | Both | Aiven requires TLS, and `db_config.py` has no SSL option yet. Add a `CMMS_DB_SSL_CA` setting (a small change, with a test) |
 | `cryptography` error at login | Both | `cryptography` is missing from `requirements-app.txt` |
+| `ModuleNotFoundError: langgraph` | Both | An old `requirements-app.txt`: the agent is a LangGraph graph since 12 Nov 2026. Use the current one |
 | "Set OPENAI_API_KEY" | Both | The key isn't set. On Cloud Run, either the secret isn't attached or the service account can't read it |
-| Sidebar: "Conversations aren't being saved (AGENT_SESSION_DB_PASSWORD isn't set)" | Both | Set it in `.env` and restart Streamlit (a browser refresh isn't enough), or attach the `agent-session-db-password` secret on Cloud Run |
-| Sidebar: "This conversation isn't being saved right now" | Both | The session user can't reach or use its table: `setup` not run, a wrong password, a wrong `DB_HOST`, or the table missing. Run `python scripts/sessions.py check`, and on Cloud Run read the MySQL error code in the logs |
+| Sidebar: "Conversations aren't being saved (CMMS_DB_SESSION_PASSWORD isn't set)" | Both | Set it in `.env` and restart Streamlit (a browser refresh isn't enough), or attach the `agent-session-db-password` secret on Cloud Run as `CMMS_DB_SESSION_PASSWORD` |
+| Sidebar: "This conversation isn't being saved right now" | Both | The session user can't reach or use its table: `setup` not run, a wrong password, a wrong `CMMS_DB_HOST`, or the table missing. Run `python scripts/sessions.py check`, and on Cloud Run read the MySQL error code in the logs |
 | Spend says "This session: $0.0000 over 0 questions" on a reopened conversation | Both | The page is older than 10 Nov 2026: its spend was a counter in page memory. Deploy the current `agent_ui.py`; it shows "This conversation: ..." added up from the answers |
-| The link opens an empty conversation | Both | The conversation is older than `AGENT_SESSION_DAYS`, was never saved (no answer yet), or the link was cut short |
+| The link opens an empty conversation | Both | The conversation is older than `AGENT_SESSION_DAYS`, was never saved (no answer yet), the link was cut short, or it was saved in `defaultdb` before the move to `jme_cmms` |
 | Deploy: `Permission denied on secret: .../secrets/<name>/versions/latest for Revision service account ...` | Cloud Run | The service account can't read that secret, or the deploy names a secret that differs from the one granted (underscores vs hyphens). Check `gcloud secrets list`, then run the grant loop in section 1 for the names in `--set-secrets` |
 | No What happened tab under an answer | Both | A reloaded answer: the trace isn't saved with the conversation. On a new answer, `agent_app.ask()` didn't log JSON events to the logger it was given |
 | A **broken** image icon under an answer | Cloud Run | An older page that used `st.image`: the browser's second request for `/media/...` missed. Deploy the current `agent_ui.py`, then hard-refresh |
