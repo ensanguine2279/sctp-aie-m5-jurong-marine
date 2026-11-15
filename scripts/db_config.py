@@ -1,7 +1,16 @@
-"""Shared database settings and helpers for every ingest script.
+"""Shared database settings and helpers for every script.
 
-All scripts read the same DB_* keys from .env (see .env.example), so the team
-keeps one .env file. Settings already exported in the shell win over .env.
+Two databases, one .env (see .env.example), and each setting's prefix names the database it
+points to (14 Nov 2026; until then the shop database's settings were DB_*):
+
+    CMMS_DB_*   MySQL: the shop's data (the CMMS, sensors, spares, scans, SOPs)
+    CONV_DB_*   Postgres: the agent's saved conversations (conversations.py)
+
+The login comes after the prefix: CMMS_DB_USERNAME is the owner the ingest scripts load
+with, CMMS_DB_AGENT_* is agent_ro (what the agent reads with), CMMS_DB_ADMIN_* creates
+users. Only these names are read: an old name (DB_NAME, AGENT_DB_PASSWORD, ...) is ignored,
+so a .env that wasn't updated fails with "Missing setting(s) ..." naming the new ones.
+Settings already exported in the shell win over .env.
 """
 from __future__ import annotations
 
@@ -14,8 +23,8 @@ from pathlib import Path
 import pandas as pd
 from dotenv import load_dotenv
 
-REQUIRED_KEYS = ("DB_USERNAME", "DB_HOST", "DB_NAME")
-# DB_PASSWORD must be present but may be empty (local root with no password).
+REQUIRED_KEYS = ("CMMS_DB_USERNAME", "CMMS_DB_HOST", "CMMS_DB_NAME")
+# CMMS_DB_PASSWORD must be present but may be empty (local root with no password).
 
 
 def getenv(key: str, default: str | None = None) -> str | None:
@@ -23,7 +32,7 @@ def getenv(key: str, default: str | None = None) -> str | None:
 
     A .env saved on Windows has CRLF line endings. python-dotenv reads it correctly, but
     a shell that loads it (`source .env`, `export $(cat .env | xargs)`) keeps the '\\r':
-    AGENT_DB_USERNAME becomes 'agent_ro\\r', and shell values win over .env. Only CR/LF
+    CMMS_DB_AGENT_USERNAME becomes 'agent_ro\\r', and shell values win over .env. Only CR/LF
     are removed, so a password that really starts or ends with a space is kept.
     """
     value = os.getenv(key, default)
@@ -64,8 +73,15 @@ class DbConfig:
         return f"{self.user}@{self.host}:{self.port}/{self.name} (password hidden)"
 
 
+def cmms_config(user: str, password: str) -> DbConfig:
+    """The shop database (host, port, name from CMMS_DB_*) as another login: agent_ro, the
+    session user, the admin."""
+    return DbConfig(user=user, password=password, host=getenv("CMMS_DB_HOST"),
+                    port=int(getenv("CMMS_DB_PORT", "3306")), name=getenv("CMMS_DB_NAME"))
+
+
 def load_db_config(env_file: str | None = None) -> DbConfig:
-    """Load DB settings from env_file, or the nearest .env if none is given."""
+    """The shop database as its owner (CMMS_DB_*), from env_file or the nearest .env."""
     if env_file:
         if not Path(env_file).is_file():
             raise FileNotFoundError(f"Env file not found: {env_file}")
@@ -74,19 +90,13 @@ def load_db_config(env_file: str | None = None) -> DbConfig:
         load_dotenv()
 
     missing = [k for k in REQUIRED_KEYS if not getenv(k)]
-    if getenv("DB_PASSWORD") is None:
-        missing.append("DB_PASSWORD")
+    if getenv("CMMS_DB_PASSWORD") is None:
+        missing.append("CMMS_DB_PASSWORD")
     if missing:
         raise ValueError(
             f"Missing setting(s) {', '.join(missing)}. Add them to .env (see .env.example)."
         )
-    return DbConfig(
-        user=getenv("DB_USERNAME"),
-        password=getenv("DB_PASSWORD"),
-        host=getenv("DB_HOST"),
-        port=int(getenv("DB_PORT", "3306")),
-        name=getenv("DB_NAME"),
-    )
+    return cmms_config(getenv("CMMS_DB_USERNAME"), getenv("CMMS_DB_PASSWORD"))
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:

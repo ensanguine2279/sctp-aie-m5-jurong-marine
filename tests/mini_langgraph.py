@@ -12,7 +12,12 @@ then after each node) or a list of modes (then (mode, chunk) pairs); invoke(); a
 parameter of that name; the state merged key by key (a later value replaces an earlier one,
 the default for a key with no reducer); an update with a key the schema doesn't have
 refused; a run longer than config["recursion_limit"] steps stopped with
-GraphRecursionError; and get_graph().draw_mermaid().
+GraphRecursionError; get_graph().draw_mermaid(); and a checkpointer: compile(checkpointer=
+InMemorySaver()) with config {"configurable": {"thread_id": ...}} starts a run from the
+thread's saved state with the input merged in, saves the final state when the run finishes
+(as durability="exit"; a run that raises saves nothing here: the real LangGraph's behaviour
+then isn't documented, and the agent doesn't rely on either), get_state(config).values, and
+delete_thread(thread_id).
 """
 from __future__ import annotations
 
@@ -34,6 +39,21 @@ class Runtime:
 
     def __class_getitem__(cls, item):
         return cls
+
+
+class InMemorySaver:
+    """langgraph.checkpoint.memory.InMemorySaver, as far as the agent uses it."""
+
+    def __init__(self):
+        self.storage: dict = {}
+
+    def delete_thread(self, thread_id):
+        self.storage.pop(thread_id, None)
+
+
+class _State:
+    def __init__(self, values):
+        self.values = values
 
 
 class GraphRecursionError(RecursionError):
@@ -79,7 +99,21 @@ class _Compiled:
             raise ValueError(f"{node} has no way out")
         return nxt
 
-    def stream(self, input, config=None, *, context=None, stream_mode="updates"):
+    def _thread(self, config):
+        if self.checkpointer is None:
+            return None
+        return ((config or {}).get("configurable") or {}).get("thread_id")
+
+    def get_state(self, config):
+        thread = self._thread(config)
+        if thread is None:
+            raise ValueError("No checkpointer set")
+        return _State(dict(self.checkpointer.storage.get(thread) or {}))
+
+    def stream(self, input, config=None, *, context=None, stream_mode="updates",
+               durability=None):
+        if durability not in (None, "exit", "async", "sync"):
+            raise ValueError(f"durability {durability!r}")
         modes = [stream_mode] if isinstance(stream_mode, str) else list(stream_mode)
         bad = set(modes) - {"updates", "values"}
         if bad:
@@ -91,7 +125,9 @@ class _Compiled:
 
         limit = int((config or {}).get("recursion_limit", 25))
         runtime = Runtime(context=context)
-        state = dict(input or {})
+        thread = self._thread(config)
+        state = dict(self.checkpointer.storage.get(thread) or {}) if thread else {}
+        state.update(input or {})
         if "values" in modes:
             yield out("values", dict(state))
         node, steps = self._next(START, state), 0
@@ -109,6 +145,8 @@ class _Compiled:
             if "values" in modes:
                 yield out("values", dict(state))
             node = self._next(node, state)
+        if thread is not None:
+            self.checkpointer.storage[thread] = dict(state)    # saved when the run finishes
 
     def invoke(self, input, config=None, *, context=None):
         state = dict(input or {})
@@ -171,9 +209,17 @@ def install() -> bool:
     runtime = types.ModuleType("langgraph.runtime")
     runtime.__spec__ = importlib.machinery.ModuleSpec("langgraph.runtime", None)
     runtime.Runtime = Runtime
+    ckpt = types.ModuleType("langgraph.checkpoint")
+    ckpt.__spec__ = importlib.machinery.ModuleSpec("langgraph.checkpoint", None, is_package=True)
+    ckpt.__path__ = []
+    memory = types.ModuleType("langgraph.checkpoint.memory")
+    memory.__spec__ = importlib.machinery.ModuleSpec("langgraph.checkpoint.memory", None)
+    memory.InMemorySaver = InMemorySaver
+    ckpt.memory = memory
     errors = types.ModuleType("langgraph.errors")
     errors.GraphRecursionError, errors.InvalidUpdateError = GraphRecursionError, InvalidUpdateError
-    pkg.graph, pkg.errors, pkg.runtime = graph, errors, runtime
+    pkg.graph, pkg.errors, pkg.runtime, pkg.checkpoint = graph, errors, runtime, ckpt
     sys.modules.update({"langgraph": pkg, "langgraph.graph": graph, "langgraph.errors": errors,
-                        "langgraph.runtime": runtime})
+                        "langgraph.runtime": runtime, "langgraph.checkpoint": ckpt,
+                        "langgraph.checkpoint.memory": memory})
     return True

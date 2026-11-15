@@ -819,14 +819,25 @@ def test_an_unknown_tool(db):
 def test_the_app_never_connects_as_the_owner(monkeypatch, tmp_path):
     env = tmp_path / ".env"
     env.write_text("", encoding="utf-8")
-    monkeypatch.setenv("DB_USERNAME", "ingest")
-    monkeypatch.setenv("AGENT_DB_USERNAME", "ingest")
-    monkeypatch.setenv("AGENT_DB_PASSWORD", "x")
+    monkeypatch.setenv("CMMS_DB_USERNAME", "ingest")
+    monkeypatch.setenv("CMMS_DB_AGENT_USERNAME", "ingest")
+    monkeypatch.setenv("CMMS_DB_AGENT_PASSWORD", "x")
     with pytest.raises(ValueError, match="owner account"):
         at.connect(str(env))
-    monkeypatch.delenv("AGENT_DB_PASSWORD")
+    monkeypatch.delenv("CMMS_DB_AGENT_PASSWORD")
+    monkeypatch.setenv("CMMS_DB_AGENT_USERNAME", "agent_ro")
+    with pytest.raises(ValueError, match="CMMS_DB_AGENT_PASSWORD"):
+        at.connect(str(env))
+
+
+def test_the_old_setting_names_alone_never_connect(monkeypatch, tmp_path):
+    """Before 14 Nov 2026 these were AGENT_DB_*. Only CMMS_DB_AGENT_* is read now, so a .env
+    still on the old names stops here, naming the setting to add."""
+    env = tmp_path / ".env"
+    env.write_text("", encoding="utf-8")
     monkeypatch.setenv("AGENT_DB_USERNAME", "agent_ro")
-    with pytest.raises(ValueError, match="AGENT_DB_PASSWORD"):
+    monkeypatch.setenv("AGENT_DB_PASSWORD", "x")
+    with pytest.raises(ValueError, match="CMMS_DB_AGENT_PASSWORD"):
         at.connect(str(env))
 
 

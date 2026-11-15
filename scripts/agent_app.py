@@ -56,7 +56,8 @@ Usage
     python scripts/agent_app.py --debug "..."         # also prints which tools ran
 
 Needs, in .env (same file as the ingest scripts, plus the llm proxy):
-    AGENT_DB_USERNAME / AGENT_DB_PASSWORD       # the read-only agent_ro user
+    CMMS_DB_AGENT_USERNAME / CMMS_DB_AGENT_PASSWORD   # the read-only agent_ro user
+    CMMS_DB_HOST, CMMS_DB_PORT, CMMS_DB_NAME          # the shop database
     OPENAI_API_KEY                              # your member key for the llm proxy
     OPENAI_BASE_URL                             # the proxy's URL (https://github.com/ensanguine2279/sctp-aie-m5-jurong-marine-llm-proxy)
 """
@@ -665,10 +666,10 @@ def ask(db, client, messages, question, *, model=MODEL, logger=log, raw_sources=
     the total is then a lower bound). on_step: called with each graph step as it finishes
     (no question or answer text). max_rounds: model calls allowed for this question.
 
-    All or nothing (11 Nov 2026): the graph runs on a copy of `messages`, mended first
-    (answered_only: a tool call with no result, left by a turn cut off half way, makes the
-    chat API refuse the whole conversation), and the copy is put back only when the turn has
-    finished. A turn stopped half way (Streamlit stops the script when the page is clicked
+    All or nothing (11 Nov 2026): the graph runs on a copy of `messages`, mended first by
+    its guard_in node (answered_only: a tool call with no result, left by a turn cut off half
+    way, makes the chat API refuse the whole conversation), and the copy is put back only
+    when the turn has finished. A turn stopped half way (Streamlit stops the script when the page is clicked
     while it runs; a bug that raises) leaves `messages` as it was. `history_repaired` is
     logged when mending was needed.
 
@@ -677,9 +678,7 @@ def ask(db, client, messages, question, *, model=MODEL, logger=log, raw_sources=
     placeholder in `messages`; an answer with personal data is replaced, in `messages` too.
     A year written short ("nov 202") is asked about, also with no model call."""
     import agent_graph                         # here, not at the top: it imports this module
-    work, dropped = answered_only(messages)
-    if dropped:
-        _emit(logger, "history_repaired", dropped=dropped)
+    work = [dict(m) for m in messages]         # the graph mends it (guard_in: answered_only)
     ctx = agent_graph.AgentContext(db=db, client=client, model=model, logger=logger,
                                    max_rounds=max_rounds)
     final = agent_graph.run(work, question, ctx, on_step=on_step)

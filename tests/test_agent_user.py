@@ -128,6 +128,7 @@ def test_a_denied_object_fails_when_nobody_can_tell_whether_it_exists():
     """No admin connection: never pass it, but say both causes are possible."""
     ok, line = au.denied_verdict("sops", missing=None)
     assert not ok and "not granted, or not created yet" in line
+    assert "CMMS_DB_ADMIN_PASSWORD" in line
 
 
 def test_missing_objects_come_from_what_the_admin_sees():
@@ -158,7 +159,7 @@ def test_probes_cover_names_raw_writes_and_schema():
 
 
 def test_engine_never_puts_parameters_in_errors():
-    """The 1227 error once printed AGENT_DB_PASSWORD in the traceback."""
+    """The 1227 error once printed the app user's password in the traceback."""
     pytest.importorskip("sqlalchemy")
     from db_config import DbConfig
 
@@ -169,6 +170,7 @@ def test_engine_never_puts_parameters_in_errors():
 def test_admin_errors_are_readable_and_hold_no_secrets():
     assert "avnadmin on Aiven" in au.admin_error(1227, "ingest")         # no CREATE USER
     assert "Login refused for root" in au.admin_error(1045, "root")
+    assert "CMMS_DB_ADMIN_PASSWORD" in au.admin_error(1045, "root")
     assert "Hosted MySQL" in au.admin_error(3879, "avnadmin")
     assert "2013" in au.admin_error(2013, "root")
     for code in (1227, 1045, 3879, 2013):
@@ -221,19 +223,11 @@ def test_failed_step_is_reported_without_the_password():
     assert "s3cr3t" not in au.admin_error(e.value.code, "avnadmin", e.value.step, e.value.message)
 
 
-AGENT_KEYS = ("AGENT_DB_USERNAME", "AGENT_DB_PASSWORD", "DB_ADMIN_USERNAME",
-              "DB_ADMIN_PASSWORD", "MYSQL_ROOT_PASSWORD", "DB_NAME")
-
-
 @pytest.fixture
-def clean_env(monkeypatch, tmp_path):
-    """The test's own settings only: none from the shell, none from the repo's .env.
-
-    Without this, whatever the developer has exported (or in .env) leaks in: a CRLF .env
-    loaded with `source .env` made AGENT_DB_USERNAME 'agent_ro\\r' and failed the test.
-    """
-    for key in AGENT_KEYS:
-        monkeypatch.delenv(key, raising=False)
+def clean_env(tmp_path):
+    """An empty .env, so the repo's own stays out. conftest.py has already removed every
+    database setting from the shell's environment: without that, a
+    CRLF .env loaded with `source .env` made the app user 'agent_ro\\r' and failed the test."""
     env_file = tmp_path / ".env"
     env_file.write_text("", encoding="utf-8")
     return env_file
@@ -246,8 +240,8 @@ def _dry_run(monkeypatch, capsys, env_file):
 
 
 def test_dry_run_needs_no_database_and_hides_the_password(monkeypatch, capsys, clean_env):
-    monkeypatch.setenv("AGENT_DB_PASSWORD", "s3cr3t")
-    monkeypatch.setenv("DB_NAME", "jurong")
+    monkeypatch.setenv("CMMS_DB_AGENT_PASSWORD", "s3cr3t")
+    monkeypatch.setenv("CMMS_DB_NAME", "jurong")
     out = _dry_run(monkeypatch, capsys, clean_env)
     assert "s3cr3t" not in out and "IDENTIFIED BY ****" in out
     assert "App user 'agent_ro'@'%'" in out                        # the default user
@@ -260,9 +254,9 @@ def test_dry_run_needs_no_database_and_hides_the_password(monkeypatch, capsys, c
 
 def test_settings_with_windows_line_endings_still_work(monkeypatch, capsys, clean_env):
     """`source .env` on a CRLF file leaves '\\r' on every value; shell values win over .env."""
-    monkeypatch.setenv("AGENT_DB_USERNAME", "agent_ro\r")
-    monkeypatch.setenv("AGENT_DB_PASSWORD", "s3cr3t\r")
-    monkeypatch.setenv("DB_NAME", "jurong\r")
+    monkeypatch.setenv("CMMS_DB_AGENT_USERNAME", "agent_ro\r")
+    monkeypatch.setenv("CMMS_DB_AGENT_PASSWORD", "s3cr3t\r")
+    monkeypatch.setenv("CMMS_DB_NAME", "jurong\r")
     out = _dry_run(monkeypatch, capsys, clean_env)
     assert "App user 'agent_ro'@'%' on database `jurong`" in out
     assert "\r" not in out
@@ -270,9 +264,19 @@ def test_settings_with_windows_line_endings_still_work(monkeypatch, capsys, clea
 
 
 def test_crlf_env_file_is_read_without_carriage_returns(monkeypatch, capsys, clean_env):
-    clean_env.write_bytes(b"AGENT_DB_USERNAME=agent_ro\r\nDB_NAME=jurong\r\n")
+    clean_env.write_bytes(b"CMMS_DB_AGENT_USERNAME=agent_ro\r\nCMMS_DB_NAME=jurong\r\n")
     out = _dry_run(monkeypatch, capsys, clean_env)
     assert "App user 'agent_ro'@'%' on database `jurong`" in out
+
+
+def test_the_old_setting_names_alone_are_not_enough(monkeypatch, capsys, clean_env):
+    """Before 14 Nov 2026 these were AGENT_DB_* and DB_NAME. Only CMMS_DB_* is read now."""
+    clean_env.write_text("AGENT_DB_USERNAME=agent_old\nAGENT_DB_PASSWORD=s3cr3t\n"
+                         "DB_NAME=jurong\n", encoding="utf-8")
+    out = _dry_run(monkeypatch, capsys, clean_env)
+    assert "agent_old" not in out and "`jurong`" not in out
+    with pytest.raises(ValueError, match="CMMS_DB_AGENT_PASSWORD"):
+        au.agent_settings()
 
 
 def test_the_page_may_show_photos_but_never_the_photo_table_or_raw_ocr():

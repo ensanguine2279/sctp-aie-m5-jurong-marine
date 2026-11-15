@@ -331,9 +331,11 @@ def test_fulltext_ignores_the_same_words_as_search_sops():
 
 
 class RecordingConn:
-    """Stands in for a SQLAlchemy connection: records each statement and its parameters."""
+    """Stands in for a SQLAlchemy connection: records each statement and its parameters.
+    SELECT DATABASE() gives `db`."""
 
-    def __init__(self):
+    def __init__(self, db: str = "jme"):
+        self.db = db
         self.calls: list[tuple[str, object]] = []
 
     def execute(self, stmt, params=None):
@@ -341,7 +343,7 @@ class RecordingConn:
         return self
 
     def scalar(self):
-        return "jme"
+        return self.db
 
 
 def test_fulltext_indexes_are_rebuilt_after_the_stopword_list_is_set():
@@ -359,6 +361,20 @@ def test_fulltext_indexes_are_rebuilt_after_the_stopword_list_is_set():
     assert not any("ADD FULLTEXT" in s for s in sql[:set_at])
     inserted = next(p for s, p in conn.calls if s.startswith("INSERT INTO sop_ft_stopwords"))
     assert [r["value"] for r in inserted] == sp.fulltext_stopwords()
+
+
+def test_a_database_name_with_a_hyphen_is_given_as_innodb_names_it():
+    """13 Nov 2026: a local database named jme-cmms failed with error 1231 ("Variable
+    'innodb_ft_user_stopword_table' can't be set to the value of
+    'jme-cmms/sop_ft_stopwords'"). InnoDB knows that table as jme@002dcmms/..., the way
+    MySQL names the database's folder."""
+    conn = RecordingConn("jme-cmms")
+    sp.rebuild_fulltext(conn)
+    value = next(p for s, p in conn.calls if "innodb_ft_user_stopword_table" in s)
+    assert value == {"t": "jme@002dcmms/sop_ft_stopwords"}
+    assert sp.innodb_table_name("defaultdb", "t") == "defaultdb/t"          # Aiven's: unchanged
+    assert sp.innodb_table_name("Jme_2", "sop_ft_stopwords") == "Jme_2/sop_ft_stopwords"
+    assert sp.innodb_table_name("my.db $x", "t") == "my@002edb@0020@0024x/t"
 
 
 def test_stopword_table_has_a_primary_key():

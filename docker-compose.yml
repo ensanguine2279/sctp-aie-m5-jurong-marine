@@ -1,0 +1,53 @@
+# MySQL for the ingest scripts. Settings come from .env in this folder
+# (Docker Compose reads it automatically), so the scripts and the container
+# always agree on database name, user and password.
+#
+#   docker compose up -d          start (first start creates the database + user)
+#   docker compose ps             should show "healthy"
+#   docker compose down           stop; data is kept in the mysql-data volume
+#   docker compose down -v        stop AND delete all data (fresh start)
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: ${CMMS_DB_NAME:-jme_cmms}
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${CMMS_DB_ADMIN_PASSWORD:?set CMMS_DB_ADMIN_PASSWORD in .env}
+      MYSQL_DATABASE: ${CMMS_DB_NAME:?set CMMS_DB_NAME in .env}
+      MYSQL_USER: ${CMMS_DB_USERNAME:?set CMMS_DB_USERNAME in .env}       # must not be "root"
+      MYSQL_PASSWORD: ${CMMS_DB_PASSWORD:?set CMMS_DB_PASSWORD in .env}
+      TZ: Asia/Singapore
+    ports:
+      - "${CMMS_DB_PORT:-3307}:3306"    # 3307 so it doesn't clash with a MySQL on Windows
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: ${CONV_DB_NAME:-jme_conv}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${CONV_DB_NAME:-jme_conv}
+      POSTGRES_USER: ${CONV_DB_ADMIN_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${CONV_DB_ADMIN_PASSWORD:?set CONV_DB_ADMIN_PASSWORD in .env}
+      TZ: Asia/Singapore
+    ports:
+      - "5433:5432"          # 5433 on the host, so it never clashes with a local Postgres
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  mysql-data:
+  pg-data:

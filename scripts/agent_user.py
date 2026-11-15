@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Create the read-only MySQL user the app (the LLM's tools) connects as. PDPA guardrail.
 
-The app must never connect as DB_USERNAME: that user owns every table, including
+The app must never connect as CMMS_DB_USERNAME: that user owns every table, including
 cmms_employees.emp_name. Telling the model "use the views" is not protection; the
 database has to refuse. This script makes a separate user that can only SELECT from
 an allow-list of views, then proves it:
@@ -24,12 +24,13 @@ Before granting, every object is checked for personal-data columns (emp_name); o
 has any is refused, so a view changed later can't leak names by accident. Objects that
 don't exist yet (a source not loaded) are skipped: run this again after the loads.
 
-Settings come from the same .env as the other scripts, plus:
+Settings come from the same .env as the other scripts (CMMS_DB_HOST, _PORT, _NAME), plus:
 
-    AGENT_DB_USERNAME   the app's user (default agent_ro)
-    AGENT_DB_PASSWORD   its password (required)
-    DB_ADMIN_USERNAME   a user allowed to create users and grant (default root)
-    DB_ADMIN_PASSWORD   its password (falls back to MYSQL_ROOT_PASSWORD)
+    CMMS_DB_AGENT_USERNAME   the app's user (default agent_ro)
+    CMMS_DB_AGENT_PASSWORD   its password (required)
+    CMMS_DB_ADMIN_USERNAME   a user allowed to create users and grant (default root)
+    CMMS_DB_ADMIN_PASSWORD   its password (if unset: MYSQL_ROOT_PASSWORD, the MySQL
+                             image's own setting)
 
 Usage
     python scripts/agent_user.py --dry-run   # show the plan; no database needed
@@ -180,8 +181,8 @@ def admin_error(code: int | None, admin_user: str, step: str | None = None,
                 message: str | None = None) -> str:
     """A readable message for a failed setup, without the SQL's parameters."""
     if code == 1045:
-        hint = (f"Login refused for {admin_user}: check DB_ADMIN_USERNAME / DB_ADMIN_PASSWORD "
-                f"in .env.")
+        hint = (f"Login refused for {admin_user}: check CMMS_DB_ADMIN_USERNAME / "
+                f"CMMS_DB_ADMIN_PASSWORD in .env.")
     elif code == PARTIAL_REVOKE_CODE:
         hint = (f"{admin_user} is refused access to a database it would need for this step. "
                 f"Hosted MySQL (e.g. Aiven) keeps even its admin out of some databases.")
@@ -199,19 +200,19 @@ def admin_error(code: int | None, admin_user: str, step: str | None = None,
 
 
 def agent_settings(require_password: bool = True) -> tuple[str, str]:
-    user = getenv("AGENT_DB_USERNAME", "agent_ro")
-    pw = getenv("AGENT_DB_PASSWORD")
+    user = getenv("CMMS_DB_AGENT_USERNAME", "agent_ro")
+    pw = getenv("CMMS_DB_AGENT_PASSWORD")
     if require_password and not pw:
-        raise ValueError("Set AGENT_DB_PASSWORD in .env (the app's read-only user).")
+        raise ValueError("Set CMMS_DB_AGENT_PASSWORD in .env (the app's read-only user).")
     return user, pw or ""
 
 
 def admin_config(cfg: DbConfig) -> DbConfig:
-    pw = getenv("DB_ADMIN_PASSWORD", getenv("MYSQL_ROOT_PASSWORD"))
+    pw = getenv("CMMS_DB_ADMIN_PASSWORD", getenv("MYSQL_ROOT_PASSWORD"))
     if pw is None:
-        raise ValueError("Set DB_ADMIN_PASSWORD (or MYSQL_ROOT_PASSWORD) in .env: "
+        raise ValueError("Set CMMS_DB_ADMIN_PASSWORD (or MYSQL_ROOT_PASSWORD) in .env: "
                          "creating users needs an admin account.")
-    return DbConfig(user=getenv("DB_ADMIN_USERNAME", "root"), password=pw,
+    return DbConfig(user=getenv("CMMS_DB_ADMIN_USERNAME", "root"), password=pw,
                     host=cfg.host, port=cfg.port, name=cfg.name)
 
 
@@ -273,7 +274,7 @@ def denied_verdict(obj: str, missing: set[str] | None) -> tuple[bool, str]:
     when no admin connection was available."""
     if missing is None:
         return False, (f"  FAIL    {obj}: denied (not granted, or not created yet; set "
-                       f"DB_ADMIN_PASSWORD so --check can tell which)")
+                       f"CMMS_DB_ADMIN_PASSWORD so --check can tell which)")
     if obj in missing:
         return True, f"  skip    {obj}: not created yet"
     return False, (f"  FAIL    {obj}: exists but not granted; run agent_user.py without "
@@ -362,11 +363,11 @@ def main() -> None:
 
             load_dotenv(a.env_file) if a.env_file else load_dotenv()
             user, _ = agent_settings(require_password=False)
-            db = getenv("DB_NAME") or "<DB_NAME>"
+            db = getenv("CMMS_DB_NAME") or "<CMMS_DB_NAME>"
             objs = allowed_objects(names)
             print_plan(Plan(objs, [], {}), db, user, a.host)
             print("\nSQL (password bound as a parameter, never written out):")
-            for sql in statements(db if _DB.fullmatch(db) else "DB_NAME", user, a.host, objs):
+            for sql in statements(db if _DB.fullmatch(db) else "CMMS_DB_NAME", user, a.host, objs):
                 print(f"  {sql.replace(':pw', '****')};")
             print("\nWill then check these are blocked: "
                   + ", ".join(w for w, _ in forbidden_probes(names)))
@@ -403,7 +404,8 @@ def main() -> None:
     if check(agent_cfg, names, missing):
         print("\nPassed: the app user reads only the allowed views; names, raw data, "
               "writes and schema changes are refused.")
-        print("Point the app's database connection at AGENT_DB_USERNAME, never DB_USERNAME.")
+        print("Point the app's database connection at CMMS_DB_AGENT_USERNAME, never "
+              "CMMS_DB_USERNAME.")
     else:
         sys.exit("\nFAILED: fix the grants above before the app uses this user.")
 
