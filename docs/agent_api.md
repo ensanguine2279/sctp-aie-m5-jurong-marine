@@ -9,17 +9,18 @@ all happen inside `ask()`, exactly as on the page, which runs the agent's
 
 ```bash
 # personal repo
-uv add fastapi uvicorn langgraph
+uv add fastapi uvicorn langgraph langgraph-checkpoint-postgres "psycopg[binary]" psycopg-pool
 uv add --dev httpx                                  # only for the route tests
 uv run uvicorn agent_api:create_app --factory --app-dir scripts --port 8000
 
 # team repo
-pip install fastapi uvicorn langgraph httpx
+pip install -r requirements-api.txt httpx
 uvicorn agent_api:create_app --factory --app-dir scripts --port 8000
 ```
 
-Needs the page's `.env` (`AGENT_DB_*`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and the
-`AGENT_SESSION_*` settings for saved conversations) **plus `AGENT_API_KEY`**, 16 characters or
+Needs the page's `.env` (`AGENT_DB_*`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`), `AGENT_PG_URL` for
+saved conversations ([`conversations.md`](conversations.md): Postgres, set up once with
+`conversations.py setup` and `check`), **plus `AGENT_API_KEY`**, 16 characters or
 more. Without it the API refuses to start (fail closed, like the guardrail's name list):
 
 ```bash
@@ -35,7 +36,7 @@ time). Errors are JSON, `{"error": {"code": ..., "message": ...}}`, never a stac
 
 | Route | Body / query | Returns |
 |---|---|---|
-| `GET /health` | (no key) | `status`, `guard_ready`, `sessions` (on / off and why), `model`, `agent` (`langgraph`), `version`. 503 when the guard's name list isn't loaded |
+| `GET /health` | (no key) | `status`, `guard_ready`, `sessions` (on / off and why), `store` (`postgres`, or null when off), `model`, `agent` (`langgraph`), `version`. 503 when the guard's name list isn't loaded |
 | `POST /ask` | `{"question": "...", "session_id": optional}` | `answer`, `sources`, `notes` (the tools' caveats), `refused` (the guardrail's rule, or null), `answer_replaced` (rule, or null), `usage` (model calls, tokens, cost from the proxy), `cost_line`, `trace` (the page's What happened rows), `session_id`, `turns`, `saved`, `save_error` |
 | `POST /ask/stream` | the same body | `text/event-stream`: a `step` event per step of the turn as it happens, then one `answer` (the `/ask` body) or `error` (`{"status", "error"}`) |
 | `GET /sessions?limit=8` | | the newest saved conversations: `session_id`, `title`, `turns`, `updated_at` |
@@ -50,11 +51,15 @@ curl -sN localhost:8000/ask/stream -H "X-API-Key: $KEY" -H 'Content-Type: applic
      -d '{"question": "is CNC-02 running differently now?"}'
 ```
 
-**Conversations are shared with the page.** Both save through `sessions.py` (the
-`agent_sessions` table and its own user) with the same display copy, so a conversation started
-here opens on the page with `?session=<id>`, one started on the page can be continued here by
-its id, and a refused question is stored only as its placeholder whichever way it came in.
-Without the session store the API still answers; `session_id` is then null and `saved` false.
+**Conversations: LangGraph's checkpointer in Postgres** (13 Nov 2026,
+[`conversations.md`](conversations.md)). `session_id` is the conversation's LangGraph thread:
+the agent runs from the thread's saved state and saves it when the turn finishes, so no
+history is sent back and forth. A threads table keeps each conversation's title, question
+count and display copy (the page's format) for `/sessions`, and gives the 7-day retention. A
+refused question is never saved as typed, and an answer with personal data never reaches a
+checkpoint. Without `AGENT_PG_URL` the API still answers; `session_id` is then null and `saved`
+false. **Not yet shared with the page**: the page still saves to `sessions.py` (MySQL) until it
+calls this API (phase 3).
 
 **One question at a time per conversation.** A lock per session id makes load, ask and save
 one step in this process, so two requests on the same conversation can't both append and lose
@@ -182,14 +187,18 @@ About an hour with its tests. Not built, because nothing needs it yet.
 
 ## Tests
 
-`tests/test_agent_api.py` (28 tests; no database, no real LLM call; the service tested with
-the real `ask()`, a scripted model, stubbed tools and an in-memory session store). **Access**:
+`tests/test_agent_api.py` (30 tests; no database, no real LLM call; the service tested with
+the real agent graph, a scripted model, stubbed tools and real conversations: the threads
+table on sqlite3 and LangGraph's in-memory checkpointer). **Access**:
 the key compared exactly, no key no service. **Health**: whether it can answer (the guard's name
 list), the agent, sessions on/off. **Ask**: empty, non-text and
 over-long questions and bad session ids refused with nothing asked; a question starting a
-saved conversation (answer, sources, usage, trace, display copy); a follow-up reaching the
-model with the earlier question; a refused question stored only as its placeholder; an answer
-with personal data reported as replaced; unknown, unreadable and unsaved conversations (404,
+saved conversation (answer, sources, usage, trace, display copy, the checkpointer's copy); a
+follow-up reaching the model with the earlier question from the checkpointer; **a restart** (a
+new service over the same database and checkpointer) carrying the conversation on, with the
+system prompt from the code; a refused question in neither the checkpoint nor the row; **an
+answer with personal data reported as replaced and in no key of the saved state**; a new
+conversation's row written before its first answer; unknown, unreadable and unsaved conversations (404,
 503); answered but not saved without a store; a failed save reported, not hidden; a bug as a
 500 with no internals; two questions at once on one conversation both kept. **Conversations**:
 one read back with its spend, the recent list newest first, its limit clamped and checked.

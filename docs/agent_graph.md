@@ -65,6 +65,16 @@ conversation, the sources) and returns the new value. LangGraph doesn't copy sta
 and a checkpointer saves what is in the state, so a node that appended to the list it was
 given could change an earlier snapshot. Tested node by node.
 
+**Nothing unsafe ever enters the state (13 Nov 2026, for the checkpointer).** The question as
+typed travels in the context (`AgentContext.question`, set by `run()`), not the input: the
+input becomes state, which a checkpointer saves. `guard_in` writes to the state only what may
+be kept (the question, or a refused one's placeholder). The `model` node runs the output
+guardrail on a plain answer before putting it in the state; `guard_out` checks again after
+the caveats. `guard_in` also mends the history (`answered_only`) and puts the system prompt
+from the code first, so a thread saved earlier never keeps an old prompt. With a checkpointer
+(the API's, [`conversations.md`](conversations.md)), `run()` takes the compiled graph and the
+thread in `config`, no `messages`, and `durability="exit"`.
+
 **Each turn starts empty.** `guard_in` resets this turn's sources, notes, tool names, usage and
 round. With a checkpointer the state persists between questions, and without the reset one
 question's sources and cost would carry into the next.

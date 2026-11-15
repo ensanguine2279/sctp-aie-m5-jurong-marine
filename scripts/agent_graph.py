@@ -5,7 +5,7 @@
                  |
                  v
                model --(answered / failed / too many rounds)--> guard_out -> END
-                 ^  |  \__ (facts but no tool call: asked again, a tool required) -> model
+                 ^  |  +-- (facts but no tool call: asked again, a tool required) -> model
                  |  v (tool calls)
                tools --(a tool asked the user something)--> guard_out
 
@@ -46,6 +46,7 @@ Usage
     python scripts/agent_app.py "what oil does CNC-03 take?"     # runs this graph
     python scripts/agent_graph.py mermaid        # the graph, as Mermaid, from LangGraph itself
 """
+import dataclasses
 import sys
 import time
 from dataclasses import dataclass
@@ -66,7 +67,8 @@ class AgentState(TypedDict, total=False):
     """What the graph carries between nodes. Every key is replaced, never merged, by the
     node that returns it (no reducers): nodes return the whole new value."""
     messages: list           # the conversation, chat-API dicts: system, user, assistant, tool
-    question: str            # this turn's question, as typed
+    question: str            # this turn's question as it may be kept: as typed, or, refused,
+                             # only its placeholder (as typed, it is in the context only)
     route: str               # the next node, or "end"
     round: int               # model calls made this turn
     pending: list            # the tool calls the model just made (chat-API dicts)
@@ -75,6 +77,7 @@ class AgentState(TypedDict, total=False):
     tool_names: list         # the tools run this turn, in order
     notes: list              # this turn's tool notes (the caveats)
     usage: dict              # this turn's model calls, tokens and cost
+    replaced: bool           # the model's answer was replaced by the output guardrail
     read_as_closed: bool     # "completed" was read as status CLOSED this turn
     retried: bool            # the model answered with facts and no tool call; asked again
     asked_user: bool         # this turn's answer is a tool's question back to the user
@@ -90,6 +93,9 @@ class AgentContext:
     logger: Any = app.log
     max_rounds: int = app.MAX_TOOL_ROUNDS
     complete_fn: Optional[Callable] = None  # the chat call; None = agent_app.complete
+    question: Optional[str] = None          # this turn's question as typed (run() sets it):
+                                            # here, never in the state, so a refused one is
+                                            # never saved by a checkpointer (13 Nov 2026)
 
 
 def _messages(state: AgentState) -> list:
@@ -103,12 +109,20 @@ def _messages(state: AgentState) -> list:
 def guard_in(state: AgentState, runtime: Runtime[AgentContext]) -> AgentState:
     """Everything a question goes through before the model. Also starts the turn: this
     turn's sources, notes, usage and round begin empty here, whatever an earlier turn
-    left in the state."""
-    ctx, q = runtime.context, state.get("question") or ""
-    lg, msgs = ctx.logger, _messages(state)
+    left in the state; a new thread gets the system prompt; and the conversation is mended
+    (answered_only) if a turn cut off half way left a tool call with no result, which the
+    chat API would refuse for the rest of the conversation (11 Nov 2026)."""
+    ctx = runtime.context
+    q = ctx.question if ctx.question is not None else (state.get("question") or "")
+    lg = ctx.logger
+    msgs, dropped = app.answered_only(state.get("messages") or [])     # copies, mended
+    if dropped:
+        app._emit(lg, "history_repaired", dropped=dropped)
+    if not msgs or msgs[0].get("role") != "system":                    # a new thread
+        msgs = app.new_conversation() + msgs
     turn = {"round": 0, "pending": [], "answer": None, "sources": [], "tool_names": [],
             "notes": [], "usage": app._new_usage(), "read_as_closed": False,
-            "retried": False, "asked_user": False}
+            "retried": False, "asked_user": False, "replaced": False}
     refused = {"node": "guard_in", "passed": False, "answered_without_model": True}
 
     if not app.guardrail.names_loaded():       # fail closed: no name list, no answers
@@ -116,17 +130,17 @@ def guard_in(state: AgentState, runtime: Runtime[AgentContext]) -> AgentState:
         app._emit(lg, "turn", question="[withheld: guard not ready]", tools_called=[],
                   n_sources=0, refused="not_ready")
         return {**turn, "messages": msgs, "answer": app.guardrail.MESSAGES["not_ready"],
-                "route": "end", "step": refused}
+                "question": "[withheld: guard not ready]", "route": "end", "step": refused}
     verdict = app.guardrail.check_input(q)
     if not verdict.allowed:                    # only a placeholder goes into the history
-        msgs.append({"role": "user",
-                     "content": f"[question withheld by the guardrail: {verdict.rule}]"})
+        held = f"[question withheld by the guardrail: {verdict.rule}]"
+        msgs.append({"role": "user", "content": held})
         msgs.append({"role": "assistant", "content": verdict.message})
         app._emit(lg, "input_refused", rule=verdict.rule, reason=verdict.reason)
         app._emit(lg, "turn", question=app._loggable(q, verdict.rule), tools_called=[],
                   n_sources=0, refused=verdict.rule)
-        return {**turn, "messages": msgs, "answer": verdict.message, "route": "end",
-                "step": refused}
+        return {**turn, "messages": msgs, "answer": verdict.message, "question": held,
+                "route": "end", "step": refused}
 
     short = app.incomplete_year(q)             # "nov 202": asked, never guessed
     if short:
@@ -136,15 +150,18 @@ def guard_in(state: AgentState, runtime: Runtime[AgentContext]) -> AgentState:
         app._emit(lg, "year_unclear", written=short[0])
         app._emit(lg, "turn", question=q[:200], tools_called=[], n_sources=0,
                   model_calls=0, cost_usd=0.0)
-        return {**turn, "messages": msgs, "answer": reply, "route": "end", "step": refused}
+        return {**turn, "messages": msgs, "answer": reply, "question": q, "route": "end",
+                "step": refused}
 
-    if ctx.db is not None and msgs and msgs[0].get("role") == "system":
+    # The system prompt from the code, every turn: a saved thread never keeps an old one.
+    msgs[0]["content"] = app.SYSTEM_PROMPT
+    if ctx.db is not None:
         dates = app.data_dates(ctx.db)         # what "last month" means (#5), in code
         if dates is None:
             app._emit(lg, "dates_unknown")
         msgs[0]["content"] = app.SYSTEM_PROMPT + app.dates_note(dates)
     msgs.append({"role": "user", "content": q})
-    return {**turn, "messages": msgs, "route": "model",
+    return {**turn, "messages": msgs, "question": q, "route": "model",
             "step": {"node": "guard_in", "passed": True}}
 
 
@@ -200,12 +217,20 @@ def model(state: AgentState, runtime: Runtime[AgentContext]) -> AgentState:
             return {"usage": usage, "round": n, "retried": True, "route": "model",
                     "step": {**step, "retry": "facts without a tool call"}}
         app._emit(ctx.logger, "ungrounded_answer", round=n)   # still none: kept, flagged
-    msgs.append(said)
-    if not calls:
-        return {"messages": msgs, "usage": usage, "round": n, "answer": msg.content,
-                "pending": [], "route": "guard_out", "step": step}
-    return {"messages": msgs, "usage": usage, "round": n, "pending": calls, "route": "tools",
-            "step": step}
+    if calls:
+        msgs.append(said)
+        return {"messages": msgs, "usage": usage, "round": n, "pending": calls,
+                "route": "tools", "step": step}
+    # The answer passes the output guardrail before it is put in the state, so no state
+    # (and no checkpoint of it) ever holds an answer with personal data (13 Nov 2026).
+    answer, replaced = msg.content, False
+    out = app.guardrail.check_output(answer or "")
+    if not out.allowed:
+        app._emit(ctx.logger, "output_blocked", rule=out.rule, reason=out.reason)  # never the text
+        answer, replaced = out.message, True
+    msgs.append({**said, "content": answer})
+    return {"messages": msgs, "usage": usage, "round": n, "answer": answer, "pending": [],
+            "replaced": replaced, "route": "guard_out", "step": step}
 
 
 def tools(state: AgentState, runtime: Runtime[AgentContext]) -> AgentState:
@@ -301,7 +326,8 @@ def guard_out(state: AgentState, runtime: Runtime[AgentContext]) -> AgentState:
               n_sources=len(sources), model_calls=usage["model_calls"],
               cost_usd=round(usage["cost_usd"], 6) if usage["cost_complete"] else None)
     return {"messages": msgs, "answer": shown, "route": "end",
-            "step": {"node": "guard_out", "answer_replaced": shown != answer,
+            "step": {"node": "guard_out",
+                     "answer_replaced": shown != answer or bool(state.get("replaced")),
                      "sources": len(app.format_sources(sources)),
                      "model_calls": usage["model_calls"]}}
 
@@ -353,17 +379,25 @@ def recursion_limit(max_rounds: int) -> int:
     return 4 * max_rounds + 10
 
 
-def run(messages: list, question: str, context: AgentContext, *, on_step=None,
-        compiled=None, config: dict | None = None) -> dict:
+def run(messages: list | None, question: str, context: AgentContext, *, on_step=None,
+        compiled=None, config: dict | None = None, durability: str | None = None) -> dict:
     """One question through the graph. Returns the final AgentState. on_step is called
     with each node's step (no question or answer text) as the node finishes; an error in
-    it is logged, never raised. `compiled` and `config` let a caller run a graph built with
-    a checkpointer, on its own thread."""
+    it is logged, never raised.
+    Without a checkpointer: `messages` is the conversation so far. With one (conversations.py):
+    `compiled` is the graph built with it, `config` names the thread, `messages` is None (the
+    state comes from the checkpointer) and durability="exit" saves only the finished turn."""
     g = compiled or graph()
     cfg = {"recursion_limit": recursion_limit(context.max_rounds), **(config or {})}
+    # The question goes in the context, not the input: the input becomes state, which a
+    # checkpointer saves, and a refused question must never be saved (guard_in writes the
+    # question to the state only once it may be kept).
+    context = dataclasses.replace(context, question=question)
+    given = {"question": None} if messages is None else {"messages": messages, "question": None}
+    extra = {"durability": durability} if durability else {}
     final = None
-    for mode, chunk in g.stream({"messages": messages, "question": question}, cfg,
-                                context=context, stream_mode=["updates", "values"]):
+    for mode, chunk in g.stream(given, cfg, context=context,
+                                stream_mode=["updates", "values"], **extra):
         if mode == "values":
             final = chunk
             continue

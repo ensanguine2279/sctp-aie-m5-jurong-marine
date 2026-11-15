@@ -217,24 +217,22 @@ def sqlite_db(conn) -> Db:
 
 
 def connect(env_file: str | None = None, timeout_ms: int = DEFAULT_TIMEOUT_MS) -> Db:
-    """Connect as the app user (AGENT_DB_USERNAME), never as DB_USERNAME, who owns every
-    table including employee names (PDPA, agent_user.py)."""
+    """Connect as the app user (CMMS_DB_AGENT_USERNAME, agent_ro), never as the owner
+    (CMMS_DB_USERNAME), who owns every table including employee names (PDPA, agent_user.py)."""
     from dotenv import load_dotenv
 
-    from db_config import getenv
+    from db_config import cmms_config, getenv
 
     load_dotenv(env_file) if env_file else load_dotenv()
-    user, pw = getenv("AGENT_DB_USERNAME", "agent_ro"), getenv("AGENT_DB_PASSWORD")
+    user = getenv("CMMS_DB_AGENT_USERNAME", "agent_ro")
+    pw = getenv("CMMS_DB_AGENT_PASSWORD")
     if not pw:
-        raise ValueError("Set AGENT_DB_PASSWORD in .env: the app connects as the read-only user.")
-    if user == getenv("DB_USERNAME"):
-        raise ValueError("AGENT_DB_USERNAME is the owner account (DB_USERNAME). The app must "
-                         "connect as the read-only user made by agent_user.py.")
-    from db_config import DbConfig
-
-    cfg = DbConfig(user=user, password=pw, host=getenv("DB_HOST"),
-                   port=int(getenv("DB_PORT", "3306")), name=getenv("DB_NAME"))
-    return mysql_db(cfg.engine(), timeout_ms)
+        raise ValueError("Set CMMS_DB_AGENT_PASSWORD in .env: the app connects as the "
+                         "read-only user.")
+    if user == getenv("CMMS_DB_USERNAME"):
+        raise ValueError("CMMS_DB_AGENT_USERNAME is the owner account (CMMS_DB_USERNAME). The "
+                         "app must connect as the read-only user made by agent_user.py.")
+    return mysql_db(cmms_config(user, pw).engine(), timeout_ms)
 
 
 def _between(col: str, date_from, date_to, params: dict, *, end_exclusive=True) -> list[str]:

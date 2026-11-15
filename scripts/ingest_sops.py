@@ -575,6 +575,19 @@ def fulltext_stopwords() -> list[str]:
     return sorted(MYSQL_DEFAULT_STOPWORDS | _STOP)
 
 
+def innodb_table_name(db: str, table: str) -> str:
+    """'db/table' as innodb_ft_user_stopword_table wants it: InnoDB's own name for the
+    table, in which every character of a name other than an ASCII letter, a digit or _ is
+    written as @ and 4 hex digits, the way MySQL names the database's folder on disk
+    ('jme-cmms' -> 'jme@002dcmms'). The name as typed fails with error 1231 ("can't be set
+    to the value of 'jme-cmms/sop_ft_stopwords'"): found 13 Nov 2026 on a local database
+    named with a hyphen. Accented letters have codes of their own in MySQL and aren't
+    handled here: keep database names ASCII."""
+    def enc(name: str) -> str:
+        return "".join(c if re.fullmatch(r"[A-Za-z0-9_]", c) else f"@{ord(c):04x}" for c in name)
+    return f"{enc(db)}/{enc(table)}"
+
+
 def rebuild_fulltext(conn) -> None:
     """Fill sop_ft_stopwords, point this session's FULLTEXT stopword setting at it, then
     drop and re-add both FULLTEXT indexes on the same connection.
@@ -596,7 +609,7 @@ def rebuild_fulltext(conn) -> None:
     conn.execute(text(f"INSERT INTO {STOPWORD_TABLE} (value) VALUES (:value)"),
                  [{"value": w} for w in fulltext_stopwords()])
     conn.execute(text("SET SESSION innodb_ft_user_stopword_table = :t"),
-                 {"t": f"{db}/{STOPWORD_TABLE}"})
+                 {"t": innodb_table_name(db, STOPWORD_TABLE)})
     for table, index, cols in FULLTEXT_INDEXES:
         conn.execute(text(f"ALTER TABLE {table} DROP INDEX {index}"))
         conn.execute(text(f"ALTER TABLE {table} ADD FULLTEXT INDEX {index} ({cols})"))

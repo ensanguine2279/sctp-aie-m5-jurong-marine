@@ -1,0 +1,8 @@
+# What the HTTP API needs (agent_api.py), on top of requirements-app.txt. Pin these to the
+# versions in your working environment (`pip freeze`, or `uv pip freeze`) before deploying.
+-r requirements-app.txt
+fastapi
+uvicorn
+langgraph-checkpoint-postgres   # LangGraph's official Postgres checkpointer (conversations.py)
+psycopg[binary]                 # Psycopg 3, which the checkpointer uses
+psycopg-pool                    # one pool of Postgres connections for the API's threads

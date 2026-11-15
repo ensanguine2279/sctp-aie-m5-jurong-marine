@@ -7,8 +7,12 @@
   agent is a LangGraph graph, so every test that asks a question needs one). The header
   says so; install langgraph to test the real thing (`uv add langgraph` /
   `pip install langgraph`).
+- Every test starts with no database setting set (CMMS_DB_*, CONV_DB_*, and the names
+  before 14 Nov 2026), whatever the shell has exported: a test sets what it needs.
 """
 from __future__ import annotations
+
+import pytest
 
 import mini_langgraph
 
@@ -40,3 +44,13 @@ def pytest_report_header(config):
         except Exception:
             lines.append("langgraph: installed")
     return lines
+
+
+@pytest.fixture(autouse=True)
+def _no_database_settings(monkeypatch):
+    import os
+
+    old = ("DB_", "AGENT_DB_", "AGENT_SESSION_DB_", "AGENT_PG_URL", "PG_ADMIN_URL")
+    for key in list(os.environ):
+        if key.startswith(("CMMS_DB_", "CONV_DB_") + old) or key == "MYSQL_ROOT_PASSWORD":
+            monkeypatch.delenv(key)

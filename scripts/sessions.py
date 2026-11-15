@@ -29,11 +29,11 @@ placeholder there too.
 
 Settings (the same .env as the app):
 
-    DB_HOST, DB_PORT, DB_NAME          as for the app
-    AGENT_SESSION_DB_USERNAME          default agent_sessions
-    AGENT_SESSION_DB_PASSWORD          required for saving
-    AGENT_SESSION_DAYS                 retention in days (default 7)
-    DB_ADMIN_USERNAME / DB_ADMIN_PASSWORD   for `setup` only (as agent_user.py)
+    CMMS_DB_HOST, CMMS_DB_PORT, CMMS_DB_NAME     as for the app
+    CMMS_DB_SESSION_USERNAME     default agent_sessions
+    CMMS_DB_SESSION_PASSWORD     required for saving
+    AGENT_SESSION_DAYS           retention in days (default 7)
+    CMMS_DB_ADMIN_USERNAME / CMMS_DB_ADMIN_PASSWORD   for `setup` only (as agent_user.py)
 
 Usage
     python scripts/sessions.py setup --dry-run   # the table, the user and the grants; no database
@@ -260,23 +260,21 @@ def session_settings() -> tuple[str, str | None, int]:
         days = int(getenv("AGENT_SESSION_DAYS", str(DEFAULT_DAYS)))
     except ValueError:
         days = DEFAULT_DAYS
-    return (getenv("AGENT_SESSION_DB_USERNAME", DEFAULT_USER),
-            getenv("AGENT_SESSION_DB_PASSWORD"), max(days, 1))
+    return (getenv("CMMS_DB_SESSION_USERNAME", DEFAULT_USER),
+            getenv("CMMS_DB_SESSION_PASSWORD"), max(days, 1))
 
 
 def store_from_env() -> tuple[SessionStore | None, str | None]:
     """(store, None), or (None, why conversations won't be saved). Never raises."""
-    from db_config import DbConfig, getenv
+    from db_config import cmms_config, getenv
 
     user, pw, days = session_settings()
     if not pw:
-        return None, "AGENT_SESSION_DB_PASSWORD isn't set"
-    if not getenv("DB_HOST") or not getenv("DB_NAME"):
-        return None, "DB_HOST and DB_NAME must be set"
+        return None, "CMMS_DB_SESSION_PASSWORD isn't set"
+    if not getenv("CMMS_DB_HOST") or not getenv("CMMS_DB_NAME"):
+        return None, "CMMS_DB_HOST and CMMS_DB_NAME must be set"
     try:
-        cfg = DbConfig(user=user, password=pw, host=getenv("DB_HOST"),
-                       port=int(getenv("DB_PORT", "3306")), name=getenv("DB_NAME"))
-        return SessionStore(mysql_run(cfg.engine()), days), None
+        return SessionStore(mysql_run(cmms_config(user, pw).engine()), days), None
     except Exception as e:
         return None, f"couldn't set up the session store ({type(e).__name__})"
 
@@ -375,30 +373,29 @@ def main(argv=None) -> int:
 
     from dotenv import load_dotenv
 
-    from db_config import DbConfig, getenv
+    from db_config import DbConfig, cmms_config, getenv
 
     load_dotenv(a.env_file) if a.env_file else load_dotenv()
     user, pw, days = session_settings()
-    db = getenv("DB_NAME") or "DB_NAME"
+    db = getenv("CMMS_DB_NAME") or "CMMS_DB_NAME"
     if a.command == "setup" and a.dry_run:
         print(f"Session user {account(user, a.host)} on database `{db}`, retention {days} days\n")
-        for sql in setup_statements(db if _DB.fullmatch(db) else "DB_NAME", user, a.host):
+        for sql in setup_statements(db if _DB.fullmatch(db) else "CMMS_DB_NAME", user, a.host):
             print(sql.replace(":pw", "****") + ";\n")
         print("Then checks it can't: " + ", ".join(w for w, _ in FORBIDDEN_PROBES))
         print("Dry run - nothing written to the database.")
         return 0
     if not pw:
-        print("Set AGENT_SESSION_DB_PASSWORD in .env (the session user's password).", file=sys.stderr)
+        print("Set CMMS_DB_SESSION_PASSWORD in .env (the session user's password).",
+              file=sys.stderr)
         return 2
-    host, port = getenv("DB_HOST"), int(getenv("DB_PORT", "3306"))
     if a.command == "setup":
-        admin_pw = getenv("DB_ADMIN_PASSWORD", getenv("MYSQL_ROOT_PASSWORD"))
+        admin_pw = getenv("CMMS_DB_ADMIN_PASSWORD", getenv("MYSQL_ROOT_PASSWORD"))
         if admin_pw is None:
-            print("Set DB_ADMIN_PASSWORD (or MYSQL_ROOT_PASSWORD): setup needs an admin account.",
-                  file=sys.stderr)
+            print("Set CMMS_DB_ADMIN_PASSWORD (or MYSQL_ROOT_PASSWORD): setup needs an admin "
+                  "account.", file=sys.stderr)
             return 2
-        admin = DbConfig(user=getenv("DB_ADMIN_USERNAME", "root"), password=admin_pw,
-                         host=host, port=port, name=db)
+        admin = cmms_config(getenv("CMMS_DB_ADMIN_USERNAME", "root"), admin_pw)
         print(f"Setting up as {admin.describe()}")
         run = mysql_run(admin.engine())
         for sql in setup_statements(db, user, a.host):
@@ -409,7 +406,7 @@ def main(argv=None) -> int:
                       f"(MySQL error {error_code(e)})", file=sys.stderr)
                 return 1
         print(f"Created `{TABLE}` and the user {account(user, a.host)}.")
-    me = DbConfig(user=user, password=pw, host=host, port=port, name=db)
+    me: DbConfig = cmms_config(user, pw)
     if a.command == "purge":
         n = SessionStore(mysql_run(me.engine()), days).purge()
         print(f"Deleted {n} conversation(s) older than {days} days." if n is not None

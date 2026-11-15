@@ -8,6 +8,7 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
+import db_config
 from db_config import DbConfig, getenv, load_db_config, safe_identifier, to_records
 from lineage import file_sha256, start_run
 
@@ -54,16 +55,59 @@ def test_getenv_drops_windows_line_endings_but_keeps_spaces(monkeypatch):
     assert getenv("X_MISSING") is None and getenv("X_MISSING", "d") == "d"
 
 
-def test_db_settings_with_windows_line_endings(monkeypatch, tmp_path):
-    for key, value in {"DB_USERNAME": "ingest\r", "DB_PASSWORD": "s3cr3t\r",
-                       "DB_HOST": "localhost\r", "DB_PORT": "3307\r",
-                       "DB_NAME": "jurong_marine\r"}.items():
-        monkeypatch.setenv(key, value)
+def _empty_env(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text("", encoding="utf-8")         # keep the repo's .env out of the test
-    cfg = load_db_config(str(env_file))
+    return str(env_file)
+
+
+def test_db_settings_with_windows_line_endings(monkeypatch, tmp_path):
+    for key, value in {"CMMS_DB_USERNAME": "ingest\r", "CMMS_DB_PASSWORD": "s3cr3t\r",
+                       "CMMS_DB_HOST": "localhost\r", "CMMS_DB_PORT": "3307\r",
+                       "CMMS_DB_NAME": "jurong_marine\r"}.items():
+        monkeypatch.setenv(key, value)
+    cfg = load_db_config(_empty_env(tmp_path))
     assert (cfg.user, cfg.password, cfg.host, cfg.port, cfg.name) == \
         ("ingest", "s3cr3t", "localhost", 3307, "jurong_marine")
+
+
+# ------------------------------------------- setting names (14 Nov 2026) ---
+
+def test_the_old_names_alone_are_not_enough(monkeypatch, tmp_path):
+    """Only CMMS_DB_* is read: a .env still on DB_* fails, naming what to set, rather than
+    running on settings nobody meant to keep."""
+    for key, value in {"DB_USERNAME": "ingest", "DB_PASSWORD": "s3cr3t", "DB_HOST": "h",
+                       "DB_NAME": "jurong_marine"}.items():
+        monkeypatch.setenv(key, value)
+    with pytest.raises(ValueError) as e:
+        load_db_config(_empty_env(tmp_path))
+    assert "CMMS_DB_NAME" in str(e.value) and "s3cr3t" not in str(e.value)
+
+
+def test_an_empty_password_is_allowed(monkeypatch, tmp_path):
+    """Local root with no password: CMMS_DB_PASSWORD= is a value, not a missing setting."""
+    for key, value in {"CMMS_DB_USERNAME": "root", "CMMS_DB_PASSWORD": "", "CMMS_DB_HOST": "h",
+                       "CMMS_DB_NAME": "d"}.items():
+        monkeypatch.setenv(key, value)
+    assert load_db_config(_empty_env(tmp_path)).password == ""
+
+
+def test_missing_settings_are_named_by_their_new_names(tmp_path):
+    with pytest.raises(ValueError) as e:
+        load_db_config(_empty_env(tmp_path))
+    msg = str(e.value)
+    for key in ("CMMS_DB_USERNAME", "CMMS_DB_HOST", "CMMS_DB_NAME", "CMMS_DB_PASSWORD"):
+        assert key in msg
+    assert msg.count("DB_USERNAME") == msg.count("CMMS_DB_USERNAME")     # no old name
+
+
+def test_another_login_to_the_shop_database(monkeypatch):
+    monkeypatch.setenv("CMMS_DB_HOST", "db.example.com")
+    monkeypatch.setenv("CMMS_DB_PORT", "16543")
+    monkeypatch.setenv("CMMS_DB_NAME", "defaultdb")
+    cfg = db_config.cmms_config("agent_ro", "pw")
+    assert (cfg.user, cfg.host, cfg.port, cfg.name) == ("agent_ro", "db.example.com", 16543,
+                                                        "defaultdb")
 
 
 # --------------------------------------------------------------- lineage ---

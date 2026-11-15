@@ -158,28 +158,36 @@ def test_purge_deletes_only_conversations_older_than_the_retention(store, conn):
 # ------------------------------------------------- settings from .env ---
 
 def test_without_a_password_the_store_is_off_and_says_why(monkeypatch):
-    monkeypatch.delenv("AGENT_SESSION_DB_PASSWORD", raising=False)
-    store, why = ss.store_from_env()
-    assert store is None and "AGENT_SESSION_DB_PASSWORD" in why
+    store, why = ss.store_from_env()                        # conftest: no settings at all
+    assert store is None and "CMMS_DB_SESSION_PASSWORD" in why
 
 
 def test_settings_defaults(monkeypatch):
-    for k in ("AGENT_SESSION_DB_USERNAME", "AGENT_SESSION_DB_PASSWORD", "AGENT_SESSION_DAYS"):
-        monkeypatch.delenv(k, raising=False)
+    monkeypatch.delenv("AGENT_SESSION_DAYS", raising=False)
     assert ss.session_settings() == ("agent_sessions", None, 7)
     monkeypatch.setenv("AGENT_SESSION_DAYS", "thirty")
     assert ss.session_settings()[2] == 7
     monkeypatch.setenv("AGENT_SESSION_DAYS", "0")
     assert ss.session_settings()[2] == 1                       # never "delete everything now"
-    monkeypatch.setenv("AGENT_SESSION_DB_USERNAME", "agent_sessions\r")   # Windows .env
+    monkeypatch.setenv("CMMS_DB_SESSION_USERNAME", "agent_sessions\r")    # Windows .env
     assert ss.session_settings()[0] == "agent_sessions"
 
 
 def test_never_falls_back_to_the_admin_or_read_only_user(monkeypatch):
-    monkeypatch.delenv("AGENT_SESSION_DB_PASSWORD", raising=False)
-    monkeypatch.setenv("DB_PASSWORD", "admin-secret")
-    monkeypatch.setenv("AGENT_DB_PASSWORD", "ro-secret")
+    for k in ("CMMS_DB_PASSWORD", "DB_PASSWORD", "CMMS_DB_ADMIN_PASSWORD", "DB_ADMIN_PASSWORD"):
+        monkeypatch.setenv(k, "admin-secret")
+    for k in ("CMMS_DB_AGENT_PASSWORD", "AGENT_DB_PASSWORD"):
+        monkeypatch.setenv(k, "ro-secret")
     assert ss.store_from_env()[0] is None
+
+
+def test_the_old_setting_names_alone_are_not_enough(monkeypatch):
+    """Before 14 Nov 2026: AGENT_SESSION_DB_*. Only CMMS_DB_SESSION_* is read now."""
+    monkeypatch.setenv("AGENT_SESSION_DB_USERNAME", "old_user")
+    monkeypatch.setenv("AGENT_SESSION_DB_PASSWORD", "old-pw")
+    assert ss.session_settings()[:2] == ("agent_sessions", None)
+    store, why = ss.store_from_env()
+    assert store is None and "CMMS_DB_SESSION_PASSWORD" in why
 
 
 # ------------------------------------------------------------------ setup ---
@@ -269,8 +277,8 @@ def test_check_counts_a_missing_shop_table_as_blocked_but_an_odd_error_as_a_fail
 
 
 def test_dry_run_shows_the_sql_without_the_password(monkeypatch, capsys):
-    monkeypatch.setenv("DB_NAME", "jurongmarine")
-    monkeypatch.setenv("AGENT_SESSION_DB_PASSWORD", "s3cret-pw")
+    monkeypatch.setenv("CMMS_DB_NAME", "jurongmarine")
+    monkeypatch.setenv("CMMS_DB_SESSION_PASSWORD", "s3cret-pw")
     assert ss.main(["setup", "--dry-run", "--env-file", "/dev/null"]) == 0
     out = capsys.readouterr().out
     assert "GRANT SELECT, INSERT, UPDATE, DELETE ON `jurongmarine`.`agent_sessions`" in out
