@@ -273,6 +273,87 @@ def test_listing_recent_conversations(scripted):
     assert service(conversations(down=True)).recent().status == 503
 
 
+def test_deleting_a_conversation_removes_its_row_and_its_checkpoints(scripted):
+    convs = conversations()
+    svc = service(convs)
+    scripted("Twelve.")
+    sid = svc.ask("how many machines?").body["session_id"]
+    assert convs.messages(sid)
+    r = svc.delete_session(sid)
+    assert r.status == 200 and r.body == {"session_id": sid, "deleted": True}
+    assert not convs.threads.get(sid).found and convs.messages(sid) == []
+    assert svc.session(sid).status == 404
+    assert svc.delete_session(sid).status == 200                # twice is fine
+    assert svc.delete_session("nope").status == 422
+    assert service(None).delete_session(conv.new_id()).status == 503
+    down = service(conversations(down=True)).delete_session(conv.new_id())
+    assert down.status == 503 and down.body["error"]["code"] == "store_down"
+
+
+# --------------------------------------------------------------------- photos ---
+
+SHA = "ab" * 32
+PLATE = {"kind": "image", "object": "img_nameplates_audit", "file": "CNC-02_plate.jpg",
+         "sha256": SHA, "what": "CNC-02 nameplate photo",
+         "label": "CNC-02 nameplate photo: CNC-02_plate.jpg (img_nameplates_audit)"}
+
+
+def test_an_answer_lists_the_photos_it_cites_and_keeps_them_when_reopened(monkeypatch):
+    monkeypatch.setattr(app, "complete",
+                        model_says([("c1", "read_nameplate", '{"machine": "CNC-02"}')],
+                                   "Rated 7.5 kW."))
+    monkeypatch.setattr(app.at, "run_tool",
+                        lambda db, name, args: result(sources=[PLATE, PLATE]))
+    convs = conversations()
+    svc = service(convs)
+    body = svc.ask("what power is CNC-02 rated for?").body
+    want = [{"sha256": SHA, "what": "CNC-02 nameplate photo", "file": "CNC-02_plate.jpg"}]
+    assert body["images"] == want                                  # once, though cited twice
+    shown = svc.session(body["session_id"]).body["messages"]
+    assert shown[-1]["images"] == want                             # back after a reload
+
+
+def test_a_photo_is_served_by_its_hash_and_only_by_its_hash():
+    calls = []
+
+    def fetch(db, sha):
+        calls.append(sha)
+        return {"bytes": b"\xff\xd8jpeg", "mime": "image/jpeg", "variant": "redacted",
+                "source_file": "IR-2026-014.jpg"} if sha == SHA else None
+    svc = service(photo_fn=fetch)
+    got = svc.photo(SHA)
+    assert isinstance(got, api.Photo) and got.data == b"\xff\xd8jpeg"
+    assert (got.mime, got.variant) == ("image/jpeg", "redacted")
+    assert svc.photo("cd" * 32).status == 404
+    for bad in ("", "AB" * 32, SHA[:-1], "../etc/passwd", None):
+        assert svc.photo(bad).status == 422
+    assert calls == [SHA, "cd" * 32]                               # a bad hash never queried
+
+
+def test_a_photo_that_cant_be_read_is_a_503():
+    def broken(db, sha):
+        raise ConnectionError("Lost connection to MySQL server")
+    r = service(photo_fn=broken).photo(SHA)
+    assert r.status == 503 and "MySQL" not in json.dumps(r.body)
+
+
+# ---------------------------------------------------------------------- usage ---
+
+def test_usage_reports_the_keys_spend_and_never_fails():
+    import spend
+    svc = service(spend_fn=lambda: spend.KeySpend(True, spend=8.5, max_budget=10.0,
+                                                  budget_reset_at="2026-12-01T00:00:00Z"))
+    r = svc.usage()
+    assert r.status == 200 and r.body["ok"] and r.body["used"] == 0.85 and r.body["warn"]
+    assert "$8.50 of $10.00" in r.body["line"]
+    off = service(spend_fn=lambda: spend.KeySpend(False, error="couldn't reach the proxy"))
+    assert off.usage().body["ok"] is False and "Spend not available" in off.usage().body["line"]
+
+    def boom():
+        raise RuntimeError("bug")
+    assert service(spend_fn=boom).usage().status == 200
+
+
 # ------------------------------------------------------------------ streaming ---
 
 def test_streaming_sends_each_step_then_the_answer(scripted):
@@ -280,20 +361,53 @@ def test_streaming_sends_each_step_then_the_answer(scripted):
     convs = conversations()
     events = list(service(convs).ask_stream("how many machines?"))
     kinds = [e["event"] for e in events]
-    assert kinds == ["step"] * 5 + ["answer"]
-    assert [e["data"]["node"] for e in events[:-1]] == ["guard_in", "model", "tools", "model",
-                                                       "guard_out"]
+    assert kinds == ["session"] + ["step"] * 5 + ["answer"]
+    assert [e["data"]["node"] for e in events[1:-1]] == ["guard_in", "model", "tools", "model",
+                                                        "guard_out"]
     final = events[-1]["data"]
     assert final["answer"] == "Twelve machines." and final["saved"] is True
+    assert events[0]["data"] == {"session_id": final["session_id"]}      # the same id, first
     assert convs.threads.get(final["session_id"]).found
     assert "machines?" not in json.dumps([e["data"] for e in events[:-1]])   # no text in steps
+
+
+def test_the_session_event_comes_before_the_model_is_asked(scripted, monkeypatch):
+    """A page that loses the stream mid-answer still knows which conversation to reopen."""
+    convs = conversations()
+    got_id = threading.Event()
+    waited = []
+    scripted("unused")
+
+    def model(client, model, messages, tools):
+        waited.append(got_id.wait(2))          # the model waits until the id has gone out
+        return model_says("Done.")(client, model, messages, tools)
+    monkeypatch.setattr(app, "complete", model)
+    kinds = []
+    for e in service(convs).ask_stream("hello"):
+        kinds.append(e["event"])
+        if e["event"] == "session":
+            got_id.set()
+    assert waited == [True] and kinds[0] == "session" and kinds[-1] == "answer"
+
+
+def test_a_follow_up_streams_its_own_id_and_none_without_saving(scripted):
+    convs = conversations()
+    svc = service(convs)
+    scripted("One.")
+    sid = svc.ask("first").body["session_id"]
+    events = list(svc.ask_stream("second", sid))
+    assert events[0] == {"event": "session", "data": {"session_id": sid}}
+    events = list(service(None).ask_stream("hello"))
+    assert "session" not in [e["event"] for e in events] and events[-1]["event"] == "answer"
+    events = list(svc.ask_stream("third", conv.new_id()))                 # unknown: no id
+    assert [e["event"] for e in events] == ["error"]
 
 
 def test_streaming_a_refused_question_sends_one_step_then_the_answer(scripted):
     scripted(AssertionError("the model was called"))
     events = list(service(conversations()).ask_stream("What is the name of employee EMP015?"))
-    assert [e["event"] for e in events] == ["step", "answer"]
-    assert events[0]["data"]["passed"] is False and events[1]["data"]["refused"] == "pdpa"
+    assert [e["event"] for e in events] == ["session", "step", "answer"]
+    assert events[1]["data"]["passed"] is False and events[2]["data"]["refused"] == "pdpa"
 
 
 def test_streaming_a_bad_request_sends_one_error():
@@ -343,7 +457,10 @@ def test_routes_need_the_key_except_health(client):
     for method, path, body in (("post", "/ask", {"question": "hi"}),
                                ("post", "/ask/stream", {"question": "hi"}),
                                ("get", "/sessions", None),
-                               ("get", f"/sessions/{'a' * 32}", None)):
+                               ("get", f"/sessions/{'a' * 32}", None),
+                               ("delete", f"/sessions/{'a' * 32}", None),
+                               ("get", f"/photos/{'a' * 64}", None),
+                               ("get", "/usage", None)):
         r = getattr(client, method)(path, json=body) if body else getattr(client, method)(path)
         assert r.status_code == 401 and r.json()["error"]["code"] == "unauthorised"
 
@@ -363,4 +480,27 @@ def test_ask_stream_over_http(client, scripted):
                     headers={api.KEY_HEADER: KEY})
     assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
     kinds = [line.split(": ", 1)[1] for line in r.text.splitlines() if line.startswith("event:")]
-    assert kinds == ["step"] * 5 + ["answer"]
+    assert kinds == ["session"] + ["step"] * 5 + ["answer"]
+
+
+def test_delete_photo_and_usage_over_http(scripted):
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+    import spend
+    svc = service(conversations(),
+                  photo_fn=lambda db, sha: {"bytes": b"img", "mime": "image/png",
+                                            "variant": "as_is", "source_file": "p.png"}
+                  if sha == SHA else None,
+                  spend_fn=lambda: spend.KeySpend(True, spend=1.0, max_budget=10.0))
+    c = TestClient(api.create_app(svc))
+    h = {api.KEY_HEADER: KEY}
+    scripted("Hello.")
+    sid = c.post("/ask", json={"question": "hello"}, headers=h).json()["session_id"]
+    assert c.delete(f"/sessions/{sid}", headers=h).json()["deleted"] is True
+    assert c.get(f"/sessions/{sid}", headers=h).status_code == 404
+    r = c.get(f"/photos/{SHA}", headers=h)
+    assert r.status_code == 200 and r.content == b"img"
+    assert r.headers["content-type"] == "image/png" and r.headers["x-photo-variant"] == "as_is"
+    assert c.get(f"/photos/{'cd' * 32}", headers=h).status_code == 404
+    assert c.get("/usage", headers=h).json()["used"] == 0.1

@@ -1,118 +1,135 @@
 # Agent UI: the demo chat page
 
 `scripts/agent_ui.py` is a Streamlit chat page for the agent, built for the demo. It shows the
-path a question takes, from the person to the app, the LLM and the tools, and back.
+path a question takes, from the person to the agent, the LLM and the tools, and back.
 
-It is a thin page over `agent_app.py` and adds no agent logic of its own. Every answer comes
-with the sources the tools cited. It also has a **What happened** table listing each model call
-and each tool call in order, so viewers can watch the path live.
+**Since phase 3 (15 Nov 2026) the page is only a front end.** It holds no database login, no
+LiteLLM key and no agent code. Everything comes from the [agent API](agent_api.md) through
+`scripts/api_client.py` (standard library only), with two settings: `AGENT_API_URL` and
+`AGENT_API_KEY`. Grounding, the guardrail on both sides of the model, saving, retention, the
+photos and the spend figure are all the API's, the same for every client. Every answer comes
+with the sources the tools cited, and a **What happened** table listing each model call and
+each tool call in order; while a question runs, a status line follows the agent's steps as the
+API streams them.
 
 ```mermaid
 flowchart LR
     P["Person"] --> U["agent_ui.py<br/>(Streamlit)"]
-    U --> A["agent_app.ask()"]
-    A -->|"chat calls"| M["LLM<br/>(via proxy)"]
-    A -->|"tool calls"| T["agent_tools<br/>(agent_ro on MySQL)"]
-    A -.->|"JSON events"| U
-    U <-->|"load / save"| S["sessions.py<br/>(agent_sessions on MySQL)"]
+    U -->|"api_client<br/>X-API-Key"| API["agent_api.py"]
+    API --> G["agent graph<br/>(guardrail, model, tools)"]
+    G -->|"chat calls"| M["LLM<br/>(via proxy)"]
+    G -->|"tool calls"| T["agent_tools<br/>(agent_ro on MySQL)"]
+    API <-->|"checkpoints + threads"| C[("Postgres<br/>conversations.py")]
+    API -.->|"session, steps, answer<br/>(server-sent events)"| U
 ```
 
-You can run it on your laptop (below) or host it on Google Cloud Run
-([Deploying on Cloud Run](#deploying-on-google-cloud-run)).
+Until 15 Nov 2026 the page ran the agent itself (`agent_app.ask()`), read photos from MySQL as
+`agent_ro`, asked the proxy for the key's spend, and saved conversations to MySQL through
+`sessions.py` (the `agent_sessions` login). All of that moved behind the API; `sessions.py` is
+retired, and the page and any other client now share one store of conversations.
+
+You run it on your laptop next to the API (below). The hosted page on Cloud Run is still the
+build from before phase 3 until the API is hosted too (phase 4): see
+[Deploying on Cloud Run](#deploying-on-google-cloud-run).
 
 ## What the page shows
 
-Each part of the page has one place (layout reworked 10 Nov 2026; until then the sidebar
-held the examples, the recent conversations and the spend together, and was congested). The
-page uses Streamlit's wide layout.
+Each part of the page has one place (layout reworked 10 Nov 2026). The page uses Streamlit's
+wide layout.
 
-- **Password box.** This appears only if `APP_PASSWORD` is set. Nothing connects until the
+- **Password box.** This appears only if `APP_PASSWORD` is set. Nothing is called until the
   password is right. The check is constant-time, using `hmac.compare_digest`.
 - **Sidebar: conversations only.**
   - A **New conversation** button.
-  - **Recent**: the eight saved conversations answered most recently, each titled by its
-    first question, with how many questions and how long ago. Click one to open it here;
-    the one on the page is greyed out ("open now").
-  - **Fold earlier questions**, a toggle ([below](#what-the-page-shows)): on, only the latest
-    exchange is open; off, the whole conversation is shown.
-  - Whether this conversation is being saved
-    ([below](#the-conversation-survives-a-restart)): a quiet line when it is, a warning when
-    it isn't.
+  - **Recent**: the eight saved conversations answered most recently (`GET /sessions`), each
+    titled by its first question, with how many questions and how long ago. Click one to open
+    it here; the one on the page is greyed out ("open now").
+  - **Fold earlier questions**, a toggle: on, only the latest exchange is open; off, the whole
+    conversation is shown.
+  - Whether this conversation is being saved (from the API's `/health`): a quiet line when it
+    is, a warning when it isn't. Without saving, each question is answered on its own, without
+    the earlier ones, and the warning says so.
 - **Top bar.**
   - The title, "JME maintenance assistant", and a caption saying that answers come only from
     the shop's own data, through fixed tools, with sources shown.
   - **Examples**, a lightbulb icon (`EXAMPLES_ICON`, tooltip "Example questions") opening a
-    popover with the six example questions, once a conversation has started. An icon, not
-    the word: the word was cut off in its narrow column.
-  - The **usage** popover, a payments icon at the right (`USAGE_ICON`). Hovering it shows
-    the model and this conversation's cost (`gpt-4o-mini · $0.0031`). Open it for the model,
-    "This conversation: $X over N questions" (added up from the answers on the page, so it is
-    the same after a reload or reopening a saved conversation), and the key's spend against
-    its budget, from the proxy.
-  - When the key is near or over its cap, or the proxy can't be reached, a warning also shows
-    across the page, under the top bar, so it can't be missed inside a closed popover.
+    popover with the six example questions, once a conversation has started.
+  - The **usage** popover, a payments icon at the right (`USAGE_ICON`). Hovering it shows the
+    model and this conversation's cost (`gpt-4o-mini · $0.0031`). Open it for the model,
+    "This conversation: $X over N questions" (added up from the answers, so it is the same
+    after a reload), and the key's spend against its budget (`GET /usage`: the API asks the
+    proxy with its own key; the page holds none).
+  - When the key is near or over its cap, or the spend can't be read, a warning also shows
+    across the page, under the top bar.
 - **A new conversation** opens on the six example questions as a grid of buttons: CNC-02
   behaviour, CNC-03 oil, blasting-chamber entry, welding SOP, the count of 2025 incidents at
   severity 4 or worse, and an employee's name. The last one is refused by the guardrail on
-  purpose, and its tooltip says so. The grid goes once a question is asked.
+  purpose (in the API, before the model is called), and its tooltip says so. The grid goes
+  once a question is asked.
 - **Only the latest exchange is open**, by default. Every earlier question and answer folds
-  into one expander at the top, "Earlier in this conversation (N questions)", so the page
-  stays short and still reads top to bottom (`split_latest()`, `earlier_label()`,
-  `history_parts()`). Asking a new question folds the previous exchange straight away: the
-  page reads the chat box before it draws the history. A reopened conversation folds the same
-  way. The sidebar's **Fold earlier questions** toggle turns this off, to show the whole
-  conversation as a normal chat; the choice lasts for the browser session. (Considered and not done: newest
-  first. The chat box is pinned to the bottom, and follow-ups would read bottom to top.)
-- **A new question is scrolled into view**, whether typed or picked from the examples. A
-  picked one isn't typed into the chat box, so Streamlit didn't scroll to it, and it landed
-  below the visible page unseen (10 Nov 2026). `scroll_script()` is an invisible component
-  that scrolls the newest message to the top of the view.
-- **Less space above the title**: `TOP_CSS` cuts Streamlit's default top padding (about
-  6rem) to 2.5rem. It also gives the usage popover's panel a minimum width (24rem): it took
-  the width of its narrow icon column and cut its lines off.
+  into one expander at the top, "Earlier in this conversation (N questions)"
+  (`split_latest()`, `earlier_label()`, `history_parts()`). Asking a new question folds the
+  previous exchange straight away. The sidebar toggle turns this off.
+- **While a question is answered**, a status box shows the step the agent is on, from the
+  API's stream (`step_line()`): "Question checked by the guardrail", "Model (round 1) asked
+  for: compare_sensor_trend", "Tools (round 1) ran: compare_sensor_trend", "Model (round 2)
+  wrote the answer", "Answer checked by the guardrail". Steps carry no question or answer
+  text.
+- **A new question is scrolled into view**, whether typed or picked from the examples
+  (`scroll_script()`).
+- **Less space above the title**: `TOP_CSS` cuts Streamlit's default top padding to 2.5rem and
+  gives the usage popover a minimum width.
 - **Each answer**: its text, one line with what it cost, then tabs for what it rests on, only
   for what it has, each with a count:
   - **Sources**: the sources the tools cited.
   - **Caveats**: the tools' notes ([below](#notes-from-the-data)).
   - **Photos**: the scans the tools cited ([below](#photos-under-the-answer)).
   - **What happened**: one row per step, as below. On the **newest** answer this is the
-    first tab, so it is the one open (Streamlit always opens a tab group on its first tab);
-    on earlier answers it is last.
+    first tab, so it is the one open; on earlier answers it is last.
 
 | Step | Detail shown |
 |---|---|
 | `model, round N` | Which tools the model asked for, or `(answered)`, the call's cost when the proxy gave one, plus the seconds taken |
 | `tool, round N` | Tool name, the arguments the model sent, `ok` or `refused: <error_code>`, plus the seconds taken |
 | `model, round N` (failed) | The model call's error |
-| `app` | A tool asked a clarifying question that was passed to the user, or the app stopped after too many tool calls |
+| `app` | A tool asked a clarifying question that was passed to the user, the app stopped after too many tool calls, a short year was asked back, "completed" was read as CLOSED, or a cut-off conversation was mended |
 | `guardrail` | The question was refused in code before the model was called, the staff name list wasn't loaded (fail closed), or the answer was replaced before it was shown |
+
+The rows are built by the API (`answer_view.trace_rows()`) and sent with the answer.
 
 ## The conversation survives a restart
 
-The page's link carries the conversation's id (`?session=...`). After every answer the page
-saves the conversation through [`sessions.py`](sessions.md), to a table only the
-`agent_sessions` user can touch. When the page starts (a refresh, a redeploy, Cloud Run
-starting a new container, another device) it loads the conversation for the link's id, draws the
-answers again and hands the model the earlier messages, so a follow-up keeps its context.
+The API saves the conversation after every answer (LangGraph's checkpointer in Postgres,
+[`conversations.md`](conversations.md)) and gives it an id. The id is the stream's first
+event (`session`), sent before the model is asked, and the page puts it in its link
+(`?session=...`) at once. When the page starts (a refresh, a redeploy, another device) it loads
+the conversation for the link's id from `GET /sessions/{id}` and draws it again, **photos
+included** (each saved answer keeps the hashes of the scans it cites). A follow-up keeps its
+context because the API runs it on the same LangGraph thread; the page sends only the question
+and the id.
 
-The sidebar's **Recent** list shows the eight newest saved conversations, so one can be
-reopened without its link. Clicking one does what opening its link would. A title is the
-first question as `messages` keeps it, so a question the guardrail refused shows only as its
-placeholder. Everyone behind the page password sees the same list: the page has no user
-accounts. Details in [`sessions.md`](sessions.md#recent-conversations-in-the-sidebar).
+The sidebar's **Recent** list shows the eight newest saved conversations. A title is the first
+question as the API kept it, so a question the guardrail refused shows only as its placeholder.
+Everyone behind the page password sees the same list: the page has no user accounts.
 
 The conversation's spend in the usage popover is its own total, added up from its answers
-(`conversation_spend`), not a counter in page memory. Until 10 Nov 2026 it was a counter,
-which started at $0 on every load, so a reopened conversation showed "$0.0000 over 0
-questions" ([`sessions.md`](sessions.md#the-conversations-spend-after-a-reload)).
+(`answer_view.conversation_spend`), not a counter in page memory, so a reopened conversation
+shows what it cost.
 
-A question the guardrail refuses is saved, and drawn again after a reload, only as its
-placeholder (`kept_question()`), the same as in `messages`. Before 9 Nov 2026 the saved
-display copy kept it as typed ([`sessions.md`](sessions.md#what-is-stored)).
+**Delete this conversation**, the bin left of the question box, deletes it through
+`DELETE /sessions/{id}` (its checkpoints and its row) after a confirm, and starts a new one.
 
-If `CMMS_DB_SESSION_PASSWORD` isn't set, or MySQL is down, the sidebar says the conversation
-isn't being saved, and the page carries on in memory as before. Details, setup and the check in
-[`sessions.md`](sessions.md).
+**A click while a question is answered** makes Streamlit stop the page's script and run it
+again. The API answers in its own thread, so the question still finishes and is saved. On the
+next run the page reloads the conversation (`settle_cut_off()`): if the answer is there it is
+drawn and nothing is said; if not (the API is still working on it) the question is taken off
+the page with a note that it may appear when the conversation is reopened. The note doesn't
+repeat the question: the page no longer runs the guardrail that decides what of a question may
+be redrawn. Until 15 Nov 2026 a cut-off question was simply lost, because the page itself was
+running it.
+
+If the API isn't saving conversations (no `CONV_DB_URL` there, or Postgres down), the sidebar
+says so. If the API can't be reached at all, the page says so and stops.
 
 ## Notes from the data
 
@@ -121,131 +138,127 @@ a person, an OCR value not reliably read, a description that doesn't fit its mac
 severity converted between scales). The system prompt tells the model to carry each one, but
 on 7 Nov 2026 the live page answered incident 911 without its note that the form's severity
 was read by a person. So the page also shows the tools' notes itself, once each, under every
-answer (`agent_app.ask(..., notes=[...])`, `format_notes`, `show_notes`), in the answer's
-**Caveats** tab. It is not the tab that opens by default, because with the prompt rule the
-answer usually says them already in plainer words, and showing both repeated them; the tools'
-wording is written for the model and names the trap-list item, which is what an auditor
-wants. One click away whether or not the model said them. (Until 10 Nov 2026 this was a
-closed expander, "Caveats from the data (N), as the tools gave them".)
+answer (the API's `notes` field, `show_notes`), in the answer's **Caveats** tab. It is not the
+tab that opens by default, because the answer usually says them already in plainer words; the
+tools' wording is written for the model and names the trap-list item, which is what an auditor
+wants. One click away whether or not the model said them.
 
 ## Photos under the answer
 
-When a tool cites a scan (a nameplate photo or an incident form), the page shows the photo
-in the answer's **Photos** tab, so "check the photo" in an answer is something the user can do
-there and then. The model never handles images or links: `agent_app.ask(..., raw_sources=[...])`
-hands back the tools' source records, and `photo_items()` fetches the photo behind each
-image source.
+When a tool cites a scan (a nameplate photo or an incident form), the page shows the photo in
+the answer's **Photos** tab, so "check the photo" in an answer is something the user can do
+there and then. The model never handles images or links: the API lists the scans an answer
+cites (`images`: SHA-256, what it is, file name; `answer_view.image_refs()`), and the page
+fetches each one from `GET /photos/{sha256}` (`photo_items()`), once per answer and cached for
+an hour.
 
-- **From the database, not a folder.** The hosted page has no data folder; the photos are
-  in `img_files_public` (made by `ingest_images.py`), which `agent_ro` may read.
-- **Hash-checked.** `agent_tools.fetch_image` recomputes the SHA-256 of the bytes and shows
-  nothing if it doesn't match the one recorded at ingest.
+- **From the database, through the API.** The photos are in `img_files_public` (made by
+  `ingest_images.py`); the API reads them as `agent_ro`. The page has no database login.
+- **Hash-checked.** `agent_tools.fetch_image` recomputes the SHA-256 of the bytes and returns
+  nothing if it doesn't match the one recorded at ingest (the API answers 404).
 - **Incident forms only redacted.** The database holds no unredacted form: the "Person
-  involved" value and the signature box are covered, and the caption says so.
+  involved" value and the signature box are covered, and the caption says so (the API's
+  `X-Photo-Variant: redacted`).
+- **Only a real hash reaches the API.** `image_refs()` keeps a source only if its `sha256` is
+  64 lower-case hex characters, and the API refuses anything else with a 422 before any query.
 - **No public link, not even an internal one.** The photo is drawn with its bytes inside the
-  page (a `data:` URL, `img_html`), not with `st.image`. `st.image` keeps the bytes in the
-  server's memory and has the browser fetch them from a `/media/...` link in a second
-  request; on Cloud Run that request can miss (another or restarted container, media
-  released after a rerun, a tab from before a redeploy) and the photo shows **broken**. That
-  happened on the live page on 7 Nov 2026 (CNC-03's nameplate).
-- A source whose photo isn't stored (a form that couldn't be redacted, a load with
-  `--no-photos`) gets "photo not available here" instead.
-- Photos are not saved with the conversation, so an answer reloaded after a restart shows its
-  text, sources and caveats without the photo (and without its Photos tab).
+  page (a `data:` URL, `img_html`), not with `st.image`, whose second request for `/media/...`
+  can miss on Cloud Run (seen on the live page, 7 Nov 2026).
+- A scan whose photo isn't stored gets "photo not available here"; one the API can't fetch
+  right now gets "photo can't be fetched right now".
+- **Photos come back with a reopened conversation** (since 15 Nov 2026; before, a reloaded
+  answer had no Photos tab).
 
 ## Run it locally
 
-This lives in the team repo, so it uses pip. Work from the repo root:
+The page needs the API running. Two terminals, from the repo root.
+
+**1. The API** ([agent_api.md](agent_api.md)): it has the database, LLM and conversations
+settings, plus `AGENT_API_KEY`:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate            # Windows: .venv\Scripts\activate
-pip install -r requirements-app.txt  # includes streamlit (1.36 or later)
-streamlit run scripts/agent_ui.py
+# personal repo (uv)
+uv run uvicorn agent_api:create_app --factory --app-dir scripts --port 8000
+# team repo (pip)
+pip install -r requirements-api.txt
+uvicorn agent_api:create_app --factory --app-dir scripts --port 8000
 ```
 
-With uv (personal repo): `uv pip install -r requirements-app.txt`, then
-`uv run streamlit run scripts/agent_ui.py`.
+**2. The page**, with `AGENT_API_URL=http://localhost:8000` and the same `AGENT_API_KEY` in its
+environment (the same `.env` is fine: the page reads only those two, plus `APP_PASSWORD`):
+
+```bash
+# team repo
+pip install -r requirements-app.txt  # streamlit (1.36 or later) and python-dotenv, nothing else
+streamlit run scripts/agent_ui.py
+# personal repo
+uv run streamlit run scripts/agent_ui.py
+```
 
 Streamlit opens the page at <http://localhost:8501>.
 
-The page needs Streamlit 1.36 or later (`st.popover`, and `st.columns` with
-`vertical_alignment`); `requirements-app.txt` says so. An older one stops with a
-`TypeError` or `AttributeError` naming one of those.
-
-The page needs the same `.env` as `agent_app.py`. Set at least the agent database settings,
-`OPENAI_API_KEY` and `OPENAI_BASE_URL` (see [Configuration](#configuration)). Leave
-`APP_PASSWORD` unset if you don't want a password box on your own machine.
-
-Settings are read once per Streamlit process (`st.cache_resource`). After changing `.env`,
-stop Streamlit (Ctrl+C) and start it again; refreshing the browser is not enough.
+The client and the API's health are read once per Streamlit process (`st.cache_resource`;
+health is re-read every minute). After changing `.env`, stop Streamlit (Ctrl+C) and start it
+again; refreshing the browser is not enough. If the API isn't running, the page says "The
+agent API can't be reached right now" and stops.
 
 ## Configuration
 
-All settings come from environment variables, or from `.env` when you run locally. The
-database settings start with `CMMS_DB_` (since 14 Nov 2026; before that `DB_*`, `AGENT_DB_*`
-and `AGENT_SESSION_DB_*`, which are no longer read: see
-[Settings](README.md#settings-one-prefix-per-database)).
+The page reads three settings, from the environment or `.env`:
 
 | Variable | Used for |
 |---|---|
-| `CMMS_DB_HOST`, `CMMS_DB_PORT`, `CMMS_DB_NAME` | The MySQL database (Aiven: `jme_cmms` since 15 Nov 2026) |
-| `CMMS_DB_AGENT_USERNAME`, `CMMS_DB_AGENT_PASSWORD` | The read-only `agent_ro` user. `agent_tools.connect()` refuses the owner account (`CMMS_DB_USERNAME`/`CMMS_DB_PASSWORD`). Without the password the page stops with "Set CMMS_DB_AGENT_PASSWORD" |
-| `CMMS_DB_SESSION_USERNAME`, `CMMS_DB_SESSION_PASSWORD` | The `agent_sessions` user, for saved conversations ([`sessions.md`](sessions.md)). Username defaults to `agent_sessions`. Without the password, conversations aren't saved and the sidebar says so |
-| `AGENT_SESSION_DAYS` | How long a saved conversation is kept after its last answer (default 7) |
-| `OPENAI_API_KEY` | Your LiteLLM proxy member key |
-| `OPENAI_BASE_URL` | The proxy URL |
+| `AGENT_API_URL` | The API's address: `http://localhost:8000` locally, the API service's URL when hosted (phase 4). Required: there is no default, so a page that isn't configured says so instead of calling somewhere unexpected |
+| `AGENT_API_KEY` | The key the API was started with, sent as `X-API-Key`. Required, and never shown in an error |
 | `APP_PASSWORD` | Optional page password. If it is unset, there is no password box |
-| `AGENT_LOG_FILE` | Path of the JSON log file. Defaults to `logs/agent_app.jsonl`, the same file `agent_app.py` writes. Set it to `off` to turn the file off |
+
+Everything else (`CMMS_DB_*`, `CONV_DB_URL`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`,
+`AGENT_LOG_FILE`) is the API's. `CMMS_DB_SESSION_*` is no longer read by anything: it was the
+retired `sessions.py`'s login.
 
 ## Logs
 
-Every question's events are written as one JSON line per event. The events are `chat_call`,
-`tool_call`, `chat_error`, `clarification_returned` and `max_rounds_exceeded`, plus anything
-else `agent_app` logs, such as `scale_guess_blocked`. They go to two places:
-
-- **stderr, always.** On Cloud Run this is what ends up in Cloud Logging.
-- **`AGENT_LOG_FILE`**, unless it is set to `off`. The page appends to this file through a
-  single shared handler for the whole process.
-
-The **What happened** table is built from these same events.
+The page logs nothing of the agent's: every question's JSON events (`chat_call`,
+`tool_call`, `input_refused`, ...) are written by the API, to stderr and `AGENT_LOG_FILE`, and
+come back to the page only as the What happened rows.
 
 ## How the code is laid out
 
 | Piece | What it does |
 |---|---|
-| `TITLE`, `CAPTION`, `EXAMPLES` | The top bar's text, and the example questions (the new conversation's grid and the Examples popover) |
+| `TITLE`, `CAPTION`, `EXAMPLES`, `REFUSED_EXAMPLE` | The top bar's text, and the example questions (the new conversation's grid and the Examples popover) |
 | `example_help()` | The tooltip on an example button: only the one the guardrail refuses gets one |
-| `TraceHandler` | A logging handler that collects the JSON events of one question for the on-page table |
-| `trace_logger()` | Makes a fresh logger for each question (no propagation). It attaches the trace handler, the shared stderr handler and, if enabled, the shared file handler |
-| `trace_rows()` | Turns the events into the table rows |
+| `step_line()` | The status line for one streamed step |
+| `answer_message()`, `error_text()` | An answer from the API as the page draws it; what to say for a stream's `error` event, and whether the question may still finish (a 504 or a lost stream) |
 | `password_ok()` | Constant-time password check |
-| `render_answer()`, `evidence_tabs()`, `last_answer()` | One answer: text, cost line, then its tabs. `evidence_tabs()` decides which tabs it gets and their labels, What happened first on the newest answer (`last_answer()`) |
-| `show_notes()` | The tools' caveats, in the Caveats tab, from `agent_app.ask(..., notes=...)` |
-| `photo_items()`, `show_photos()`, `img_html()` | The photos behind an answer's image sources, fetched and hash-checked, with captions; drawn in the Photos tab as `<img>` tags with the bytes inside (caption HTML-escaped) |
-| `cost_line()` | The cost under each answer |
-| `conversation_spend()`, `conversation_line()`, `USAGE_ICON`, `usage_help()` | The conversation's spend: the sum of its answers' costs (`cost_usd`, or read back from the cost line of an answer saved before 10 Nov 2026), "at least" when one isn't known; the usage popover's icon and its tooltip, escaped for Markdown |
-| `split_latest()`, `history_parts()`, `earlier_label()`, `draw_messages()`, `FOLD_KEY` | The latest exchange drawn open, everything before it folded into one expander, unless the sidebar toggle (`FOLD_KEY` in `st.session_state`) turns folding off |
-| `TOP_MARKER`, `TOP_BAR` | The top bar's layout: a marker (an empty `<span id="jme-topbar">` in the caption) lets `TOP_CSS` shrink the two icon columns to their buttons, so the icons sit together at the right edge; the column weights are the fallback for a browser without CSS `:has()` |
-| `TOP_CSS`, `scroll_script()` | Less padding above the title; the invisible component that scrolls a new question into view |
-| `display_copy()`, `restored()`, `kept_question()`, `save_line()` | What is saved of the display (no photos, no trace, a refused question only as its placeholder, each answer's cost as a number), a loaded conversation turned back into `messages` and `shown` (questions checked again), and the sidebar's saved / not saved line |
-| `RECENT`, `recent_label()`, `ago()`, `md_plain()` | The sidebar's list of saved conversations: how many (8), one line each (title, questions, how long ago or "open now"), Markdown escaped |
-| `main()` | The Streamlit page: password gate, the cached `connect()` (one DB connection and LLM client per process, through `st.cache_resource`), the cached session store (purges old conversations once per process), the conversation loaded from `?session=`, the sidebar (with `open_saved()` behind the recent list), the top bar, the examples grid on a new conversation, the chat, one question per run, then the save |
+| `render_answer()`, `evidence_tabs()`, `last_answer()` | One answer: text, cost line, then its tabs. What happened first on the newest answer |
+| `show_notes()` | The tools' caveats, in the Caveats tab |
+| `photo_items()`, `attach_photos()`, `show_photos()`, `img_html()` | The photos an answer cites, fetched from the API by hash once per answer, with captions; drawn as `<img>` tags with the bytes inside (caption HTML-escaped) |
+| `USAGE_ICON`, `usage_help()` | The usage popover's icon and its tooltip, escaped for Markdown. The totals come from `answer_view.conversation_spend()` / `conversation_line()` |
+| `split_latest()`, `history_parts()`, `earlier_label()`, `draw_messages()`, `FOLD_KEY` | The latest exchange drawn open, everything before it folded into one expander, unless the sidebar toggle turns folding off |
+| `TOP_CSS`, `TOP_MARKER`, `TOP_BAR`, `scroll_script()` | The top bar's layout; the invisible component that scrolls a new question into view |
+| `restored()`, `settle_cut_off()`, `interrupted_line()` | A conversation from `GET /sessions/{id}` as the page draws it; a cut-off question shown answered if the API finished it, else taken off with a note |
+| `delete_conversation()`, `show_delete()`, `DELETE_*`, `INPUT_*`, `fit_bin_script()` | Delete this conversation through the API; the bin left of the question box |
+| `save_line()`, `RECENT`, `recent_label()`, `ago()`, `md_plain()` | The sidebar's saved / not saved line (from `/health`), and its list of saved conversations |
+| `main()` | The Streamlit page: password gate, the cached API client and health, the spend (cached 30 s) and photos (cached 1 h), the conversation loaded from `?session=`, the cut-off check, the sidebar, the top bar, the examples grid, the chat, then one question per run, streamed |
 
-Conversation state lives in `st.session_state` while the page is open, and in the
-`agent_sessions` table between page loads:
-
-- `messages` holds the model's conversation, from `agent_app.new_conversation()`.
-- `shown` holds what is drawn on screen, each answer with its cost; the conversation's
-  spend is added up from it.
-- `sid` is the conversation's id, also in the link.
-
-The hosted version still runs a single instance with session affinity, because Streamlit's
-websocket needs it; a restart or a new container no longer loses the conversation.
+State in `st.session_state` while the page is open: `shown` (what is drawn, each answer with
+its cost, its image references and, once drawn, its photos) and `sid` (the conversation's id,
+from the API, also in the link). The model's conversation is no longer on the page at all: it
+is the API's LangGraph thread.
 
 ---
 
 # Deploying on Google Cloud Run
+
+> **Phase 3 (15 Nov 2026): don't redeploy the page from the current code yet.** This section
+> describes the page as deployed on 15 Nov 2026, before phase 3: it runs the agent itself and
+> connects to MySQL as `agent_ro` and `agent_sessions`. The current `agent_ui.py` only calls
+> the agent API, and the API isn't hosted yet; deployed alone it would stop with "Missing
+> setting(s): AGENT_API_URL, AGENT_API_KEY". Phase 4 hosts the API as a second Cloud Run
+> service and replaces this section: the page then needs only `AGENT_API_URL`,
+> `AGENT_API_KEY` and `APP_PASSWORD`, and its image only `agent_ui.py`, `api_client.py`,
+> `answer_view.py` and `streamlit`. Until then, keep the running service as it is.
 
 This runs `scripts/agent_ui.py` as a container on Cloud Run, next to the
 [LiteLLM proxy](https://github.com/ensanguine2279/sctp-aie-m5-jurong-marine-llm-proxy). The database stays on Aiven. The page connects to
