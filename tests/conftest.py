@@ -8,7 +8,7 @@
   says so; install langgraph to test the real thing (`uv add langgraph` /
   `pip install langgraph`).
 - Every test starts with no database setting set (CMMS_DB_*, CONV_DB_*, and the names
-  before 14 Nov 2026) and no page-to-API setting (AGENT_API_URL, AGENT_API_KEY), whatever
+  before 14 Nov 2026) and no page-to-API setting (AGENT_API_URL, AGENT_API_KEY, AGENT_API_AUTH), whatever
   the shell has exported: a test sets what it needs.
 """
 from __future__ import annotations
@@ -54,5 +54,5 @@ def _no_database_settings(monkeypatch):
     old = ("DB_", "AGENT_DB_", "AGENT_SESSION_DB_", "AGENT_PG_URL", "PG_ADMIN_URL")
     for key in list(os.environ):
         if key.startswith(("CMMS_DB_", "CONV_DB_") + old) or key in (
-                "MYSQL_ROOT_PASSWORD", "AGENT_API_URL", "AGENT_API_KEY"):
+                "MYSQL_ROOT_PASSWORD", "AGENT_API_URL", "AGENT_API_KEY", "AGENT_API_AUTH"):
             monkeypatch.delenv(key)

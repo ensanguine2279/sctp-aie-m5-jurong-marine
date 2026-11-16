@@ -18,14 +18,24 @@ Standard library only (urllib), so the page's image needs no HTTP package. Every
 an ApiError(status, code, message): status 0 when the API couldn't be reached. The key is
 sent in the X-API-Key header and never appears in an error.
 
+On Cloud Run the API is private (16 Nov 2026, phase 4): Cloud Run lets a request through only
+with a Google identity token for the API's URL, from an account allowed to invoke it. With
+AGENT_API_AUTH=google the client fetches that token for the page's service account from the
+metadata server (GoogleIdToken), keeps it until shortly before it expires, and sends it as
+`Authorization: Bearer ...` next to the key. Locally (AGENT_API_AUTH unset) nothing changes;
+to reach the private API from a laptop, `gcloud run services proxy jme-agent-api` serves it
+on localhost with your own identity.
+
 Tests and local runs without a server pass `transport=ServiceTransport(service)`: the same
 client calls an agent_api.AgentService in this process, so a test drives the page's client,
 the API's service and the real agent graph together.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -80,6 +90,61 @@ def _error_from(status: int, body: bytes) -> ApiError:
                         e.get("message") or f"The API answered HTTP {status}.")
     except (ValueError, AttributeError, UnicodeDecodeError):
         return ApiError(status, "http_error", f"The API answered HTTP {status}.")
+
+
+# ============================================================ identity token ===
+
+METADATA_TOKEN_URL = ("http://metadata.google.internal/computeMetadata/v1/instance/"
+                      "service-accounts/default/identity")
+TOKEN_MARGIN = 300           # fetch a new token this many seconds before the old one expires
+TOKEN_FALLBACK_LIFE = 3000   # seconds, if a token's expiry can't be read (Google's last 3600)
+
+
+def token_expiry(token: str) -> float | None:
+    """The `exp` claim of a JWT (seconds since the epoch), read without checking the
+    signature: only to know when to fetch a new one. None if it can't be read."""
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(payload)).get("exp")
+        return float(exp) if isinstance(exp, (int, float)) else None
+    except (IndexError, ValueError, TypeError, AttributeError):
+        return None
+
+
+class GoogleIdToken:
+    """A Google identity token for `audience` (the private API's URL), for the service account
+    the page runs as, from the metadata server Cloud Run provides. Cached until TOKEN_MARGIN
+    seconds before it expires. A token that can't be fetched is an ApiError (status 0), so the
+    page says the API can't be reached rather than crashing; the token never appears in it."""
+
+    def __init__(self, audience: str, opener=urllib.request.urlopen, clock=time.time):
+        self.audience = audience.rstrip("/")
+        self._open, self._clock = opener, clock
+        self._token: str | None = None
+        self._renew_at = 0.0
+
+    def __call__(self) -> str:
+        now = self._clock()
+        if self._token and now < self._renew_at:
+            return self._token
+        url = f"{METADATA_TOKEN_URL}?{urllib.parse.urlencode({'audience': self.audience})}"
+        req = urllib.request.Request(url, headers={"Metadata-Flavor": "Google"})
+        try:
+            with self._open(req, timeout=5) as r:
+                token = r.read().decode("ascii").strip()
+        except (urllib.error.URLError, TimeoutError, OSError, UnicodeDecodeError) as e:
+            raise ApiError(0, "no_identity_token",
+                           f"Couldn't get an identity token to call the private agent API "
+                           f"({type(e).__name__}). AGENT_API_AUTH=google works only on Google "
+                           f"Cloud; unset it locally.") from None
+        if token.count(".") != 2:
+            raise ApiError(0, "no_identity_token", "The metadata server's identity token "
+                                                   "wasn't a JWT.")
+        exp = token_expiry(token)
+        self._token = token
+        self._renew_at = (exp - TOKEN_MARGIN) if exp else now + TOKEN_FALLBACK_LIFE - TOKEN_MARGIN
+        return token
 
 
 # ================================================================ transports ===
@@ -180,7 +245,7 @@ class ServiceTransport:
 
 class ApiClient:
     def __init__(self, base_url: str | None = None, key: str | None = None, *,
-                 transport=None):
+                 transport=None, id_token=None):
         if not key:
             raise ValueError("an API key is required (AGENT_API_KEY)")
         if transport is None:
@@ -190,9 +255,13 @@ class ApiClient:
         self.base_url = (base_url or "(in process)").rstrip("/")
         self._key = key
         self._t = transport
+        self._id_token = id_token          # () -> str, for a private API on Cloud Run
 
     def _headers(self) -> dict:
-        return {KEY_HEADER: self._key, "Accept": "application/json"}
+        h = {KEY_HEADER: self._key, "Accept": "application/json"}
+        if self._id_token is not None:
+            h["Authorization"] = f"Bearer {self._id_token()}"
+        return h
 
     def _json(self, method, path, body=None, ok=(200,)) -> dict:
         status, _, data = self._t.send(method, path, self._headers(), body)
@@ -244,9 +313,16 @@ class ApiClient:
                 "variant": h.get("x-photo-variant")}
 
 
-def from_env(env_file: str | None = None, transport=None) -> ApiClient:
+AUTH_MODES = ("", "none", "google")
+
+
+def from_env(env_file: str | None = None, transport=None, opener=urllib.request.urlopen
+             ) -> ApiClient:
     """The client from AGENT_API_URL and AGENT_API_KEY (both required: no default address,
-    so a page that isn't configured says so instead of calling somewhere unexpected)."""
+    so a page that isn't configured says so instead of calling somewhere unexpected), and
+    AGENT_API_AUTH: unset or `none`, the key alone; `google`, also an identity token for the
+    API's URL (a private API on Cloud Run). Any other value is refused, so a typo can't
+    quietly send requests without the token."""
     try:
         from dotenv import load_dotenv
         load_dotenv(env_file) if env_file else load_dotenv()
@@ -258,4 +334,13 @@ def from_env(env_file: str | None = None, transport=None) -> ApiClient:
     if missing and not (transport and key):
         raise ValueError(f"Missing setting(s): {', '.join(missing)}. The page talks only to "
                          f"the agent API; set its address and key (see .env.example).")
-    return ApiClient(url or None, key, transport=transport)
+    auth = (os.environ.get("AGENT_API_AUTH") or "").strip().lower()
+    if auth not in AUTH_MODES:
+        raise ValueError(f"AGENT_API_AUTH must be 'google' or unset, not {auth!r}.")
+    id_token = None
+    if auth == "google":
+        if not url.startswith("https://"):
+            raise ValueError("AGENT_API_AUTH=google needs AGENT_API_URL to be the API's https "
+                             "Cloud Run URL (the token is issued for that address).")
+        id_token = GoogleIdToken(url, opener=opener)
+    return ApiClient(url or None, key, transport=transport, id_token=id_token)

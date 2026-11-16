@@ -37,8 +37,14 @@ again. The API answers in its own thread, so the question still finishes and is 
 page reloads the conversation and shows the answer if it is there, or says the question was
 cut off and may appear when the conversation is reopened (settle_cut_off).
 
-The conversation's spend is added up from its answers (answer_view.conversation_spend), so a
-reopened conversation shows what it cost, not $0.
+The conversation's spend comes from the API, which adds it up from the answers (every answer
+and GET /sessions/{id} carry it), so a reopened conversation shows what it cost, not $0. The
+page does no sum of its own, except when conversations aren't saved (spend_after).
+
+Since 16 Nov 2026 (phase 4) the page lives in frontend/ with api_client.py, its only module:
+its image is built from that folder alone, so nothing of the agent's can end up in it. On Cloud
+Run the API is private: with AGENT_API_AUTH=google the client also sends a Google identity
+token for the API's URL, from the metadata server (api_client.GoogleIdToken).
 
 Usage
     streamlit run scripts/agent_ui.py
@@ -59,7 +65,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import answer_view as av  # noqa: E402
 import api_client  # noqa: E402
 
 TITLE = "JME maintenance assistant"
@@ -85,7 +90,7 @@ def valid_id(sid) -> bool:
 # ==================================================================== photos ===
 
 def photo_items(fetch, images: list[dict]) -> list[dict]:
-    """The photos to show under an answer: one per scan it cites (answer_view.image_refs),
+    """The photos to show under an answer: one per scan it cites (the answer's `images`),
     fetched from the API by SHA-256 (`fetch(sha)` -> {bytes, mime, variant} or None). Forms
     come only redacted. A scan whose photo isn't stored, fails the hash check, or can't be
     fetched right now gets a note instead of a picture. The model never produces these."""
@@ -530,7 +535,37 @@ DELETE_WARNING = ("Deletes this conversation from the saved conversations now, f
                   "starts a new one. Its link will open a new conversation.")
 
 
-RECENT = av.RECENT               # saved conversations listed in the sidebar
+RECENT = 8                       # saved conversations listed in the sidebar (the API's default)
+
+
+NO_SPEND = {"cost_usd": 0.0, "questions": 0, "complete": True}
+
+
+def spend_line(sp: dict) -> str:
+    """'This conversation: $0.0031 over 2 questions', as the API words it; built here only for
+    a total the page added up itself (spend_after)."""
+    if isinstance(sp.get("line"), str):
+        return sp["line"]
+    q = int(sp.get("questions") or 0)
+    return (f"This conversation: {'' if sp.get('complete', True) else 'at least '}"
+            f"${float(sp.get('cost_usd') or 0):.4f} over {q} question{'s' if q != 1 else ''}")
+
+
+def spend_after(prev: dict, body: dict) -> dict:
+    """The conversation's spend after an answer. A saved answer carries the conversation's
+    total, added up by the API: that is used as it is. An answer that wasn't saved (the API
+    keeps no conversations) carries only its own question, so it is added to what the page
+    had (those questions are answered one by one anyway)."""
+    sp = body.get("spend")
+    if body.get("session_id") and isinstance(sp, dict):
+        return dict(sp)
+    usage = body.get("usage") or {}
+    cost = usage.get("cost_usd")
+    known = isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0
+    return {"cost_usd": round(float(prev.get("cost_usd") or 0) + (float(cost) if known else 0), 6),
+            "questions": int(prev.get("questions") or 0) + 1,
+            "complete": bool(prev.get("complete", True)) and known
+            and usage.get("cost_complete", True) is not False}
 
 
 def ago(when, now: datetime | None = None) -> str:
@@ -651,20 +686,23 @@ def main() -> None:
     def start_fresh():
         st.session_state.shown = []   # what to draw: role, text, sources, images, trace, cost
         st.session_state.sid = None   # the API gives the id with the first answer's stream
+        st.session_state.spend = dict(NO_SPEND)    # the API's figure, after each answer
         st.session_state.save_error = None
         st.query_params.pop("session", None)
 
     def open_conversation(sid: str) -> bool:
         """Switch the page to a saved conversation, from the API."""
         try:
-            back = restored(client.session(sid))
+            payload = client.session(sid)
+            back = restored(payload)
         except ApiError as e:
-            back = None
+            payload, back = None, None
             st.session_state.save_error = ("that conversation is no longer saved"
                                            if e.status == 404 else e.message)
         if back is None:
             return False
         st.session_state.shown, st.session_state.sid = back, sid
+        st.session_state.spend = dict(payload.get("spend") or NO_SPEND)
         st.session_state.save_error = None
         st.query_params["session"] = sid
         return True
@@ -676,10 +714,18 @@ def main() -> None:
             open_conversation(sid)
 
     # A question the last run never finished (the page was clicked while it was answered).
+    reloaded = {}
+
+    def load_session(sid):
+        reloaded["payload"] = client.session(sid)
+        return reloaded["payload"]
+
     st.session_state.shown, cut = settle_cut_off(st.session_state.shown, st.session_state.sid,
-                                                 client.session)
+                                                 load_session)
     if cut:
         st.session_state.interrupted = cut
+    elif reloaded.get("payload"):                  # the API had finished it: its total too
+        st.session_state.spend = dict(reloaded["payload"].get("spend") or NO_SPEND)
 
     # ---- sidebar: conversations only ------------------------------------------------
     with st.sidebar:
@@ -758,12 +804,13 @@ def main() -> None:
         # Spend (#7): this conversation's cost, added up from each answer's cost (exact,
         # and the same after a reload); the key's total against its cap from the API, which
         # asks the proxy with its own key (about a minute behind).
-        cost, questions, complete = av.conversation_spend(st.session_state.shown)
+        sp = st.session_state.spend
         ks = key_budget()
-        with usage_box.container(), st.popover(USAGE_ICON,
-                                               help=usage_help(model, cost, complete)):
+        with usage_box.container(), st.popover(
+                USAGE_ICON, help=usage_help(model, float(sp.get("cost_usd") or 0),
+                                            bool(sp.get("complete", True)))):
             st.caption(f"Model: {model}")
-            st.markdown(av.conversation_line(cost, questions, complete))
+            st.markdown(md_plain(spend_line(sp)))
             st.markdown(md_plain(ks.get("line") or "Spend not available."))
         if ks.get("warn") or not ks.get("ok"):
             warn_box.warning(md_plain(ks.get("line") or "Spend not available."))
@@ -842,6 +889,7 @@ def main() -> None:
                     elif kind == "answer":
                         entry = answer_message(data)
                         st.session_state.save_error = data.get("save_error")
+                        st.session_state.spend = spend_after(st.session_state.spend, data)
                     elif kind == "error":
                         problem, may_finish = error_text(data)
             except ApiError as e:
