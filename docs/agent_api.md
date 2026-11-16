@@ -1,250 +1,633 @@
-# agent_api.py: an HTTP API over the agent
+# JME maintenance and safety assistant
 
-`scripts/agent_api.py` (11 Nov 2026) puts a JSON API in front of the agent, the same
-[LangGraph graph](agent_graph.md) the eval suite tests. Since phase 3 (15 Nov 2026) it is
-**the only way in**: the Streamlit page calls it for everything (questions, saved
-conversations, photos, spend) through `scripts/api_client.py`, and any other client (a
-backend service, a script, a test harness) uses the same routes. It adds no agent logic. Grounding,
-citations, the guardrail on both sides of the model, honest degradation and the date rules
-all happen inside the graph, the same for every client.
+Jurong Marine & Engineering (JME) is a 32-person ship-repair and precision-engineering shop in
+Tuas, preparing for a MOM WSH audit. The client has two asks ([`CLIENT_BRIEF.md`](docs/CLIENT_BRIEF.md)):
 
-```bash
-# personal repo
-uv add fastapi uvicorn langgraph langgraph-checkpoint-postgres "psycopg[binary]" psycopg-pool
-uv add --dev httpx                                  # only for the route tests
-uv run uvicorn agent_api:create_app --factory --app-dir scripts --port 8000
+1. **A safety and maintenance knowledge agent.** Technicians ask "what oil does CNC-02 take",
+   "what's the grease interval for the compressor", "what's the SOP before entering the blasting
+   chamber", and get an answer with its source shown.
+2. **Audit-ready incident and condition reporting.** Incident history that never mixes up the
+   two severity scales (1 = worst until July 2025, 5 = worst since), and an answer to the night
+   shift's question: is CNC-02 running differently?
 
-# team repo
-pip install -r requirements-api.txt httpx
-uvicorn agent_api:create_app --factory --app-dir scripts --port 8000
-```
+This repo answers both from the client's own data: a CMMS SQL dump, a sensor log, a spares
+spreadsheet, scanned nameplates and incident forms, and SOP documents. Every source is cleaned
+and loaded into one MySQL database with lineage back to the exact file and line. The LLM
+reaches it only through fixed, read-only tools that cite their sources, a guardrail in code
+refuses what the app must not answer, and an eval suite checks the answers on the real model
+and data.
 
-Needs `CMMS_DB_*` (the agent's read-only login), `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CONV_DB_URL` for
-saved conversations ([`conversations.md`](conversations.md): Postgres, set up once with
-`conversations.py setup` and `check`), **plus `AGENT_API_KEY`**, 16 characters or
-more. Without it the API refuses to start (fail closed, like the guardrail's name list):
+- **Loading the data** (every ingest script, the tables, linking, lineage):
+  [`docs/ingestion.md`](docs/ingestion.md)
+- **Every data-quality problem found so far, with evidence:** [`trap_list.md`](docs/trap_list.md)
+- **What the deliverables are checked against:** [`HARNESS_CHECKLIST.md`](docs/HARNESS_CHECKLIST.md),
+  [`CHECKPOINTS.md`](docs/CHECKPOINTS.md)
 
-```bash
-python -c "import secrets; print(secrets.token_urlsafe(32))"     # paste into .env as AGENT_API_KEY
-```
-
-FastAPI serves interactive docs for every route at `http://localhost:8000/docs`.
-
-## Routes
-
-Every route except `/health` needs the key in the `X-API-Key` header (compared in constant
-time). Errors are JSON, `{"error": {"code": ..., "message": ...}}`, never a stack trace.
-
-| Route | Body / query | Returns |
-|---|---|---|
-| `GET /health` | (no key) | `status`, `guard_ready`, `sessions` (on / off and why), `store` (`postgres`, or null when off), `model`, `agent` (`langgraph`), `version`. 503 when the guard's name list isn't loaded |
-| `POST /ask` | `{"question": "...", "session_id": optional}` | `answer`, `sources`, `notes` (the tools' caveats), `images` (the scans it cites: `sha256`, `what`, `file`), `refused` (the guardrail's rule, or null), `answer_replaced` (rule, or null), `usage` (model calls, tokens, cost from the proxy), `cost_line`, `trace` (the page's What happened rows), `session_id`, `turns`, `saved`, `save_error` |
-| `POST /ask/stream` | the same body | `text/event-stream`: `session` (`{"session_id"}`, as soon as the conversation is known, before the model is asked; not sent when conversations are off), a `step` event per step of the turn as it happens, then one `answer` (the `/ask` body) or `error` (`{"status", "error"}`) |
-| `GET /sessions?limit=8` | | the newest saved conversations: `session_id`, `title`, `turns`, `updated_at` |
-| `GET /sessions/{session_id}` | | one conversation as the page draws it (`messages`, each answer with its `images`), with its `spend` |
-| `DELETE /sessions/{session_id}` | | deletes it: its checkpoints, then its row. `{"session_id", "deleted": true}`; one that isn't there counts as deleted |
-| `GET /photos/{sha256}` | | the photo an answer cites, as image bytes (`Content-Type` its type; `X-Photo-Variant` `as_is` or `redacted`). From `img_files_public`, so an incident form is only ever the redacted copy, and only if its bytes still match the hash recorded at ingest |
-| `GET /usage` | | this deployment's LLM spend against its budget, from the LiteLLM proxy with the API's own key ([`spend.py`](README.md)): `ok`, `spend`, `max_budget`, `used`, `warn`, `budget_reset_at`, `line`, `model`. Always 200; `ok` false says why |
-
-```bash
-KEY=...                                                   # your AGENT_API_KEY
-curl -s localhost:8000/health
-curl -s localhost:8000/ask -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
-     -d '{"question": "what oil does CNC-03 take?"}'
-curl -sN localhost:8000/ask/stream -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
-     -d '{"question": "is CNC-02 running differently now?"}'
-curl -s localhost:8000/usage -H "X-API-Key: $KEY"
-curl -s -X DELETE localhost:8000/sessions/<session_id> -H "X-API-Key: $KEY"
-```
-
-**Conversations: LangGraph's checkpointer in Postgres** (13 Nov 2026,
-[`conversations.md`](conversations.md)). `session_id` is the conversation's LangGraph thread:
-the agent runs from the thread's saved state and saves it when the turn finishes, so no
-history is sent back and forth. A threads table keeps each conversation's title, question
-count and display copy (the page's format) for `/sessions`, and gives the 7-day retention. A
-refused question is never saved as typed, and an answer with personal data never reaches a
-checkpoint. Without `CONV_DB_URL` the API still answers; `session_id` is then null and `saved`
-false. **One store for every client** (phase 3, 15 Nov 2026): the page reads, lists and deletes
-conversations only through these routes, so a conversation started from the page can be
-continued from a script and the other way round. `sessions.py` (the page's own MySQL store,
-and its `agent_sessions` login) is retired.
-
-**One question at a time per conversation.** A lock per session id makes load, ask and save
-one step in this process, so two requests on the same conversation can't both append and lose
-one on save. (Two API processes would need the lock in the database; one is enough here.)
-
-**Streaming.** The first event is `session`, sent as soon as the conversation's row is
-written (a new one) or loaded (a follow-up), before the model is asked. A client that loses
-the stream (the page clicked mid-answer, a network blip) still knows which conversation to
-reopen, and the answer is there once the API finishes it. Each `step` is what the [graph](agent_graph.md#what-each-step-reports)
-reports per node (`guard_in`, `model`, `tools`, `guard_out`: which tools ran, which round,
-whether the answer was replaced), never the question or answer text. A refused question is
-one step (`guard_in`, not passed) and then the answer. The question runs in its own thread, so it finishes and
-is saved even if the client disconnects; if nothing happens for 300 s (`STREAM_TIMEOUT`) the
-stream ends with a 504 `timeout` error, and the question may still finish and be saved.
-
-```text
-event: session
-data: {"session_id": "3f9c…"}
-
-event: step
-data: {"node": "guard_in", "passed": true}
-
-event: step
-data: {"node": "model", "round": 1, "tool_calls": ["compare_sensor_trend"]}
-
-event: step
-data: {"node": "tools", "round": 1, "tools": ["compare_sensor_trend"]}
-
-event: step
-data: {"node": "model", "round": 2, "tool_calls": []}
-
-event: step
-data: {"node": "guard_out", "answer_replaced": false, "sources": 2, "model_calls": 2}
-
-event: answer
-data: {"session_id": "…", "answer": "…", "sources": […], …}
-```
-
-| Status | `code` | When |
-|---|---|---|
-| 401 | `unauthorised` | no key or a wrong key |
-| 422 | `bad_question`, `question_too_long`, `bad_session_id`, `bad_limit`, `bad_sha256` | checked before anything runs; nothing is asked or queried |
-| 404 | `unknown_session`, `no_photo` | no conversation with that id (or older than the 7-day retention); no stored photo with that hash, or its bytes no longer match it |
-| 503 | `sessions_off`, `store_down`, `db_down` | conversations aren't saved here, the store can't be read or written, or the photo can't be read |
-| 504 | `timeout` | `/ask/stream` only: no progress for `STREAM_TIMEOUT` seconds |
-| 500 | `internal` | a bug: logged as `api_error` (route and error type only), no trace returned |
-
-## Design
-
-The routes are a thin shell over `AgentService`, whose methods take and return plain Python
-(a `Reply`: status and JSON body; a `Photo` for `/photos`) and never raise. So nearly all the tests need neither
-FastAPI nor a server, the same way the page keeps its logic in plain functions. Routes are
-plain `def`, so FastAPI runs each in its thread pool and a question blocking on the model
-for seconds doesn't hold up other requests.
-
-The module must **not** use `from __future__ import annotations`: FastAPI reads the routes'
-type hints to know which argument is the JSON body, and with postponed annotations it can't
-resolve `AskIn`, which is defined inside `create_app()`. The first draft had the import, and
-`/ask` would have failed on a real server (found on review, 11 Nov 2026).
-
-How an answer is shown and kept (the trace rows, the cost line, the display copy saved with
-the conversation, the `images` it cites) is built by `scripts/answer_view.py`. Until 15 Nov
-2026 those helpers lived in the page and the API imported the page; now the API builds every
-answer and the page only draws it, so the dependency runs one way.
-
-Logging: one `api_ask` JSON line per question (refused / replaced rule, saved, model calls),
-with only the first 8 characters of the session id, since the full id opens the
-conversation (`api_delete` the same way). The question's own events go to
-`logs/agent_app.jsonl` and stderr.
-
-Not done yet: hosting it (phase 4). The Cloud Run service runs the page; the API becomes a
-second service with the database and LLM secrets plus `AGENT_API_KEY`, and the page then
-needs only `AGENT_API_URL` and `AGENT_API_KEY`.
-
-## Why there's no endpoint per tool
-
-The API exposes the **agent**, not the tools it calls. There is no `/tools/list_incidents` or
-`/tools/find_sop`: every request goes through `agent_app.ask()`, the same door the page and
-the eval suite use. This is on purpose (decided 12 Nov 2026), because of where the app's
-safeguards live:
+## How it fits together
 
 ```mermaid
 flowchart LR
-    C["client"] --> ASK["POST /ask"]
-    subgraph ASKF["agent_app.ask(): every rule below"]
-        GI["guardrail on the question<br/>injection, PDPA, out of scope"]
-        SY["short year asked back"]
-        LOOP["model + tools<br/>scale guard, period_check,<br/>completion_note"]
-        GO["guardrail on the answer<br/>names, NRIC, phone, e-mail"]
-        GI --> SY --> LOOP --> GO
+    subgraph SRC["Client data"]
+        S1["CMMS SQL dump"]
+        S2["Sensor CSV"]
+        S3["Spares sheet"]
+        S4["Scans: nameplates, incident forms"]
+        S5["SOP documents"]
     end
-    ASK --> GI
-    LOOP --> RT["agent_tools.run_tool<br/>argument checks, fixed SQL,<br/>agent_ro, sources"]
-    C -. "a tool route would<br/>enter here, past every<br/>rule above" .-> RT
+    SRC --> I["ingest_*.py, run by pipeline.py<br/>clean, keep raw rows, lineage"]
+    I --> DB[("MySQL<br/>raw, clean, audit views")]
+    R["relationships.py<br/>links and views"] --> DB
+    DB -->|"agent_ro: SELECT only"| T["agent_tools.py<br/>fixed tools with citations"]
+    T --> GR["agent_graph.py<br/>the agent: a LangGraph graph"]
+    GR --> A["agent_app.py<br/>ask(), prompt, rules"]
+    G["guardrail.py<br/>input and output checks, in code"] --- A
+    A <-->|"member key"| L["LLM via the proxy"]
+    U["agent_ui.py<br/>Streamlit chat page"] -->|"api_client.py<br/>X-API-Key"| X
+    X["agent_api.py<br/>HTTP API"] --> A
+    X <-->|"checkpoints"| PG[("Postgres<br/>conversations")]
+    E["run_evals.py<br/>eval suite"] --> A
 ```
 
-`agent_tools.run_tool()` enforces a lot by itself: it checks the arguments, runs fixed SQL as
-the read-only `agent_ro` user (which the database stops from reading names), and returns
-sources. But several of the rules the client and the auditor care about are in `ask()`, not in
-the tools:
+The [ER diagram](docs/er_diagram.md) shows the cleaned schema.
 
-| Rule | Where it lives | What a tool route would skip |
+## What's in the repo
+
+| Script | What it does | Details |
 |---|---|---|
-| Guardrail on the question (prompt injection, PDPA, out of scope) | `ask()` → `guardrail.check_input` | Every refusal |
-| Guardrail on the answer (staff names, NRIC, phone, e-mail) | `ask()` → `guardrail.check_output` | The last check before anything is shown |
-| A severity scale the user never named is removed, so the tool asks (trap C1, the kill-shot) | `agent_app.tool_round` → `scale_guessed` | The guard on the scale |
-| A period after the data ends is run again for the latest full month, with a note | `agent_app.period_check` | The June fallback and its note |
-| "Completed" read as CLOSED, and said | `agent_app.completion_note` | The note that makes the answer say so |
-| A year written short is asked back | `agent_app.before_model` | The question back |
-| The eval suite, the trace table, the `turn` log line, the spend | the path through `ask()` | All the evidence; a second way in that no eval covers |
+| `scripts/ingest_logs.py` | Loads the sensor log CSV (`vibration_temp_*.csv`) | [`ingest_logs.md`](docs/ingest_logs.md) |
+| `scripts/ingest_spares.py` | Loads the critical spares sheet (`critical_spares.xlsx`) | [`ingest_spares.md`](docs/ingest_spares.md) |
+| `scripts/ingest_cmms.py` | Loads the CMMS SQL dump (`jurongmarine_cmms.sql`) | [`ingest_cmms.md`](docs/ingest_cmms.md) |
+| `scripts/ingest_images.py` | Loads the scanned nameplates and incident report forms (`data/images/`): read by Tesseract, the class vision model, or both; photos stored for the app (forms redacted) | [`ingest_images.md`](docs/ingest_images.md) |
+| `scripts/ingest_sops.py` | Loads the SOP documents (`data/sops/`): steps with line numbers, machine links, keyword search | [`ingest_sops.md`](docs/ingest_sops.md) |
+| `scripts/relationships.py` | Links the loaded sources (CMMS, sensors, spares, scans, SOPs) and creates the views | [`relationships.md`](docs/relationships.md), [ER diagram](docs/er_diagram.md) |
+| `scripts/pipeline.py` | Runs all the loads and the linking in order, writes a Markdown report | [`pipeline.md`](docs/pipeline.md) |
+| `scripts/audit_sensor_csv.py` | Profiles a sensor CSV without loading it: formats, units, ids, gaps, duplicates, outliers, with line numbers. Run it alone, or first in the pipeline with `pipeline.py --audit` | [`trap_list.md`](docs/trap_list.md#sensor-log-vibration_temp_2026h1csv) |
+| `scripts/agent_user.py` | Creates the app's read-only database user (PDPA) | [`agent_user.md`](docs/agent_user.md) |
+| `scripts/agent_tools.py` | The fixed tools the app's LLM calls, as the read-only user, with citations | [`agent_tools.md`](docs/agent_tools.md) |
+| `scripts/agent_app.py`, `frontend/agent_ui.py` | `ask()` and the rules the agent uses (prompt, guards, dates), and the Streamlit page, with each answer's sources, caveats, photos and trace in tabs under it. Since phase 3 (15 Nov 2026) the page holds no database login, LLM key or agent code: it calls the API for everything. Since 16 Nov 2026 it lives in `frontend/` with its client, and its image is built from that folder alone | [`agent_app.md`](docs/agent_app.md), [`agent_ui.md`](docs/agent_ui.md) |
+| `scripts/agent_graph.py` | The agent: one question's turn as a LangGraph graph (`guard_in`, `model`, `tools`, `guard_out`), the way production LangGraph apps are built: the conversation in the graph's state, the database and model client passed in as its runtime context, compiled once. The only engine since 12 Nov 2026 (the plain loop that came first was retired once the graph matched it on every test and 52/52 evals) | [`agent_graph.md`](docs/agent_graph.md) |
+| `scripts/agent_api.py` | The HTTP API over the agent (FastAPI), and the only way in since phase 3: ask, ask with each step streamed as it happens (the conversation's id first), list, read and delete saved conversations, the photos an answer cites, the key's spend. A key on every route | [`agent_api.md`](docs/agent_api.md) |
+| `frontend/api_client.py` | The page's client for the API (standard library only): server-sent events read as they arrive, every failure an `ApiError`; on Cloud Run a Google identity token for the private API (`AGENT_API_AUTH=google`); `ServiceTransport` runs the same client against the API's service in-process, for tests | [`agent_api.md`](docs/agent_api.md#tests), [`agent_ui.md`](docs/agent_ui.md) |
+| `scripts/answer_view.py` | How the API shows and keeps an answer: the What happened rows, the cost line, a conversation's spend, the scans an answer cites, the display copy saved with the conversation (a refused question only as its placeholder). Moved out of the page on 15 Nov 2026 so the API no longer imports the page | [`agent_api.md`](docs/agent_api.md#design) |
+| `scripts/guardrail.py`, `scripts/guard_names.py` | The guardrail in code, on both sides of the model: prompt injection, names and personal details (PDPA) and out-of-scope requests refused before any model call; staff names, NRICs, phone numbers and e-mails stopped in answers. `guard_names.py` is the staff list as hashes, generated from the dump | [`guardrail.md`](docs/guardrail.md) |
+| `scripts/run_evals.py` | The eval suite (`evals/cases.yaml`): the real model, agent and database, each answer checked for the tools that ran, key facts, sources, grounding, model calls and staff names; prints the spend | [`evals.md`](docs/evals.md) |
+| `scripts/spend.py` | The app's LLM spend against its budget, from the LiteLLM proxy (`/key/info`, with the app's own key). The API serves it at `GET /usage`; the page shows it in its usage popover (the icon at the right of the top bar), plus each answer's cost from the proxy's cost header and the conversation's total, and a warning across the page near the cap | [`agent_app.md`](docs/agent_app.md#spend-what-each-question-cost-and-the-budget-7) |
+| `scripts/conversations.py` | The API's conversations (13 Nov 2026), as production LangGraph apps keep them: LangGraph's Postgres checkpointer saves the agent's state per thread, and a threads table keeps each conversation's title, question count and display copy for the recent list and the 7-day retention. A refused question or an answer with personal data never reaches a checkpoint. Its own Postgres user, limited to one schema (`setup`, `check`, `purge`). Since phase 3 the only store of conversations: `sessions.py`, the page's MySQL store, is retired ([`sessions.md`](docs/sessions.md) keeps its history) | [`conversations.md`](docs/conversations.md) |
+| `scripts/read_log.py` | Prints the agent's log (`logs/agent_app.jsonl`, or Cloud Logging for the hosted page) one question at a time: model calls, tools and their arguments, timings | [`agent_app.md`](docs/agent_app.md#reading-the-log-of-one-question-a-working-example) |
 
-So one door means every client, whatever it is, gets the protections the brief asks for
-(sources cited, "say so instead of guessing", PDPA), and the 52 eval cases test exactly what
-it serves. The brief's client is non-technical and asks in plain English; nothing in the
-brief or the checklist asks for raw data over HTTP.
+The first nine are covered together, with the database they fill, in
+[`docs/ingestion.md`](docs/ingestion.md).
 
-### When tool routes would make sense, and how to add them
+## Quick start
 
-Structured data without a model call is worth having for a dashboard or a scripted report
-(the same number every time, no cost), for testing a tool on its own, or for another backend
-that wants data rather than prose. If that need comes up, the plan is:
+```bash
+python -m venv .venv
+source .venv/bin/activate                 # Windows: .venv\Scripts\activate
+pip install -r requirements-dev.txt       # pandas, sqlalchemy, pymysql, ... + pytest
+cp .env.example .env                      # set the passwords
+pytest                                    # tests, no DB needed (see "Testing with pytest")
+```
 
-- **One generic route**, `POST /tools/{name}` with the tool's arguments as the body, and
-  `GET /tools` for the definitions (`agent_tools.tool_schemas()`). Not one hand-written route
-  per tool, so a tool changed in `agent_tools.py` can't drift from its endpoint.
-- **The same `X-API-Key`**, straight through `agent_tools.run_tool()`: still `agent_ro`, the
-  same argument checks, the result with its `sources`, `notes` and `error` as the tool gives them.
-- **`query_sql` left out.** The model's SQL is checked and capped; a client sending free SQL is
-  a different risk and nothing in the brief needs it.
-- **A severity number only with its scale**, so the kill-shot can't be bypassed: the tool's own
-  `needs_clarification` comes back as a 422, never a guessed count.
-- **Tests** that no tool route ever returns a name, that a refusal stays a refusal, and that
-  `query_sql` is refused; and a line in this file saying these answers are data, not checked by
-  the eval suite.
+Then load the data ([`docs/ingestion.md`](docs/ingestion.md#quick-start)): start MySQL, run
+the loads (or `pipeline.py`), link the sources, and create the app's read-only user. After
+that, ask the agent:
 
-About an hour with its tests. Not built, because nothing needs it yet.
+```bash
+python scripts/agent_app.py "is CNC-02 running differently now?"
+uvicorn agent_api:create_app --factory --app-dir scripts --port 8000   # the API (needs AGENT_API_KEY)
+streamlit run frontend/agent_ui.py         # the chat page, in a second terminal (AGENT_API_URL, AGENT_API_KEY)
+```
 
-## Tests
+With uv (personal repo): `uv sync`, then put `uv run` in front of each command,
+e.g. `uv run pytest -v`.
 
-`tests/test_agent_api.py` (38 tests; no database, no real LLM call; the service tested with
-the real agent graph, a scripted model, stubbed tools and real conversations: the threads
-table on sqlite3 and LangGraph's in-memory checkpointer). **Access**:
-the key compared exactly, no key no service. **Health**: whether it can answer (the guard's name
-list), the agent, sessions on/off. **Ask**: empty, non-text and
-over-long questions and bad session ids refused with nothing asked; a question starting a
-saved conversation (answer, sources, usage, trace, display copy, the checkpointer's copy); a
-follow-up reaching the model with the earlier question from the checkpointer; **a restart** (a
-new service over the same database and checkpointer) carrying the conversation on, with the
-system prompt from the code; a refused question in neither the checkpoint nor the row; **an
-answer with personal data reported as replaced and in no key of the saved state**; a new
-conversation's row written before its first answer; unknown, unreadable and unsaved conversations (404,
-503); answered but not saved without a store; a failed save reported, not hidden; a bug as a
-500 with no internals; two questions at once on one conversation both kept. **Conversations**:
-one read back with its spend, the recent list newest first, its limit clamped and checked;
-**deleting** one removes its row and its checkpoints, twice is fine, a bad id, no store and a
-down store each answered. **Photos** (15 Nov 2026): an answer lists each scan it cites once,
-and still does after a reload; a photo served by its hash only (a bad hash never reaches the
-database); one that can't be read is a 503 with no connection details. **Usage**: the key's
-spend and the 80% warning, a proxy that can't be reached, and a bug all answered with 200.
-**Streaming**: the `session` event, then five steps, then the answer, saved, with no question
-text in the steps; the `session` event out before the model is asked (the model waits for
-it); a follow-up streaming its own id, none without saving, and an unknown id one error; a refused
-question as one step then the answer; a bad request as one error event; a stalled question
-ending the stream with a 504 while it still finishes and is saved; the SSE format. **HTTP**
-(only with FastAPI and httpx installed): every route but `/health` refusing a missing key,
-`/ask` and `/sessions/{id}` end to end, `/ask/stream` as `text/event-stream` with the
-session event, five steps and the answer; `DELETE /sessions/{id}`, `/photos/{sha256}` (bytes,
-type and variant header, 404) and `/usage`.
+## Why MySQL
 
-**Written in a sandbox without FastAPI**: the four HTTP tests skip until `fastapi` and
-`httpx` are installed (both are in your environment).
+Every source is loaded into one MySQL database (8.4 in Docker locally; the same scripts
+run against hosted MySQL such as Aiven). The reasons come from what the client sent and
+what the app must guarantee:
 
-`tests/test_api_client.py` (16 tests) covers the page's client: server-sent events read back
-as sent (comments, CRLF, split data, a cut-off last event); the key in its header; an API
-error keeping its code; an unreachable API as status 0 without the key in the message; a
-reply that isn't JSON; a stream read line by line and closed; a refused stream raising before
-any event; a missing photo as None; both settings required. End to end through
-`ServiceTransport` (the real service and graph): a conversation from first question to
-delete, the wrong key getting nothing but `/health`, photos by hash, a bad question as one
-error event.
+| Need | Why MySQL fits |
+|---|---|
+| **The client's system of record is already MySQL** | The CMMS arrived as a MySQL dump (`jurongmarine_cmms.sql`). Staying on the same engine keeps its types, dates and collation as the client has them, and the cleaned `cmms_*` tables can sit next to the dump's own tables in one database (see [The client's CMMS dump](docs/ingestion.md#the-clients-cmms-dump)). The dump is still parsed, never executed |
+| **The sources link by shared keys** | `machine_id` ties the CMMS, sensor log, spares sheet, nameplates, incident forms and SOPs together; `emp_code` and `incident_id` link others. Cross-source questions ("CNC-02's work orders with the readings before each") are joins, and `relationships.py` checks every link and can enforce it with foreign keys. A relational database does this natively |
+| **PDPA has to be enforced by the database, not the prompt** | MySQL users, `GRANT SELECT` per view, and views that run with their creator's rights (`SQL SECURITY DEFINER`) let the app's user read `work_order_detail` but never `cmms_employees.emp_name` or any `*_raw` table. `agent_user.py --check` proves it live. A file store or a vector store has no access control at this level |
+| **Loads must be all-or-nothing and traceable** | Each load runs in one transaction, so a failure changes nothing, and is recorded in `ingest_runs` with the file's SHA-256 and the git commit (see [Lineage](docs/ingestion.md#lineage-traceability-and-reproducibility)). Raw tables keep every row as written, with the `run_id` of the load that brought it in |
+| **The SOPs need text search, not a second database** | InnoDB `FULLTEXT` indexes find the right SOP by keyword in the same database, under the same grants and lineage. For three short SOPs, a separate vector store would add a second copy to keep in step and make "no SOP covers this" harder to say reliably (decision and details in [`ingest_sops.md`](docs/ingest_sops.md#search-keyword-not-a-vector-database)) |
+| **The data is small** | About 106k sensor readings, 1,603 work orders, 85 incidents, 42 scans and 3 SOPs. One MySQL instance holds and queries this in milliseconds; a data warehouse or distributed store would add cost and moving parts for nothing |
+| **It runs wherever the team does** | Free, one `docker compose up` locally, and offered by hosted providers for the demo. Its SQL dialect is widely known, which helps when the app's SQL tool writes queries |
+
+**What MySQL doesn't give us, and how each gap is handled:**
+
+- **Search beyond keywords:** no stemming, synonyms or vector search out of the box.
+  `ingest_sops.py` adds a stop-word table, synonyms and a normalised `search_text` column
+  ([`ingest_sops.md`](docs/ingest_sops.md#mysql-fulltext-what-it-does-for-the-search)).
+  Embeddings would be a column in the same database if the SOP collection grows.
+- **Server settings differ between hosts.** Hosted MySQL can require a primary key on
+  every table (`sql_require_primary_key`, MySQL error 3750) and keeps even the admin out
+  of system databases. The scripts are written to work under both
+  ([`agent_user.md`](docs/agent_user.md#hosted-mysql-aiven)).
+- **Time-series analysis** (the CNC-02 trend) is done with SQL grouping and in pandas, not a
+  dedicated time-series database. At 106k rows that's fast enough.
+
+**Alternatives, briefly.** PostgreSQL would also work (and has richer text search and
+`pgvector`), but the client's dump is MySQL and would have to be converted. SQLite has no
+users or grants, so the PDPA guardrail would move into application code. A vector
+database alone can't do the joins, the grants or the lineage.
+
+## Database access for the app (PDPA)
+
+The app, and through its tools the LLM, must **never** connect as `CMMS_DB_USERNAME`: that
+user owns every table, including `cmms_employees.emp_name`. Telling the model "use the
+views" is not protection; the database has to refuse. `agent_user.py` creates a separate
+user that can only `SELECT` from an allow-list:
+
+| The app user can read | It can't |
+|---|---|
+| the linking views (`machine_overview`, `machine_spares`, `work_order_detail`, `incident_detail`, `work_order_sensor_window`, `machine_nameplate`, `machine_sops`, `incident_report_vs_cmms`), `table_relationships`, the `*_audit` views for citations (machines, work orders, incidents, sensor readings, spares, nameplates, incident forms, SOPs and their steps), for the SOPs also `sops` (its `FULLTEXT` index is on the table) and `sop_machines`, and `img_files_public` (the photos: incident forms redacted) | `cmms_employees`, `cmms_employees_raw`, `cmms_employees_audit`, any `*_raw` table (including `img_documents_raw`, which keeps OCR text as read, and `sop_documents_raw`, which keeps the GM's email), `img_files` (the photo table itself), any write, any schema change |
+
+Views run with their creator's rights (MySQL's default), so the app user reads
+`work_order_detail` without any access to the tables underneath. Before granting, the
+script refuses any object that has an `emp_name` column, so a view changed later can't
+leak names. Add to `.env`:
+
+```bash
+CMMS_DB_AGENT_USERNAME=agent_ro
+CMMS_DB_AGENT_PASSWORD=...              # the app connects with these two
+CMMS_DB_ADMIN_USERNAME=root             # creating users needs an admin account
+CMMS_DB_ADMIN_PASSWORD=...              # falls back to MYSQL_ROOT_PASSWORD
+```
+
+Every setting's name says which database it is for: see [Settings](#settings-one-prefix-per-database).
+
+Saved conversations are in Postgres, kept by the API, with their own user, `agent_threads`,
+limited to one schema (`python scripts/conversations.py setup`, then `check`): see
+[`conversations.md`](docs/conversations.md). `agent_ro` never gets access to them. (Until
+phase 3, 15 Nov 2026, the page kept its own copy in MySQL as the `agent_sessions` user,
+through `sessions.py`; that is retired, and the user and table can be dropped once the hosted
+page is replaced: [`sessions.md`](docs/sessions.md).) The page itself holds no database login
+at all: only the API's address and key (`AGENT_API_URL`, `AGENT_API_KEY`).
+
+```bash
+python scripts/agent_user.py --dry-run   # the plan and SQL, password hidden; no database needed
+python scripts/agent_user.py             # create/update the user, then check it
+python scripts/agent_user.py --check     # only the check (exit 1 if anything is wrong)
+```
+
+The check connects **as the app user** and must show every allowed view working and
+every probe refused: employee names, the employees table and its audit view, raw rows
+(employees, the raw OCR of the scans and the SOP folder), the photo table itself, a write,
+a `CREATE TABLE`. Run it after the first full
+load: objects that don't exist yet are skipped, not granted. Run it again after adding a
+view to the allow-list (`allowed_objects` in the script). A refused object is reported as
+"not created yet" or "exists but not granted", using the admin account to tell which.
+It's also the evidence for the PDPA question on demo day; run `--check` live. Details,
+errors and hosted MySQL in [`agent_user.md`](docs/agent_user.md).
+
+## Settings: one prefix per database
+
+There are two databases, and since 14 Nov 2026 each setting's prefix names the one it
+points to. The login comes after the prefix. Before that, the shop database's settings were
+`DB_*`, which was fine with one database. With a second one, `AGENT_DB_*` (agent_ro's login)
+could be read as "the agent's database", which is the Postgres one.
+
+| Prefix | Database | Settings |
+|---|---|---|
+| `CMMS_DB_` | MySQL: the shop's data (CMMS, sensors, spares, scans, SOPs) | `CMMS_DB_HOST`, `_PORT`, `_NAME`; `CMMS_DB_USERNAME` / `_PASSWORD` (the owner, for loading); `CMMS_DB_ADMIN_*` (creates users); `CMMS_DB_AGENT_*` (`agent_ro`, what the agent reads with). `CMMS_DB_SESSION_*` (`agent_sessions`) was read only by `sessions.py`, retired in phase 3 |
+| `CONV_DB_` | Postgres: the agent's saved conversations ([`conversations.md`](docs/conversations.md)) | `CONV_DB_URL` (`agent_threads`, what the API uses); `CONV_DB_ADMIN_URL` (setup only, never deployed); `CONV_DB_NAME`, `CONV_DB_ADMIN_USERNAME`, `CONV_DB_ADMIN_PASSWORD` (the local container only, read by docker compose) |
+
+**Only the new names are read.** An old name is ignored, so a `.env` or a hosted service
+still on the old names fails at start with `Missing setting(s) CMMS_DB_...` (or, for the
+agent, "Set CMMS_DB_AGENT_PASSWORD"), rather than running on settings nobody meant to keep.
+Rename them all at once with this table:
+
+| Old name | New name |
+|---|---|
+| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USERNAME`, `DB_PASSWORD` | `CMMS_DB_HOST`, `CMMS_DB_PORT`, `CMMS_DB_NAME`, `CMMS_DB_USERNAME`, `CMMS_DB_PASSWORD` |
+| `DB_ADMIN_USERNAME`, `DB_ADMIN_PASSWORD` | `CMMS_DB_ADMIN_USERNAME`, `CMMS_DB_ADMIN_PASSWORD` |
+| `AGENT_DB_USERNAME`, `AGENT_DB_PASSWORD` | `CMMS_DB_AGENT_USERNAME`, `CMMS_DB_AGENT_PASSWORD` |
+| `AGENT_SESSION_DB_USERNAME`, `AGENT_SESSION_DB_PASSWORD` | `CMMS_DB_SESSION_USERNAME`, `CMMS_DB_SESSION_PASSWORD` |
+| `AGENT_PG_URL`, `PG_ADMIN_URL` | `CONV_DB_URL`, `CONV_DB_ADMIN_URL` |
+| `PG_DB`, `PG_ADMIN_USER`, `PG_ADMIN_PASSWORD` (docker compose) | `CONV_DB_NAME`, `CONV_DB_ADMIN_USERNAME`, `CONV_DB_ADMIN_PASSWORD` |
+
+Settings that aren't a database login keep their names: `AGENT_API_KEY`, `AGENT_API_URL`
+(the page's: where the API is, since phase 3),
+`AGENT_SESSION_DAYS`, `AGENT_CONVERSATION_DAYS`, `IMAGE_ENGINE`, `OPENAI_*`, and
+`MYSQL_ROOT_PASSWORD` (the MySQL image's own). Some docs written before the rename still
+show the old names: read them as the new ones.
+
+## The agent's tools
+
+Ingestion and linking give you a clean, grant-controlled database; `scripts/agent_tools.py`
+is the layer on top that the LLM agent actually calls. It's not an ingest script and
+loads nothing — it's a fixed set of tools (list machines, check a nameplate, count and
+list incidents on one severity scale, compare a machine's sensor trend, find and quote
+an SOP, and a last-resort checked `query_sql`) that the model picks from and fills in
+arguments for, never writing free SQL itself. Every tool runs as the read-only
+`agent_ro` user from `agent_user.py` above, and returns its answer with citations back to
+the audit views (`*_audit`) and lineage (`ingest_runs`) described in
+[`docs/ingestion.md`](docs/ingestion.md#lineage-traceability-and-reproducibility).
+
+```bash
+python scripts/agent_tools.py schemas                                     # the tool definitions
+python scripts/agent_tools.py call find_sop '{"question": "entering the blasting chamber"}'
+```
+
+Full tool list, error codes, and how each trap-list item is handled in code:
+[`agent_tools.md`](docs/agent_tools.md). The agent's tools are tested the same way as the
+ingest scripts (`tests/test_agent_tools.py`, no MySQL needed) and have been checked
+against the real database too
+([verification pass](docs/agent_tools.md#checked-against-the-real-database-5-nov-2026)).
+
+**The agent** (`scripts/agent_graph.py`, run through `agent_app.ask()`) is what a person
+actually talks to: a LangGraph graph that wires an LLM to the tools above, shows the sources a tool
+cited under every answer, and degrades honestly rather than inventing a value when a
+tool or the LLM call fails. Every note a tool returns (an OCR value the engines disagreed on,
+a severity read by eye, a description that doesn't fit the machine) is a caveat the answer
+must carry. A follow-up goes to the model with the whole conversation, and "last month" is
+the calendar's, worked out in code (Singapore time), never the model's own idea of today; a
+period after the data ends (30 Jun 2026 in the client's data) is said to have no data, then
+answered for the latest full month it has: the agent runs that second query itself, because
+the model, told to in the prompt, didn't (first real eval run, 10 Nov 2026). A turn is all or
+nothing for the conversation: one cut off half way (the page clicked while it ran) leaves the
+history as it was, never with a tool call and no result, which made the chat API refuse every
+later question in that conversation (found 11 Nov 2026; a conversation saved like that is mended
+when it is next asked). Details and tests: [`agent_graph.md`](docs/agent_graph.md) (the
+graph, with a worked example of one question end to end) and [`agent_app.md`](docs/agent_app.md)
+(the rules and pieces it uses).
+
+The graph has four nodes: `guard_in` (the guardrail on the question, the short-year
+question, today's dates), `model` (one model call), `tools` (the tools the model picked, with
+the severity-scale guard and the date and "completed" rules) and `guard_out` (the guardrail on
+the answer). It started on 11 Nov 2026 beside the plain function-calling loop that came first,
+was tested to give the same answers, history and log on every scenario and 52/52 on the eval
+suite, and replaced it on 12 Nov 2026.
+
+**An HTTP API** (`scripts/agent_api.py`, [`agent_api.md`](docs/agent_api.md)) puts `/ask`,
+`/ask/stream` (the conversation's id, each step of the turn as a server-sent event, then the
+answer), the saved conversations (list, read, delete), the photos an answer cites and the
+key's spend behind a key. Since phase 3 (15 Nov 2026) it is the only way in: the page calls it
+for everything, so a conversation started over the API opens on the page with
+`?session=<id>`, and the other way round.
+
+```bash
+python scripts/agent_app.py "is CNC-02 running differently now?"
+streamlit run frontend/agent_ui.py         # the chat page for the demo (needs the API running)
+uvicorn agent_api:create_app --factory --app-dir scripts # the HTTP API (needs AGENT_API_KEY); the page needs it running
+```
+
+**The guardrail** (`scripts/guardrail.py`, [`guardrail.md`](docs/guardrail.md)) runs inside
+`agent_app.ask()`, so the CLI, the page and the eval suite all get it. A prompt injection, a
+request for a person's name or personal details (PDPA, including a staff name typed into the
+question) or a plainly out-of-scope request is refused in code, each with its own message,
+before any model call; an answer carrying a staff name, an NRIC, a phone number or an e-mail is
+replaced before it's shown. Regular expressions and hashed names only, no LLM, so the same
+question always gets the same verdict:
+
+```bash
+python scripts/guardrail.py check "What is the name of employee EMP015?"   # free: no model, no DB
+```
+
+**The page** (`frontend/agent_ui.py`, [`agent_ui.md`](docs/agent_ui.md)) is only a front end
+since phase 3: everything it shows comes from the API, and while a question runs a status line
+follows the agent's steps as they stream in. It gives each part one place (layout reworked 10 Nov 2026, when the sidebar held examples, conversations and spend
+together and was congested):
+
+- **Sidebar: conversations only.** New conversation, the eight newest saved conversations,
+  a **Fold earlier questions** toggle, and whether this conversation is being saved.
+- **Bottom bar.** The question box, with a bin icon to its left: **Delete this conversation**
+  (after a confirm; added 11 Nov 2026), through `DELETE /sessions/{id}`.
+- **Top bar.** The title, and two icons side by side at the right: a lightbulb for the example
+  questions (once a conversation has started) and the usage popover (model, this
+  conversation's cost, the key's spend against its cap). Near the cap, a warning shows across
+  the page as well.
+- **A new conversation** opens on the six example questions as a grid; the PDPA one is refused
+  on purpose, and its tooltip says so.
+- **Each answer**: its text, one cost line, then tabs for **Sources**, **Caveats** (the tools'
+  notes), **Photos** (nameplates and redacted incident forms, from `img_files_public`) and
+  **What happened** (the trace). On the newest answer What happened is the first tab, so it is
+  open for the demo.
+- **Earlier questions fold** into one line, "Earlier in this conversation (N questions)", so
+  only the latest exchange is open; the sidebar toggle turns this off. A new question,
+  typed or picked from the examples, is scrolled into view.
+- **A question cut off by a click** (anything clicked while it was being answered) still
+  finishes in the API: the page reloads the conversation and shows the answer if it is there,
+  or takes the question off with a note that it may appear when the conversation is reopened.
+
+It needs Streamlit 1.36 or later and nothing else of the agent's (`frontend/requirements.txt`;
+the API's packages are in `requirements-api.txt`). **Hosted (16 Nov 2026, phase 4) as two
+Cloud Run services**: `jme-agent-api` (the root `Dockerfile`, **private**: only the page's
+service account may invoke it, and it holds every secret) and `jme-agent` (the page, built from
+`frontend/` alone, public behind `APP_PASSWORD`, holding only the API's address and key):
+[Deploying on Google Cloud Run](docs/agent_ui.md#deploying-on-google-cloud-run).
+After a redeploy, hard-refresh the page (Ctrl+Shift+R) before testing.
+
+**The eval suite** (`evals/cases.yaml`, run by `scripts/run_evals.py`) runs 52 conversations
+(62 questions) through the same agent over the real model and database: the severity kill-shot
+in five phrasings, the SOPs, CNC-02, oil, work orders, trap-list items, 20 guardrail cases (out
+of scope, prompt injection, and the PDPA kill-shot in seven phrasings) that must be refused in
+code with no model call, and six multi-turn conversations (the checklist's "and what about last
+month?", a new machine, a pronoun, the severity scale kept, a follow-up after a refusal and
+one that turns into a PDPA question), and two on words the data can't take as written (a
+year written short, asked about in code; "completed" work orders, read as `CLOSED` and said). It checks each answer for the tools that ran, its key facts, its sources, that
+it states nothing no tool returned, how many model calls it took, and, on every answer, that
+no staff name appears. It prints the spend; run it after every significant change and commit
+`evals/results/latest.txt` ([`evals.md`](docs/evals.md)).
+
+```bash
+pip install pyyaml                         # team repo; with uv (personal repo): uv add --dev pyyaml
+python scripts/run_evals.py --check        # validate the cases: free
+python scripts/run_evals.py                # the real run: about 40 model calls
+python scripts/run_evals.py --tag killshot # one group
+python scripts/run_evals.py --tag guardrail # the guardrail cases: no model calls
+python scripts/run_evals.py --tag multiturn,dates   # the follow-ups and relative dates
+```
+
+## Data concerns and open questions
+
+What we know is uncertain in the client's data, what the scripts do about it now, and
+what we need from someone else to settle it. Keep this list current: it feeds the data
+quality report, and the client will be asked these questions. The evidence for every
+problem, by source, is in [`trap_list.md`](docs/trap_list.md); the `C`, `S`, `L`, `I` and `D`
+numbers below refer to it.
+
+### Needs the client's input
+
+| # | Question | Evidence and why it matters | What we do now | Once answered |
+|---|---|---|---|---|
+| 1 | **On which day did incident severity switch to 5 = worst?** (safety officer) | The dump's header note says 1 Jul 2025, but forms in use may have lagged. In this dump only two incidents fall in July 2025: **906** (11 Jul, logged 3) and **907** (4 Jul, logged 2). A 3 means the same on both scales, so **907 is the only incident whose meaning changes**: severity 2 on the new scale, or 4 converted from the old. The auditor will test this. Form 906 (11 Jul) already prints the new scale, so the switch was between 1 and 11 Jul 2025; there is no scanned form for 907. (C1, C2, I5) | Before 1 Jul 2025 converted (`6 − s`); all of July left `ambiguous`, `severity_5_worst = NULL` | `ingest_cmms.py --severity-cutover <date> --severity-ambiguous-until none`, then `relationships.py` |
+| 2 | **Do old-scale severities agree with lost days?** (safety officer) | Several pre-July-2025 incidents logged `5` (least severe on the old scale) have 5 lost days, e.g. 901, 919, 920, 937; incident 982 logged `4` (minor) has 14. **Not a scale mix-up:** the forms for 919, 937 and 982 print the old scale and agree with the CMMS, so the mismatch is on the original paper. Either lost days aren't tied to severity, or the severity was misjudged when the form was filled in. (C3, I5) | Rule applied as stated. All 30 forms checked: none contradicts the date rule | Explain how severity and lost days relate |
+| 3 | **Are work order and incident descriptions reliable for the machine they're on?** (maintenance) | Many don't fit the machine type: 10018 `crane limit switch fault` on the test pump rig, 10045 `weld porosity complaints` on the overhead crane, 10005 `spindle vibration high` on a welding bay; incident 923 `finger caught in chuck` on a crane. Either the machine id or the description is wrong. The paper form for incident 900 has the same mismatch (`weld flash burn` on the manual lathe), so it isn't just a CMMS typing error. (C6, I6) | Loaded as written | Decide which field to trust; until then the app should cite descriptions, not reason from them |
+| 4 | **What vibration and temperature levels count as "off" for CNC-02?** (maintenance / OEM) | The night shift's question needs a threshold or a baseline, and the data has none. It's now urgent: CNC-02's monthly mean vibration rises from 2.31 mm/s (Jan–Mar 2026) to 2.71 (Apr), 3.56 (May) and 4.41 (Jun), and its temperature from 52.0 to 56.0 °C, while the other four sensored machines stay flat. Day and night shifts read the same. | Readings stored; no alarm levels. The trend can be shown, but not judged against a limit | Add the limits to the analysis and the chart |
+| 5 | **Is "Nurul Aisyah binte Hassan" one person or two?** (HR) | Same name on EMP015 (QA, night) and EMP026 (QA, night). Affects any per-person count. (C8) | Treated as two employees (two codes) | Merge or keep; the app never shows names either way |
+| 6 | **What's the difference between `corrective` and `breakdown` work orders?** (maintenance) | Both are unplanned repairs; `coolant leak` appears as both. "Breakdowns per machine" depends on the definition. (C12) | Kept as logged | Document the definition, or map one to the other |
+| 7 | **What does `cost_sgd` on an open work order mean?** (finance / maintenance) | All 34 open and `awaiting parts` WOs (June 2026) already have costs and hours, e.g. 11550 (open, S$941.13). Estimate or spend so far? (C10) | Summed like closed WOs | Exclude open WOs from cost totals, or label them estimates |
+| 8 | **Which currency are spares costs in?** (storeman) | The sheet only shows `$`; the bearing from Germany may be priced differently. (S2) | Stored without a currency | Add the currency per part |
+| 9 | **Which part is an `awaiting parts` work order waiting for?** (maintenance) | Work orders don't record parts, so spares can't be linked to WOs; the app can't answer "what's holding up WO 11552". The likeliest case: WO 11570 (CRN-01 crane limit switch, awaiting parts) and spare LS-CXT-11 at 0 in stock. (C11) | Not linked | A part field in the CMMS export, or a separate list |
+| 10 | **What do the `lost_days` values mean?** (safety officer) | Across all 85 incidents `lost_days` is only ever 0, 1, 2, 5 or 14, never 3, 4 or 6–13. That looks like a coded band, not a count. (C4) | Loaded as a number | If it's a code, map it to a band and stop summing it |
+| 11 | **Why do QA inspectors and crane operators log repairs?** (maintenance / HR) | 11 of 32 staff are QA Inspectors, and they do repairs (10001: EMP002, QA, on a crane gearbox). Crane operators work on CNCs (10029, 10042: EMP005 on CNC-02). Either `emp_code` records who raised the WO rather than who did it, or trades are out of date. (C7) | Loaded as written | Say which it is; "who fixed it" answers depend on it |
+| 12 | **Are same-day PM pairs double entries?** (maintenance) | Same machine, day and type twice, e.g. 10727 + 10728 (CNC-02 PM, 2025-02-01, both EMP009). They have different `wo_id`s, so the duplicate check keeps both. (C9) | Both loaded | Give a rule (e.g. same machine, day, type and technician = one job), or confirm they're separate |
+| 13 | **Is WO 11512's 24.1 hours real?** (maintenance) | MILL-01 PM, 2026-05-05; the next longest WO is 18.9 h. Could be a long job or a typo for 2.41. (C13) | Loaded as written | Correct it, or leave it |
+| 14 | **Where are the 5-Why root-cause sheets?** (safety officer) | Incident forms say `Root cause (5-Why attached?): see attached`; no attachment is in the scans or the data package. "Why did incident 900 happen" can't be answered. (I7) | `root_cause_attached = 1`, flagged `root_cause_in_attachment`; the app says the root cause isn't in the data | Scan and load them, or confirm they don't exist |
+| 15 | **Is BLAST-01's nameplate on the right machine, and which oil does it take? Are other plates' lines copied from other machines?** (maintenance) | The plate rates the blasting chamber `450 A @ 60%` (how welding power sources are rated) and names `Shell Tonna S3 M68` (a slideway oil); the spares sheet lists only the `ALL` hydraulic oil for it. The same `450 A @ 60%` is on the crane CRN-01 and the pump PMP-T01, and welder WELD-02's plate carries a compressor's rating (`30 kW FAD 88 cfm`) and a 3.5 t weight. (I2, I3, I19) | Loaded as read, flagged `duty_cycle_rating_on_non_welder`; the app cites both sources for "what oil" | Correct the plate record or the asset tag |
+| 16 | **Which lubricant and interval do the welders and the compressor really take?** (maintenance) | The plates list `ISO VG68` every 2000 h for WELD-01 and `Shell Tonna S3 M68` (a slideway oil) every 2000 h for WELD-02; inverter welding sets usually have no lubrication points. The screw compressor CMP-01 also lists Tonna S3 M68, where the maker's compressor fluid would be expected. (I20) | Loaded as printed; the app cites the plate photo | Correct the plates, or confirm and we note it |
+| 17 | **Are there SOPs for welding, grinding, machine guarding, portable electrical equipment and housekeeping?** (safety officer) | Only three SOPs were provided (LOTO, crane lifting, confined space). 58 of the 85 incidents are of a kind none of them covers: finger caught in chuck 15, weld flash burn 14, electric shock from a faulty extension 10, eye injury from grinding 7, slip on hydraulic oil 6, deburring laceration 6. (D3) | The app says "no SOP in the data" for those topics | Send them and we load them; or confirm they don't exist (an audit finding in itself) |
+| 18 | **Which incident is the "Aug 2025 near-miss (sling snapped)" in the crane SOP?** (safety officer) | The CMMS has five sling near-misses (917, 957, 941, 973, 944) and none in August 2025. Incident 944 (CRN-01, 28 Apr 2026, 5 lost days) happened after rev 6 (Mar 2026) said all old slings were scrapped. (D4) | Both sources cited as they are | Add the missing incident or correct the SOP's date; say whether 944's sling was a new one |
+| 19 | **Who is certified to operate the cranes, and does `emp_code` on an incident mean the operator?** (HR / safety officer) | The crane SOP allows only certified operators ("list with HR"). The CMMS has two Crane Ops (EMP005, EMP024); none of the five sling near-misses names either. (D5, C7) | The app doesn't say who operated a crane | The certification list, and what `emp_code` means on incidents |
+| 20 | **Can we have the earlier SOP revisions and their effective dates?** (safety officer) | Only the current revision of each SOP is in the package, dated to the month (LOTO rev 4 Jan 2026, crane rev 6 Mar 2026, confined space rev 2 Sep 2025). Which procedure applied at an older incident can't be shown. (D9) | Answers say "current revision as of <month>" | Load the earlier revisions with their dates |
+
+```sql
+-- Evidence for question 2: lost days by scale and logged severity
+SELECT severity_scale, severity_as_logged, COUNT(*) AS incidents, ROUND(AVG(lost_days), 1) AS avg_lost_days
+FROM cmms_safety_incidents GROUP BY severity_scale, severity_as_logged ORDER BY 1, 2;
+
+-- Questions 1 and 2: the scale each scanned form printed, vs the CMMS date rule
+SELECT incident_id, form_value AS printed_scale, logged_value AS date_rule_scale, agrees
+FROM incident_report_vs_cmms WHERE field = 'severity_scale' ORDER BY incident_id;
+
+-- Evidence for question 12: candidate double entries
+SELECT machine_id, wo_date, wo_type, COUNT(*) AS n, GROUP_CONCAT(wo_id) AS wo_ids
+FROM cmms_work_orders GROUP BY 1, 2, 3 HAVING n > 1 ORDER BY wo_date;
+```
+
+### Assumptions we made (state them in the data quality report)
+
+| Assumption | Where | Check |
+|---|---|---|
+| Sensor timestamps without an offset are Singapore time | [`ingest_logs.md`](docs/ingest_logs.md) | The 2026H1 file has none (`iso_naive` = 0), so this doesn't affect the client's data; every ISO time carries `+08:00` |
+| Slash dates are day first (`05/02/2026` = 5 Feb) | [`ingest_cmms.md`](docs/ingest_cmms.md), [`ingest_images.md`](docs/ingest_images.md) | The client's dump has none; every date is `YYYY-MM-DD`. The scanned forms do use them, and form IR-2024-900's `01/07/2024` matches the CMMS's `2024-07-01` (I8) |
+| A form's printed severity scale is right for that form, even where it contradicts the date rule (flagged, not overruled; the CMMS value is not changed) | [`ingest_images.md`](docs/ingest_images.md#severity-the-scale-printed-on-the-form) | `form_scale_contradicts_date_rule` warnings (none on the 30 forms) |
+| When OCR readings of a field disagree, the majority reading that passes the field's format check is right; ties go to the plain grey reading, and a field where no two readings agree is flagged `ocr_no_majority_*` | [`ingest_images.md`](docs/ingest_images.md#four-pass-voting) | `ocr_disagreed_*` warnings; each reading in `ocr_notes` |
+| With `--engine both`, where the engines disagree: the only value passing the field's check wins, then a severity from the blue ink, then the model on free text, then a Tesseract majority, else the model | [`ingest_images.md`](docs/ingest_images.md#decision-tree-2-per-field-which-value-is-kept) | `engines_disagree_*` warnings; the rule used (`chose`) in `ocr_notes` |
+| A value read off the scan by a person is right; it is stored as read, the OCR reading kept beside it | [`ingest_images.md`](docs/ingest_images.md#values-read-by-a-person) | `checked_by_eye_*` warnings (the severities of forms 911, 922, 955) |
+| A severity read only from the blue value ink is right when at least 3 of 10 colour masks agree and no other digit comes close; otherwise it's left unread | [`ingest_images.md`](docs/ingest_images.md#colour-separation-severity-from-the-blue-value-ink) | `read_from_value_ink_severity` warnings; 6 of 9 new forms read, the other 3 read by eye; all match the CMMS where it has a value (I12) |
+| Lead-time months are 30 days; `local` has no lead time in days | [`ingest_spares.md`](docs/ingest_spares.md) | `lead_time_unparsed` warnings (none in rev 11; no lead time uses months) |
+| Only sizes written with a unit are converted; bearing numbers (`6205`) aren't decoded | [`ingest_spares.md`](docs/ingest_spares.md) | `no_explicit_size` count (5 in rev 11) |
+| Part numbers aren't read for size (`BELT-5V-850` is 85.0 in, not 850 mm) | [`ingest_spares.md`](docs/ingest_spares.md) | agent instructions |
+| Duplicates keep the first row seen, even if later ones differ | all four ingest docs | `duplicate_*` rejects (none in the client's files) |
+| Category values aren't merged, only case and spacing normalised. This dump has none to merge: statuses are only `CLOSED`, `OPEN`, `AWAITING PARTS`; types only `CORRECTIVE`, `PREVENTIVE`, `BREAKDOWN` | [`ingest_cmms.md`](docs/ingest_cmms.md) | distinct `status` / `wo_type` values in the run summary of a new dump |
+| No plausibility checks: a 900 °C reading or negative quantity loads as written. The client's sensor file stays within 28.1–79.8 °C and 0.2–5.81 mm/s, so nothing is affected today | [`ingest_logs.md`](docs/ingest_logs.md), [`ingest_spares.md`](docs/ingest_spares.md) | add a rule if a later file needs one |
+| Time gaps in the sensor log aren't detected at ingest. In 2026H1, 2,216 of 108,600 expected readings are missing, none more than two 12-minute slots in a row | [`ingest_logs.md`](docs/ingest_logs.md) | `audit_sensor_csv.py`; analysis groups by time, not by row |
+| An SOP is found by keyword; a question that shares no word with any SOP (after stop words and synonyms) has no SOP | [`ingest_sops.md`](docs/ingest_sops.md#search-keyword-not-a-vector-database) | the search tests; add a `SYNONYMS` entry and a test when a real question misses |
+| A question is out of scope only if it asks for a task the app never does (poems, code, markets) or names a far-off topic (weather, sport, ...) with no shop word in it; anything less clear goes to the model | [`guardrail.md`](docs/guardrail.md#not-refusing-what-the-app-is-for) | `tests/test_guardrail.py` runs every in-scope eval question through the guard; add a phrasing there and to `cases.yaml` when one is wrongly refused or let through |
+| "Today" is the calendar's date in Singapore; a period after the data ends (30 Jun 2026) has no data, so the answer says so and gives the latest full month the data has (June 2026) instead, saying so; one fallback month for all sources, each source's own last day given to the model; the fallback query is run by the agent in code (`period_check`), not left to the model | [`agent_app.md`](docs/agent_app.md#relative-dates-and-follow-ups-5) | `dates_unknown` in the log when the data's dates couldn't be read; the multi-turn eval cases (clock frozen at `today:` in `cases.yaml`) |
+| "Completed" or "finished" work orders are those with status `CLOSED`, counted by the date each was raised: the CMMS has no completion date or "completed" status. The answer says so every time: if the model leaves either part out, the agent adds a fixed sentence (12 Nov 2026) | [`agent_app.md`](docs/agent_app.md#words-the-data-cant-take-as-written) | `completed_read_as_closed` in the log; ask the client whether a completion date exists anywhere |
+| Every fact in an answer comes from a tool call made in that turn: an answer with a digit (a count, date, cost or id) and no tool call is asked again with a tool required, once; a question about how things stand "now" is answered as of the data's last day, which the answer states (13 Nov 2026) | [`agent_graph.md`](docs/agent_graph.md#how-its-built) | `ungrounded_answer_retried`, `ungrounded_answer` and `caveat_added` in the log; the eval suite's sources and tool checks |
+| A year written short ("nov 202") is never completed: the user is asked which year, from the two latest the data has that month in | [`agent_app.md`](docs/agent_app.md#words-the-data-cant-take-as-written) | `year_unclear` in the log; `tests/test_clarify.py` |
+| A staff name is two or more consecutive words of it, or one word of six letters or more; a short surname alone (Ng, Lim, Tan) isn't treated as a name | [`guardrail.md`](docs/guardrail.md#the-staff-list-guard_namespy) | the name tests in `tests/test_guardrail.py`; the eval suite checks every answer for full names and word pairs |
+
+### Still to check ourselves
+
+| Item | How |
+|---|---|
+| All 30 incident forms and all 12 nameplates are loaded with `--engine both` and compared with the CMMS. Every new-scale severity is now known (6 from the blue ink, 911/922/955 by eye: I12); all 4 forms Tesseract thought unsigned are signed (I23); the plate misreads found by eye (CRN-02 and CNC-03 grease intervals and weights, WELD-02's oil, the CNC-01 power line) are read right by the model (I15, I18, I25). Left: 13 warnings on the plates and 32 on the forms, mostly `engines_disagree_*` the app reports as caveats; plate lines that look copied between machines (I19, client Q15–Q16) | `SELECT * FROM machine_nameplate`, then the audit queries in [`ingest_images.md`](docs/ingest_images.md#audit-queries); add findings to [`trap_list.md`](docs/trap_list.md#images-images-incident-forms-and-nameplates); a value read by eye goes into `REVIEWED` |
+| Whether `emp_code` with trade and shift identifies a person in a 32-person shop (PDPA) | team decision: if so, drop `emp_code` from `incident_detail` / `work_order_detail`, and the guardrail's "codes are fine" stance with it |
+| Names also appear in the spares sheet title (`storeman: Halim`) | stored only in `critical_spares_raw.source_title`, which the app user can't read; keep it that way. The guardrail also blocks it (`build-names --extra`) |
+| Views, grants and run logging have only been tested without a database | run `relationships.py` and `agent_user.py --check` on the real database |
+| The guardrail cases on the real model | `python scripts/run_evals.py --tag guardrail` (no model calls), then the full suite: every in-scope case must still pass. Commit `evals/results/latest.txt` |
+| The page's layout in a browser: the top bar's icons, the usage popover's width, the scroll to a new question, the folding, **Delete this conversation** and the note after a question cut off by a click (11 Nov 2026). The tests cover the helpers, not the rendering | `streamlit run scripts/agent_ui.py`, ask two or three questions in a row, with the sidebar open and closed; click an example while a question is running; delete a conversation and reopen its link ([`agent_ui.md`](docs/agent_ui.md#what-the-page-shows)) |
+| The LangGraph graph as the only engine (12 Nov 2026): the loop retired, the conversation moved into the graph's state, the database and client into its runtime context. Written in a sandbox without langgraph (its tests ran on `tests/mini_langgraph.py` there) | `uv run pytest` (the header must say `langgraph: 1.x`, not the stand-in), then `python scripts/run_evals.py`: 52/52 as before |
+| Conversations in Postgres (13 Nov 2026): written in a sandbox with neither Postgres nor `langgraph-checkpoint-postgres`; setup and check ran only against a stand-in | Done 14-15 Nov 2026, locally and on Aiven: setup, check, ask, follow-up, restart |
+| The page on the API (phase 3, 15 Nov 2026) | Done 16 Nov 2026 by the user in real Streamlit: status line, reload, photos from Recent, cut-off click, delete, API down |
+| The two Cloud Run services (phase 4, 16 Nov 2026): the identity token and the deploy steps written without Google Cloud; the token logic tested against a stand-in metadata server | Deploy as in [`agent_ui.md`](docs/agent_ui.md#deploying-on-google-cloud-run), then its section 4 checks (the API answering 403 without a token, the page's six checks, the restart proof on both services) |
+
+## Testing with pytest
+
+The tests check the reading and cleaning logic of every script, plus the shared
+modules. They run in a few seconds and **need no database, Docker or `.env`**:
+each test builds a small messy CSV, spreadsheet, SQL dump or OCR text (in a temporary
+folder or as a string), runs the script's cleaning steps on it, and checks the result.
+Settings exported in your shell or in the repo's `.env` don't leak into the tests.
+
+### Setup
+
+pytest is in `requirements-dev.txt` (not `requirements.txt`, which is only what
+the scripts need to run):
+
+```bash
+source .venv/bin/activate                 # Windows: .venv\Scripts\activate
+pip install -r requirements-dev.txt
+```
+
+`pytest.ini` tells pytest where things are, so no other setup is needed:
+
+```ini
+[pytest]
+pythonpath = scripts frontend   # lets tests "import ingest_logs", "import agent_ui", ...
+testpaths = tests       # where to look for test files
+```
+
+### Running
+
+Run from the **repo root** (the folder with `pytest.ini`):
+
+```bash
+pytest                                              # all tests
+pytest tests/test_logs.py                           # one file
+pytest tests/test_spares.py -v                      # one line per test, with names
+pytest -k lead_time                                 # only tests whose name contains "lead_time"
+pytest -k "spares and not size"                     # combine name filters
+pytest -k severity                                  # the CMMS severity-scale tests
+pytest -k crlf                                       # the Windows line-ending tests
+pytest -k ink                                       # the blue-ink severity reader
+pytest tests/test_images.py                         # the scans (OCR text given; no Tesseract needed)
+pytest tests/test_relationships.py                  # the linking script (SOP links included)
+pytest tests/test_sops.py                           # the SOPs (no database)
+pytest -k "mysql or plural or synonym or entry"     # the SOP search: MySQL vs search_sops, the entry rule
+pytest tests/test_agent_tools.py                    # the agent's tools (SQLite stand-in, no MySQL)
+pytest -k "severity and (incident or count)"        # the severity kill-shot, on the tools layer
+pytest tests/test_agent_app.py                      # ask() and the agent's rules (chat call + tools stubbed)
+pytest tests/test_agent_graph.py                    # the agent's graph: each scenario, state vs context, the steps
+pytest tests/test_agent_api.py                      # the HTTP API (its route tests need fastapi + httpx)
+pytest tests/test_api_client.py                     # the page's client: SSE, errors, end to end in-process
+pytest tests/test_answer_view.py                    # how an answer is shown and kept: trace, cost, display copy, photos
+pytest tests/test_conversations.py                  # conversations: the checkpointer, the threads table, setup, check
+pytest tests/test_guardrail.py                      # the guardrail: injection, PDPA, scope, PII out
+pytest -k "pdpa or name"                            # the PDPA tests across the guard, agent and evals
+pytest tests/test_agent_ui.py                       # the chat page's helpers: steps, photos, caveats, layout, cut-off
+pytest -k "tab or fold or latest_exchange or scroll" # the page layout: answer tabs, folding, scroll
+pytest -k "conversation or reopened or saved_before" # the conversation's spend after reopening it
+pytest -k "cut_off or stopped or answered_only or delete"   # a question cut off by a click; deleting a conversation
+pytest tests/test_evals.py                          # the eval runner's checks and cases.yaml (no model, no DB)
+pytest tests/test_spend.py                          # the spend check against the proxy (no network)
+pytest -k "recent or placeholder"                   # the sidebar's list of saved conversations, refused questions kept out
+pytest tests/test_multiturn.py                      # follow-ups and "last month": the calendar's, with the data's end
+pytest tests/test_clarify.py                        # a year written short asked about; "completed" read as CLOSED
+pytest tests/test_read_log.py                       # the log reader (standard library only)
+pytest tests/test_pipeline.py                       # the pipeline and its report
+pytest -k "both or engine"                          # the two-engine decision tree
+pytest -k "redact or photo"                         # the photos: redaction, fail closed, the public view
+pytest tests/test_logs.py::test_temperature_units   # one specific test
+pytest -x                                           # stop at the first failure
+pytest --lf                                         # re-run only the tests that failed last time
+pytest -q                                           # quieter output
+```
+
+With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
+
+### What's tested
+
+| File | Covers | Tests |
+|---|---|---|
+| `tests/test_agent_tools.py` | [`agent_tools.py`](docs/agent_tools.md): every tool's schema; machine names written six ways, ambiguous and unknown machines; **the severity kill-shot**: four phrasings without a scale asked about on both incident tools, the same question on either scale giving the same incidents, the naive logged-value count never produced, July 2025 reported apart; listings by date with no employee data; form vs CMMS disagreements; OCR confidence per field, known plate problems, no photo; oil from two sources that disagree (shop-wide vs the machine's own), and an unreadable one; spares in both units, shop-wide only, below minimum once each; open costs apart and double entries; no sensors on a crane; weekly coverage; CNC-02 `machine_specific` against flat machines; the blasting chamber SOP quoted whole, nothing for welding; `query_sql` refusing writes, two statements, employees, `SELECT *`, the logged severity, `SLEEP` and `UNION`, and capping rows; a dead database giving `tool_failed`; bad, extra and JSON-string arguments; the app refusing the owner account; OCR confidence ranked (unreadable, engines disagreed, uncertain, majority, one engine, clear) with power warnings applying to kW, phases and voltage, values checked by eye; the photo behind a nameplate or form fetched and hash-checked, `query_sql` never returning `image_bytes`; descriptions that don't fit the machine (C6); found by the eval suite (8 Nov 2026): the July 2025 incidents named in the count's note, a crane's max load looked up in SOP-CRANE-02 with its line, the part an awaiting-parts work order waits for marked as not recorded; the sensor verdict spelled out in the first note; found by the eval run of 9 Nov 2026: `list_incidents` giving the earliest and latest incident over **every** match, not the last row of a 50-row page, and saying which end of a long list is shown; every incident row saying its severity in words ("1 on the current scale, where 5 is the most severe: the least severe"); the same for `list_work_orders`: the first and last work order over every match, the list oldest first on request, the note saying which end of a long list is shown; one work order by its number (`wo_id`), a number typed into the description search redirected instead of "not found", an unknown number an honest `no_data`; 14 Nov 2026: the old setting names (`AGENT_DB_*`) alone never connecting | 136 |
+| `tests/test_agent_app.py` | [`agent_app.py`](docs/agent_app.md): `ask()` and the pieces the graph uses, with `agent_tools.run_tool` and the chat call stubbed (the tests that drove the old loop directly go through `ask()` since 12 Nov 2026) — a plain answer needing no tool, a tool call round-tripping into the next model call, several tool calls in one round all running and all cited, a tool's clarification question returned to the user with no further model call (the severity-scale guess), a severity scale the user never named stripped so the tool asks (the model's guess), a failed chat call degrading to a plain message instead of raising, too many tool-call rounds stopping with an honest message instead of looping forever, the assistant-message shape matching the API with and without tool calls, source-label deduplication, a new conversation starting with only the system prompt, and `ask()` appending the question, returning formatted sources and logging one turn summary; raw sources and tool notes passed out of the turn, notes formatted once, the system prompt telling the model to carry every note as a caveat; **the guardrail in `ask()`**: a refused question never reaching the model, kept out of the history and (PDPA) out of the log, the conversation carrying on after a refusal, an answer with personal data replaced in the history and absent from the log, an ordinary answer unchanged; without the staff name list every question refused and the app refusing to start; **spend**: the proxy's cost header read on each call (unknown kept as unknown, never 0), each call's and question's cost logged and handed out of `ask()`, a refused question costing nothing; found 11 Nov 2026 (the page's "tool_calls must be followed by tool messages" on every question): **a turn stopped half way** between the tool call and its result leaving the conversation exactly as it was, **a conversation saved with a tool call and no result** answered again with the orphan call removed (`history_repaired`), only answered tool calls kept (a call with no result, a second result, a result for no call), a whole conversation left alone | 37 |
+| `tests/test_agent_graph.py` | [`agent_graph.py`](docs/agent_graph.md): the agent's graph through `ask()`, each scenario checked directly (until 12 Nov 2026 the same eleven were run through the old loop as well and had to agree): a plain answer, a tool round trip with sources and notes, two rounds with several calls, a clarification with no second model call, a failed model call, too many rounds (the graph's recursion limit never first) and the limit from the context, a guardrail refusal with no model call, an answer with an e-mail replaced in the history too, a year written short, "completed" read as CLOSED with a guessed scale stripped, a conversation saved broken mended; **how it's put together**: one compiled graph per process, the state holding the conversation and nothing from the context, the database, client and model reaching the nodes through the context, a `complete_fn` in the context used, nodes never changing the state they are given, each turn starting with empty results; **what it reports**: each step in order with no question or answer text, and logged; a refusal as one step; a callback that raises never breaking the turn; a turn cut off inside the graph leaving the conversation as it was; the loop and engine switch gone; the diagram; the recursion limit. Uses `tests/mini_langgraph.py` where langgraph isn't installed; found on the eval run of 13 Nov 2026 (a follow-up answered from the previous turn's result with no tool call and no sources): **every fact from a tool call made this turn**, an answer with facts and no tool call asked again with `tool_choice="required"` (the dropped answer kept out of the history, the extra call counted), an answer with no facts or after a tool call never asked again, asked once only and then flagged `ungrounded_answer`, the real chat call sending the tool choice, what counts as stating facts | 31 |
+| `tests/test_agent_api.py` | [`agent_api.py`](docs/agent_api.md), 11 Nov 2026, through the real agent graph with a scripted model and real conversations (the threads table on sqlite3, LangGraph's in-memory checkpointer): the key compared exactly and required; `/health` (whether it can answer, the agent, sessions); bad questions and session ids refused with nothing asked; a question starting a saved conversation, a follow-up continuing it, a refused question stored only as its placeholder, an answer with personal data reported as replaced, unknown and unreadable conversations, answering without a store, a failed save reported, a bug as a 500 with no internals, two questions at once on one conversation both kept; reading one conversation back and listing the recent ones; **streaming**: each graph step then the answer, saved, no text in the steps; a refused question as one step then the answer; a bad request as one error event; a stalled question ending the stream with a 504 while it still finishes and is saved; the SSE format; **HTTP** (skipped without `fastapi` and `httpx`): the key on every route but `/health`, `/ask`, `/sessions/{id}` and `/ask/stream` end to end; 13 Nov 2026, **conversations in Postgres**: the follow-up from the checkpointer, a restart carrying the conversation on with the system prompt from the code, a refused question in neither the checkpoint nor the row, an answer with personal data in no key of the saved state, a new conversation's row written before its first answer; 15 Nov 2026 (phase 3), **what the page needs**: the `session` event first, before the model is asked, with a follow-up's own id and none without saving; deleting a conversation (row and checkpoints, twice fine, bad id, no store, store down); the scans an answer cites listed once and kept after a reload; a photo served by its hash only, a bad hash never queried, a read failure a 503 with no connection details; the key's spend at `/usage`, always 200; `DELETE`, `/photos` and `/usage` over HTTP; 16 Nov 2026: every answer carrying the conversation's spend (saved or not) | 39 |
+| `tests/test_api_client.py` | [`api_client.py`](docs/agent_api.md#tests), 15 Nov 2026: server-sent events read back as sent (comments, CRLF, split data, a cut-off last event); the key in its header; an API error keeping its code; an unreachable API as status 0 without the key in the message; a reply that isn't JSON; a stream read line by line and closed; a refused stream raising before any event; a missing photo as None, a found one keeping its type; both settings required, the key never printed, a CRLF value stripped; **end to end through `ServiceTransport`** (the real service and graph): a conversation from first question to delete, the wrong key getting nothing but `/health`, photos by hash, a bad question as one error event; 16 Nov 2026, **the private API**: the identity token from the metadata server for the API's URL, kept until shortly before it expires, a missing metadata server explained, the token on every request next to the key, `AGENT_API_AUTH` switched on only by `google` (a typo or a non-https URL refused) | 22 |
+| `tests/test_answer_view.py` | [`answer_view.py`](docs/agent_api.md#design), moved from `test_agent_ui.py` on 15 Nov 2026 with the helpers: the trace table (one row per model and tool call through `ask()`, a refusal and a failed call, a guardrail refusal with no model row, the name list missing, a short year and "completed", a mended conversation); logging to stderr with no file; the scans an answer cites (once each, files never, an odd or missing hash never passed on); the cost line and each model row's cost; **the conversation's spend** (through the saved copy, "at least" when a cost is unknown, rows from before 10 Nov read from their cost line, a tampered cost never trusted); the saved copy (no photos or trace, the photos' references kept; a refused question only as its placeholder, cleaning twice changing nothing); the model's history unchanged by a cut-off question; the module importing nothing heavy | 20 |
+| `tests/test_conversations.py` | [`conversations.py`](docs/conversations.md), 13 Nov 2026 (no Postgres: sqlite3 through the same `run(sql, params)`, LangGraph's in-memory checkpointer, a stand-in with Postgres' error codes): ids; the threads table (made, updated, read back; unknown and bad ids never sent; an unreadable row starting afresh; a down database never raising, naming only the error type; the recent list within the retention, only with a question, at most ten; delete reaching the checkpointer, the row kept if that failed; purge by age only); **the checkpointed agent**: a thread keeping its conversation with the system prompt from the code, an old prompt replaced, threads kept apart, **no checkpoint holding a blocked answer or a refused question** (found writing it: the state's `question` key kept a refused question as typed; it now travels in the run's context), a turn cut off half way leaving the thread working with no orphan tool call, delete and purge reaching the checkpointer; settings (URLs shown without the password, off without `AGENT_PG_URL`); setup (one schema, one user, grants only inside it, a quote in a password kept safe, odd names refused, the dry run without the password); check (only its own tables, a schema change caught and cleaned up, an odd error a failure); the old URL name (`AGENT_PG_URL`) alone not enough, the message holding no password; setup working for an admin that isn't a superuser (Aiven's `avnadmin`: no role attributes in `ALTER ROLE`) | 45 |
+| `tests/test_guardrail.py` | [`guardrail.py`](docs/guardrail.md): out of scope, prompt injection and PDPA each refused in code in 11-13 phrasings; a staff name typed into a question refused (two words of it, any case, curly apostrophe, an `--extra` name), one common word not; every real staff name known to the guard (from the dump); **every question `cases.yaml` expects answered (every turn without `max_model_calls: 0`) and 24 more allowed** (names of things, codes, "ignore the previous work order", rain in the blasting chamber, follow-ups); answers with a staff name, phone number, NRIC or e-mail blocked, ordinary answers and the three SOPs quoted whole not; the guard's messages hold no digits; the hashed name list matching the dump with no plaintext; `build-names`; patterns working without a name list; odd input handled, deterministic; the CLI; the 20 guardrail eval cases passing end to end with a model that fails the test if called; found while writing it: a phone number before a full stop, "forget the rules above"; **failing closed**: a missing, broken or empty name list is "not ready", with the build command in the message. One test per answered eval question, so the count grows with `cases.yaml` | 132 |
+| `tests/test_agent_ui.py` | [`agent_ui.py`](docs/agent_ui.md), rewritten 15 Nov 2026 for phase 3 (the page only calls the API): the page importing no agent, database, guardrail or spend code; the page password check; **the photos** fetched from the API by hash, once per answer and only for answers, a missing or unfetchable one saying so, drawn as data URLs with the caption escaped; the caveats a plain list in their tab; **answers from the API**: each streamed step as a status line, an answer drawn with everything it carries, an error event saying whether the question may still finish; every example answered except the PDPA one, the only one with a tooltip; **the layout of 10 Nov 2026**: each answer's tabs (What happened first on the newest), the newest answer found, icons with the cost in the tooltip, a new question scrolled into view, folding and its toggle, the top bar; **saved conversations through the API**: a reopened one drawn with only its questions and answers (and their photos), the sidebar saying honestly whether it's kept (from `/health`), how long ago, each list line from `GET /sessions`, listing and reopening end to end; **a question cut off by a click**: shown answered if the API finished it, else taken off with a note that doesn't repeat it, a new conversation cut off before its id, an unreachable API; **Delete this conversation** through the API, a failure saying why without connection details; the bin left of the question box (its height, square, no arrow, the shorter bar); 16 Nov 2026: `frontend/` holding only the page and its client (and its Dockerfile copying nothing else), the conversation's spend taken from the API (added up only when nothing is saved) | 33 |
+| `tests/test_evals.py` | [`run_evals.py`](docs/evals.md) and `evals/cases.yaml`, with the model and tools stubbed: the suite meets the checklist (20+ cases, 2+ refusals, the kill-shot in 5 phrasings, each asking and never counting); a malformed `cases.yaml` refused before any call; selection by id and tag; grounding (an invented number fails, a rounded one warns, ids, dates in four formats, thousands separators, digits inside dates and ids not counting); paths into a tool result; the severity case end to end through the real loop and guard: passing when the guard strips the guess, **failing on the 5 Nov behaviour**, failing on an invented count; a failed model call as ERROR, not FAIL; a changed pinned value reported; the proxy's cost header read per call, list price as the fallback; **`max_model_calls`** counted from the log (failed calls included), validated, failing end to end when the model was called; **the guardrail cases** (5+ out-of-scope, 5+ PDPA, 3+ injection, each refused with no model call, no real name in the file); **PDPA on every answer**: names read from the dump, found however written, reported by code, masked in what's printed and saved, `{name:EMP001}` filled in and never recorded; the runner refusing to start without the guard's name list; the app and the runner both reading the proxy's cost on the same call; found on the first full run (10 Nov 2026): a turn refused in code costing $0, not unknown, so the run's proxy total still shows | 38 |
+| `tests/test_spend.py` | [`spend.py`](docs/agent_app.md#spend-what-each-question-cost-and-the-budget-7): the key's spend against its budget from the proxy's `/key/info` (the reply as the real proxy gave it), the percentage and the 80% warning, a key with no cap, the request sent with the app's own key, a down proxy, refused key or bad reply never raising; settings read from the environment, and cleared in the tests so yours don't leak in; the CLI | 10 |
+| `tests/test_multiturn.py` | [`agent_app.py`](docs/agent_app.md#relative-dates-and-follow-ups-5), `run_evals.py`, `cases.yaml`: **multi-turn context** (HARNESS_CHECKLIST.md section 5). Where the data ends, read from each source once (DATE, date text, DATETIME text), no dates without a database or when it's down (not cached, tried again); today = the calendar's date in Singapore unless `AGENT_TODAY` freezes it; last month by the calendar, with month and year boundaries (December into January, a leap February); the latest full month the data has; the dates in words in the system prompt (today, last month, where each source ends, the June fallback), no fallback on live data, and without the data's dates an instruction to ask; the dates reaching the model on every question, refreshed not stacked, after a reload too, `dates_unknown` logged, a refused question reading nothing; a follow-up reaching the model with the earlier turns and one system prompt; the dates counting as eval grounding and a month nobody gave the model not; real multi-turn cases ("what about last month?", after a refusal, turning into PDPA), each follow-up refused by the guard exactly when its case says so; the frozen `today:` in `cases.yaml`, the runner reading it, and the October / June dates the cases expect following from it; found on the first real eval run (10 Nov 2026): **a period after the data ends run again in code for the latest full month** (October asked, June added, both results and a note to the model, `period_after_data` logged once, both cited), a period inside the data passed through unchanged, one running past the data's end noted (`period_past_data`), nothing changed without the data's dates; found on the same run: **"still open" on data that ends in June**, the data's end date added when a question asks how things stand now ("still", "currently", "now", "today", ...) and the answer doesn't give it (in the history too, `caveat_added`), never when the answer gives the date in any of four forms, the question isn't about now ("the current scale" isn't), the data is live, or the tool asked a question back | 33 |
+| `tests/test_clarify.py` | [`agent_app.py`](docs/agent_app.md#words-the-data-cant-take-as-written): found 10 Nov 2026 ("completed in nov 202" read as 2026 and as CLOSED, neither said): **a year written short** found in five spellings, full years, days and ids left alone; asked about with the two latest years the data has that month in, the model never called, the question and reply kept so the user's year reaches the model with its question; **"completed" read as CLOSED**: the note for "completed", "complete" and "finished", only on work-order tools, carried into a follow-up that names no status ("November 2025") and ended by one that does ("and open?"), reaching the model and the page; found on the full eval run: **the runner's grounding** taking the period a successful tool call ran for (its date arguments), never a refused call's or any other argument; found on the eval run of 12 Nov 2026 (the model said "read as CLOSED" but not that dates are when work orders were raised): **what the answer must say, enforced in code**, a fixed sentence added when either part is missing, in the history too (`caveat_added`), an answer that says both left alone, never on a question back from the tool or another question | 16 |
+| `tests/test_read_log.py` | [`read_log.py`](docs/agent_app.md#reading-the-log-of-one-question-a-working-example): the documented example printed exactly as in the doc; other lines skipped and an unfinished question shown; gcloud output read oldest first from either payload; the guard, eval and chat-error events shown; the command line with `--last` | 5 |
+| `tests/test_logs.py` | [`ingest_logs.py`](docs/ingest_logs.md): ISO/epoch timestamps (incl. the 8-hour bug), timezones, °C/°F, unknown units, every CSV line kept in raw with its line number, clean rows linked to raw, reject reasons, duplicates within the file and against rows already loaded, Windows (CRLF) line endings read exactly like LF | 10 |
+| `tests/test_spares.py` | [`ingest_spares.py`](docs/ingest_spares.md): costs (`$38/spool`), lead times (`2-3 weeks (Germany)`, `local`), metric/imperial sizes, machine lists; on a messy sheet: raw rows and row numbers, `raw_id`, duplicate/missing part numbers, warnings for unreadable values | 18 |
+| `tests/test_cmms.py` | [`ingest_cmms.py`](docs/ingest_cmms.md): dump parsing (`;` and quotes inside strings, comments, multi-row INSERTs with line and tuple numbers, column lists, malformed tuples); ids, numbers (`S$1,050`), day-first dates; the severity flip (old scale inverted, July 2025 left unconverted, a confirmed cutover, out-of-range values never guessed); on a messy dump: duplicates and conflicting duplicates, orphan machines/employees flagged not dropped, raw text kept, `work_orders.status` not clashing with the load status; employee names masked to their last 4 characters in everything printed | 27 |
+| `tests/test_images.py` | [`ingest_images.py`](docs/ingest_images.md): the sample scans' real OCR text (mistakes included); label parsing, the printed severity scale, [four-pass voting](docs/ingest_images.md#four-pass-voting) (majority, format checks, ties, the only reading shaped like a machine id, a misread digit not accepted as a letter), asset-tag and location parsing, id fixes (`BLAST` stays `BLAST`); the 12-plate audit (oil-name misreadings undone before the vote, `ocr_no_majority_*` when no two readings agree, impossible manufacture dates rejected, a label line never taken as the maker), forms that contradict the date rule or settle July 2025, an unreadable scale never guessed, a name never stored as `emp_code`, welding ratings, lb -> kg, every reject reason, the LLM engine, the cache, the folder hash, audit views without OCR text; the [blue-ink severity reader](docs/ingest_images.md#colour-separation-severity-from-the-blue-value-ink) (recovers a lost severity and flags it, never outvotes page readings that agree, abstains on weak or split votes, never returns a wrong digit on a mock of the overlapping line); reads the real scans, incl. forms 904 and 906, if Tesseract is installed; **two engines**: both decision trees (one engine failing, agreement on the cleaned value, the scale-digit guard, blue ink beating the model, free text to the model, a model reading cut short, the Tesseract majority, power compared on kW/phases/volts), `IMAGE_ENGINE` read after `.env`; values read by a person (`REVIEWED`, `fields_raw` untouched); serials (`KO04778956` → `KO4778956`), signatures from the blue ink below the label; **photos**: redaction boxes, failing closed, JPEG encoding, the public view, and on every real form no signature ink left outside the box | 237 |
+| `tests/test_sops.py` | [`ingest_sops.py`](docs/ingest_sops.md): the client's SOPs as delivered; header, UTF-8 where cp1252 garbles the title, BOM/CRLF, the GM's email rejected and never printed, duplicate files and revisions, only the highest revision current, steps with line numbers, references to missing documents, personal data flagged, machine links by id, CMMS name and alias; search for real questions and paraphrases (`SYNONYMS`, the `ENTRY_VERBS`/`SPACE_WORDS` entry rule), nothing for welding, "enter a work order" never found as confined-space entry; MySQL's side kept in step: the `FULLTEXT` stop words, the index rebuild order, a primary key on the stopword table, the stopword table named as InnoDB names it (a database name with a hyphen, error 1231, 13 Nov 2026), `search_text` and plurals, MySQL-style matching never missing an SOP `search_sops` finds, an old `sops` table stopping the load; the whole SOP quoted with its citation | 64 |
+| `tests/test_relationships.py` | [`relationships.py`](docs/relationships.md): orphan/NULL/`ALL` counting, keys compared like MySQL (case, spaces), when a foreign key is added or skipped, table prefixes, no view exposes `emp_name`, incidents (and the form comparison) only offer `severity_5_worst`, the form comparison on one collation with July left open, machines without a nameplate kept, the ER diagram, the run fingerprint, successful and failed runs recorded in `ingest_runs`; the SOP links (the client's 7 all matching the CMMS, an unknown machine kept as an orphan with the FK off, `sop_doc` enforced by `ingest_sops.py`'s composite key and never given a second FK, earlier revisions ambiguous but never orphans) and `machine_sops` (machines without an SOP kept, current revisions only) | 58 |
+| `tests/test_pipeline.py` | [`pipeline.py`](docs/pipeline.md): step order and flags (images after the CMMS), foreign keys dropped first and re-added last (never in a dry run), sample rows with names kept out of the report, counts from every script's summary, the images folder hashed like the load, a failure stopping the rest, `--keep-going`, Ctrl+C, the report's tables, `--save-log`, `--audit`; the SOP step (after the CMMS and before the linking, its folder hashed like the load, one summary line per SOP with the step table and the rejected email's name kept out); the image engine (`--image-engine`, else `IMAGE_ENGINE` from `.env`) passed on and shown in the report header, the photo lines in the summary | 44 |
+| `tests/test_agent_user.py` | [`agent_user.py`](docs/agent_user.md): the allow-list never includes employees or raw tables (nor the raw OCR, nor the raw SOP files), the scans' and SOPs' objects granted, objects with `emp_name` refused, missing objects skipped, a refused object told apart as "not created yet" or "exists but not granted", `SELECT`-only grants after a full reset, password never written into SQL or output, bad user/host/database names rejected, MySQL error codes read correctly, errors never include the password, failed steps named with MySQL's message, no statement needing rights over every database, the access check reads no rows; settings with Windows line endings (from the shell or a CRLF `.env`) read without the trailing `\r`, and no settings leak in from your shell or `.env`; the public photo view granted, the photo table itself probed and refused; the old setting names (`AGENT_DB_*`, `DB_NAME`) alone not enough | 30 |
+| `tests/test_shared.py` | `db_config.py`, `lineage.py`: password never printed, passwords with special characters, values of a failed query kept out of error messages, table-name check, file SHA-256, a run recorded without a file, values passed to MySQL are plain Python types, `getenv` and `load_db_config` strip a trailing `\r` (CRLF `.env`); 14 Nov 2026, **the setting names**: the old names alone not enough (the load fails, naming the new ones, never a value), an empty password allowed, missing settings named by their new names, another login to the shop database | 13 |
+| **Total** | | **1098** |
+
+**Not covered:** anything that needs MySQL, i.e. creating tables, views and users,
+the inserts, the one-transaction rollback and the `ingest_runs` record. After
+changing DDL or load code, check with a real load (`--recreate`) and the
+[audit queries](docs/ingestion.md#audit-queries); after changing a view in
+`relationships.py`, run it and query the view;
+for the app user's grants, `agent_user.py --check` is the real test; for the agent's
+tools, the real-database verification pass in
+[`agent_tools.md`](docs/agent_tools.md#checked-against-the-real-database-5-nov-2026);
+for the agent's answers on the real model and data, the eval suite
+(`python scripts/run_evals.py`, [`evals.md`](docs/evals.md)); for how the
+page looks, running it (`streamlit run frontend/agent_ui.py`).
+
+### Reading the output
+
+A header line says whether the guardrail's staff name list is loaded (`tests/conftest.py`), then
+one line per test file, a dot per test, then the total (shortened here):
+
+```
+tests/test_agent_app.py ..........................                               [  3%]
+tests/test_agent_tools.py ...................................................... [ 11%]
+...
+tests/test_spares.py ..................                                          [100%]
+========== 1098 passed in 26s ==========
+```
+
+| Mark | Meaning |
+|---|---|
+| `.` | passed |
+| `F` | failed: an `assert` was false. pytest prints the values on both sides |
+| `E` | error: the test couldn't run (e.g. an import failed) |
+| `s` | skipped: the tests that build a SQLAlchemy engine or URL skip if SQLAlchemy isn't installed; installing `requirements-dev.txt` fixes it. the tests on the real scans (`test_the_real_scans_read_correctly`, the blue-ink severities, the redaction and signature checks on every form) skip without Tesseract or `data/images/`, `test_the_real_sop_folder` without `data/sops/`, the guardrail and eval tests that need the real staff names without `data/sql/jurongmarine_cmms.sql`, and the API's four HTTP tests without `fastapi` and `httpx` |
+
+### When it doesn't work
+
+| Message | Cause | Fix |
+|---|---|---|
+| `collected 0 items` | pytest isn't running from the repo root, or `tests/` is missing | `cd` to the folder with `pytest.ini`; check `ls tests` |
+| `ModuleNotFoundError: No module named 'ingest_logs'` (or `db_config`, `relationships`, `agent_tools`) | `pytest.ini` not found, the scripts aren't in `scripts/`, or `frontend` is missing from `pythonpath` (`agent_ui`, `api_client`) | Run from the repo root; check `pythonpath = scripts` matches the folder name |
+| `ModuleNotFoundError: No module named 'pandas'` (or `openpyxl`, `cv2`, `openai`, `dotenv`, `pydantic`, `sqlglot`, `yaml`, ...) | Virtual environment not active, or requirements not installed | Activate `.venv`, then `pip install -r requirements-dev.txt` (`yaml` is the `pyyaml` package) |
+| `ModuleNotFoundError: No module named 'mini_langgraph'` | `tests/mini_langgraph.py` wasn't copied with the two new test files | Copy it into `tests/`; the graph and API tests import it (it does nothing where langgraph is installed) |
+| `pytest: command not found` | pytest not installed in the active environment | `pip install -r requirements-dev.txt`, or use `python -m pytest` |
+| `Invalid user name: 'agent_ro\r'` (or another value ending in `\r`) | `.env` has Windows line endings and was loaded with `source .env`, so every value in your shell ends in `\r` | Update to the current scripts (they strip it), and fix the file: `sed -i 's/\r$//' .env`, then open a new shell |
+| Header says `guardrail: STAFF NAME LIST MISSING`; agent, page and eval tests fail; `GuardNotReady` | `scripts/guard_names.py` isn't in the repo (not copied, or git-ignored). The app fails closed without it, so the tests that ask questions fail too | `python scripts/guardrail.py build-names data/sql/jurongmarine_cmms.sql --extra Halim` (with uv: `uv run python ...`), then commit `scripts/guard_names.py` |
+| `test_the_name_list_matches_the_dump_and_holds_no_plaintext` fails with "rebuild guard_names.py" | The staff list in the dump changed since `guard_names.py` was built | `python scripts/guardrail.py build-names data/sql/jurongmarine_cmms.sql --extra Halim` (with uv: `uv run python ...`), then commit `scripts/guard_names.py` |
+
+### Adding a test
+
+- Put it in the file for the script it tests (`test_logs.py`, `test_spares.py`, `test_cmms.py`, `test_images.py`, `test_sops.py`, `test_relationships.py`, `test_agent_tools.py`, `test_agent_app.py`, `test_agent_graph.py`, `test_agent_api.py`, `test_api_client.py`, `test_answer_view.py`, `test_guardrail.py`, `test_agent_ui.py`, `test_evals.py`, `test_spend.py`, `test_multiturn.py`, `test_clarify.py`, `test_agent_user.py`, `test_pipeline.py`), or `test_shared.py` for `db_config.py` / `lineage.py`.
+- Name the function `test_...`, otherwise pytest won't find it.
+- Test the cleaning functions directly with a small `DataFrame` (see `test_temperature_units`), or a whole file through `process()` / `prepare()` using the `tmp_path` fixture (see the `lineage_run` and `messy_sheet` fixtures). For the CMMS script, pass a dump as a string to `parse_dump()` and then `process()` (see `test_pipeline_end_to_end`). For the scans, pass OCR text as an `Extraction` to `process()` (see `test_incident_form_end_to_end`); copy the text from `img_documents_raw.ocr_text` when a real scan misreads; for a two-engine case, give both readings to `interpret_both` (the model's from `fields_raw` / `ocr_notes`). For `relationships.py`, pass key counts to `check_relationship()` (see `test_check_counts_matched_null_and_orphans`). For an SOP question that finds the wrong SOP or none, add it to the search tests in `test_sops.py`, with a `SYNONYMS` entry (or an `ENTRY_VERBS`/`SPACE_WORDS` case) if it's a paraphrase. For a tool that answers wrong on a real call, add that exact question and arguments to `test_agent_tools.py` using the SQLite fixture, with a comment pointing at the real-data check that found it. For a bug in the agent's turn (a tool call not round-tripping right, a bad degrade-on-failure path), add it to `test_agent_app.py` (through `ask()`) or `test_agent_graph.py` (a node or the graph's structure) with the chat call and `agent_tools.run_tool` both stubbed — no database or real LLM call needed. For a question the guardrail wrongly refuses or lets through, add the exact phrasing to the right list in `test_guardrail.py` (`IN_SCOPE_MORE`, `OUT_OF_SCOPE`, `INJECTION`, `PDPA`) and to `cases.yaml`, before changing a pattern; never write a real staff name in a test (use the `fake_staff` fixture, or `{name:EMP001}` in `cases.yaml`). For a wrong answer on the real model, add the question to `evals/cases.yaml` ([Adding a case](docs/evals.md#adding-a-case)); a bug in the runner's own checks goes in `test_evals.py`. For the page, put the logic in a plain function in `agent_ui.py` (as `evidence_tabs()` and `settle_cut_off()` are) and test that in `test_agent_ui.py`; Streamlit itself isn't needed, and a page test that needs the API uses `api_client.ServiceTransport` over a test `AgentService`. For how an answer is built or saved, `test_answer_view.py`. For the API, test `AgentService` directly (it returns a `Reply`); only what is about HTTP itself needs the `client` fixture.
+- When you find a new problem in the client's data, add a test with that exact value **before** fixing the code. It fails first, then passes with the fix, and it keeps the problem from coming back. The harness checklist asks for this pattern in your git history.
+
+## Rules worth knowing
+
+How the app must treat the data. Rules about loading it (timezones, temperatures, spares
+units, foreign keys, adding an ingest script) are in
+[`docs/ingestion.md`](docs/ingestion.md#rules-for-the-data).
+
+**Severity:** the CMMS scale flipped from 1 = worst to 5 = worst in July 2025.
+`severity_5_worst` puts every incident on the new scale; always query it, never
+`severity_as_logged`. Incidents from July 2025 are left unconverted until the client
+confirms the switch-over day; then re-run `ingest_cmms.py` with
+`--severity-cutover <date> --severity-ambiguous-until none`. See
+[`ingest_cmms.md`](docs/ingest_cmms.md). Scanned forms print their own scale;
+`img_incident_reports.severity_5_worst` uses it, and `incident_report_vs_cmms` shows
+where form and CMMS disagree ([`ingest_images.md`](docs/ingest_images.md)). The agent's
+`count_incidents` / `list_incidents` tools enforce the same rule in code: a severity
+number must come with the scale it's on, or the tool asks rather than assumes
+([`agent_tools.md`](docs/agent_tools.md)).
+
+**Scans:** cite the image file (`img_*_audit.source_file`) and show the photo
+(`img_files_public`: incident forms only redacted). Treat a value flagged
+`engines_disagree_*`, `ocr_disagreed_*` or `ocr_no_majority_*` as read from a poor photo and
+say so. A severity flagged `read_from_value_ink_severity` was read from the blue ink alone,
+because the printed label covered it; one flagged `checked_by_eye_*` was read by a person.
+A machine with `has_nameplate = 0` has no nameplate photo: say so rather than answer from
+model memory.
+
+**SOPs:** find the SOP with `MATCH (search_text) AGAINST (search_terms(question))`, decide
+with `search_sops` (no match = "no SOP in the data covers this"), and quote the whole SOP
+from `sop_steps_audit` with its revision and line numbers, never one step on its own. See
+[`ingest_sops.md`](docs/ingest_sops.md#answering-from-the-sops). The agent's `find_sop` tool
+is the one path the app uses to answer this; see [The agent's tools](#the-agents-tools).
+
+**Employee names (PDPA):** `emp_name` stays in `cmms_employees`. None of the linking
+views select it; they give `emp_code`, trade and shift only. The app connects as the
+read-only user from `agent_user.py`, which the database stops from reading names, so
+this holds whatever the model is asked. On top of that, the guardrail refuses any
+question asking for a person's name or personal details, or naming a member of staff, before
+it reaches the model, and stops a staff name, NRIC, phone number or e-mail in an answer
+([`guardrail.md`](docs/guardrail.md)); the eval suite checks every answer for staff names.
+A question it refuses is kept only as a placeholder, in the model's history and in the saved
+conversations alike ([`conversations.md`](docs/conversations.md)).
+Scanned forms keep only `EMP` codes and whether
+the form was signed, and their photos are stored only redacted. See
+[Database access for the app](#database-access-for-the-app-pdpa) and
+[`relationships.md`](docs/relationships.md#views).

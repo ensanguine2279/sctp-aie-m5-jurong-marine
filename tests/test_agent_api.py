@@ -255,6 +255,23 @@ def test_reading_one_conversation_back(scripted):
     assert r.status == 200 and r.body["turns"] == 1
     assert [m["role"] for m in r.body["messages"]] == ["user", "assistant"]
     assert r.body["spend"]["line"].startswith("This conversation:")
+    assert r.body["spend"]["questions"] == 1
+
+
+def test_every_answer_carries_the_conversations_spend_so_the_page_adds_nothing(scripted):
+    """Phase 4 (16 Nov 2026): the page no longer has the sum; each answer brings the total."""
+    convs = conversations()
+    svc = service(convs)
+    scripted("One.")
+    first = svc.ask("first").body
+    scripted("Two.")
+    second = svc.ask("second", first["session_id"]).body
+    assert first["spend"]["questions"] == 1 and second["spend"]["questions"] == 2
+    assert second["spend"] == svc.session(first["session_id"]).body["spend"]
+    assert set(second["spend"]) == {"cost_usd", "questions", "complete", "line"}
+    scripted("Alone.")
+    unsaved = service(None).ask("hello").body
+    assert unsaved["session_id"] is None and unsaved["spend"]["questions"] == 1
     assert svc.session("nope").status == 422
     assert svc.session(conv.new_id()).status == 404
 

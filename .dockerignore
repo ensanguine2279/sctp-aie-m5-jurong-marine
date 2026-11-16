@@ -1,10 +1,11 @@
+# The repo root's .dockerignore (the API's image).
 .env
 .env.*
 .git
-.venv
-__pycache__
-logs
-data
-tests
-docs
-*.xlsx
+.venv/
+data/
+docs/
+tests/
+logs/
+frontend/
+**/__pycache__/

@@ -1,4 +1,4 @@
-"""Tests for scripts/api_client.py, the page's only way to the agent (phase 3, 15 Nov 2026).
+"""Tests for frontend/api_client.py, the page's only way to the agent (phase 3, 15 Nov 2026).
 
 The HTTP side runs on a stand-in for urllib's opener, so no server or network is needed. The
 end-to-end tests use ServiceTransport: the client calls a real agent_api.AgentService, which
@@ -231,3 +231,105 @@ def test_photos_come_through_the_client_by_hash(monkeypatch):
 def test_a_bad_question_streams_one_error_event():
     c = client_for(service(conversations()))
     assert [e["event"] for e in c.ask_stream("   ")] == ["error"]
+
+
+# ---------------------------------------- the private API on Cloud Run (16 Nov 2026) ---
+
+def jwt(exp):
+    import base64
+
+    def part(d):
+        return base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")
+    return f"{part({'alg': 'RS256'})}.{part({'aud': 'x', 'exp': exp})}.sig"
+
+
+class Clock:
+    def __init__(self, t):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def metadata_server(tokens, seen):
+    def opener(req, timeout=None):
+        seen.append(req)
+        return FakeReply(body=tokens.pop(0).encode())
+    return opener
+
+
+def test_the_identity_token_comes_from_the_metadata_server_for_the_apis_url():
+    seen = []
+    tok = ac.GoogleIdToken("https://jme-agent-api-abc.a.run.app/",
+                           opener=metadata_server([jwt(10_000)], seen), clock=Clock(1_000))
+    assert tok() == jwt(10_000)
+    req = seen[0]
+    assert req.full_url.startswith(ac.METADATA_TOKEN_URL + "?audience=")
+    assert "audience=https%3A%2F%2Fjme-agent-api-abc.a.run.app" in req.full_url
+    assert req.get_header("Metadata-flavor") == "Google"
+
+
+def test_the_token_is_kept_until_shortly_before_it_expires():
+    seen, clock = [], Clock(1_000)
+    tok = ac.GoogleIdToken("https://api.run.app", clock=clock,
+                           opener=metadata_server([jwt(4_600), jwt(8_200)], seen))
+    tok()
+    clock.t = 4_600 - ac.TOKEN_MARGIN - 1
+    assert tok() == jwt(4_600) and len(seen) == 1                # still good: not fetched
+    clock.t = 4_600 - ac.TOKEN_MARGIN
+    assert tok() == jwt(8_200) and len(seen) == 2                # near expiry: a new one
+
+
+def test_a_token_without_a_readable_expiry_is_still_renewed():
+    seen, clock = [], Clock(0)
+    tok = ac.GoogleIdToken("https://api.run.app", clock=clock,
+                           opener=metadata_server(["a.b.c", "d.e.f"], seen))
+    assert tok() == "a.b.c"
+    clock.t = ac.TOKEN_FALLBACK_LIFE - ac.TOKEN_MARGIN
+    assert tok() == "d.e.f"
+    assert ac.token_expiry("not-a-jwt") is None and ac.token_expiry(jwt(5)) == 5.0
+
+
+def test_no_metadata_server_is_an_api_error_that_says_what_to_do():
+    tok = ac.GoogleIdToken("https://api.run.app",
+                           opener=opener_returning(raise_=urllib.error.URLError("no host")))
+    with pytest.raises(ac.ApiError) as e:
+        tok()
+    assert e.value.status == 0 and e.value.code == "no_identity_token"
+    assert "unset it locally" in e.value.message
+    junk = ac.GoogleIdToken("https://api.run.app", opener=opener_returning(FakeReply(
+        body=b"<html>not a token</html>")))
+    with pytest.raises(ac.ApiError):
+        junk()
+
+
+def test_every_request_carries_the_token_next_to_the_key():
+    seen = []
+    t = ac.UrllibTransport("https://api.run.app", opener_returning(
+        FakeReply(body=b'{"sessions": []}'), seen=seen))
+    c = ac.ApiClient("https://api.run.app", KEY, transport=t, id_token=lambda: "tok.en.x")
+    c.recent()
+    assert seen[0].get_header("Authorization") == "Bearer tok.en.x"
+    assert seen[0].get_header("X-api-key") == KEY
+    plain = ac.ApiClient("https://api.run.app", KEY, transport=t)
+    plain.recent()
+    assert seen[1].get_header("Authorization") is None          # locally: the key alone
+
+
+def test_google_auth_is_switched_on_only_by_its_setting(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_API_URL", "https://jme-agent-api-abc.a.run.app")
+    monkeypatch.setenv("AGENT_API_KEY", KEY)
+    assert ac.from_env(_empty_env(tmp_path))._id_token is None
+    monkeypatch.setenv("AGENT_API_AUTH", "Google")
+    c = ac.from_env(_empty_env(tmp_path))
+    assert isinstance(c._id_token, ac.GoogleIdToken)
+    assert c._id_token.audience == "https://jme-agent-api-abc.a.run.app"
+    monkeypatch.setenv("AGENT_API_AUTH", "gogle")                      # a typo: refused
+    with pytest.raises(ValueError) as e:
+        ac.from_env(_empty_env(tmp_path))
+    assert "AGENT_API_AUTH" in str(e.value)
+    monkeypatch.setenv("AGENT_API_AUTH", "google")
+    monkeypatch.setenv("AGENT_API_URL", "http://localhost:8000")       # no token for that
+    with pytest.raises(ValueError) as e:
+        ac.from_env(_empty_env(tmp_path))
+    assert "https" in str(e.value)

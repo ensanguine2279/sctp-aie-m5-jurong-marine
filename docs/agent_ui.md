@@ -1,12 +1,16 @@
 # Agent UI: the demo chat page
 
-`scripts/agent_ui.py` is a Streamlit chat page for the agent, built for the demo. It shows the
+`frontend/agent_ui.py` is a Streamlit chat page for the agent, built for the demo. It shows the
 path a question takes, from the person to the agent, the LLM and the tools, and back.
 
 **Since phase 3 (15 Nov 2026) the page is only a front end.** It holds no database login, no
 LiteLLM key and no agent code. Everything comes from the [agent API](agent_api.md) through
-`scripts/api_client.py` (standard library only), with two settings: `AGENT_API_URL` and
-`AGENT_API_KEY`. Grounding, the guardrail on both sides of the model, saving, retention, the
+`frontend/api_client.py` (standard library only), with two settings: `AGENT_API_URL` and
+`AGENT_API_KEY` (plus `AGENT_API_AUTH=google` on Cloud Run, where the API is private).
+Since 16 Nov 2026 (phase 4) the page and its client are alone in `frontend/`, and the page's
+image is built from that folder only, so nothing of the agent's can end up in it (a test
+checks both: the folder holds exactly those two modules, and the page imports none of
+`scripts/`). Grounding, the guardrail on both sides of the model, saving, retention, the
 photos and the spend figure are all the API's, the same for every client. Every answer comes
 with the sources the tools cited, and a **What happened** table listing each model call and
 each tool call in order; while a question runs, a status line follows the agent's steps as the
@@ -28,8 +32,8 @@ Until 15 Nov 2026 the page ran the agent itself (`agent_app.ask()`), read photos
 `sessions.py` (the `agent_sessions` login). All of that moved behind the API; `sessions.py` is
 retired, and the page and any other client now share one store of conversations.
 
-You run it on your laptop next to the API (below). The hosted page on Cloud Run is still the
-build from before phase 3 until the API is hosted too (phase 4): see
+You run it on your laptop next to the API (below), and host it as one of two Cloud Run
+services, the API being the other (private): see
 [Deploying on Cloud Run](#deploying-on-google-cloud-run).
 
 ## What the page shows
@@ -95,7 +99,7 @@ wide layout.
 | `app` | A tool asked a clarifying question that was passed to the user, the app stopped after too many tool calls, a short year was asked back, "completed" was read as CLOSED, or a cut-off conversation was mended |
 | `guardrail` | The question was refused in code before the model was called, the staff name list wasn't loaded (fail closed), or the answer was replaced before it was shown |
 
-The rows are built by the API (`answer_view.trace_rows()`) and sent with the answer.
+The rows are built by the API (`scripts/answer_view.py`, `trace_rows()`) and sent with the answer.
 
 ## The conversation survives a restart
 
@@ -112,9 +116,11 @@ The sidebar's **Recent** list shows the eight newest saved conversations. A titl
 question as the API kept it, so a question the guardrail refused shows only as its placeholder.
 Everyone behind the page password sees the same list: the page has no user accounts.
 
-The conversation's spend in the usage popover is its own total, added up from its answers
-(`answer_view.conversation_spend`), not a counter in page memory, so a reopened conversation
-shows what it cost.
+The conversation's spend in the usage popover is its own total, added up by the API from its
+answers and sent with every answer and with `GET /sessions/{id}`, not a counter in page
+memory, so a reopened conversation shows what it cost. The page adds nothing up itself, except
+when the API isn't saving conversations: then each answer carries only its own cost, and the
+page keeps the running total (`spend_after()`).
 
 **Delete this conversation**, the bin left of the question box, deletes it through
 `DELETE /sessions/{id}` (its checkpoints and its row) after a confirm, and starts a new one.
@@ -148,7 +154,7 @@ wants. One click away whether or not the model said them.
 When a tool cites a scan (a nameplate photo or an incident form), the page shows the photo in
 the answer's **Photos** tab, so "check the photo" in an answer is something the user can do
 there and then. The model never handles images or links: the API lists the scans an answer
-cites (`images`: SHA-256, what it is, file name; `answer_view.image_refs()`), and the page
+cites (`images`: SHA-256, what it is, file name; built by the API's `answer_view.image_refs()`), and the page
 fetches each one from `GET /photos/{sha256}` (`photo_items()`), once per answer and cached for
 an hour.
 
@@ -189,10 +195,10 @@ environment (the same `.env` is fine: the page reads only those two, plus `APP_P
 
 ```bash
 # team repo
-pip install -r requirements-app.txt  # streamlit (1.36 or later) and python-dotenv, nothing else
-streamlit run scripts/agent_ui.py
+pip install -r frontend/requirements.txt  # streamlit (1.36 or later) and python-dotenv, nothing else
+streamlit run frontend/agent_ui.py
 # personal repo
-uv run streamlit run scripts/agent_ui.py
+uv run streamlit run frontend/agent_ui.py
 ```
 
 Streamlit opens the page at <http://localhost:8501>.
@@ -204,12 +210,13 @@ agent API can't be reached right now" and stops.
 
 ## Configuration
 
-The page reads three settings, from the environment or `.env`:
+The page reads four settings, from the environment or `.env`:
 
 | Variable | Used for |
 |---|---|
-| `AGENT_API_URL` | The API's address: `http://localhost:8000` locally, the API service's URL when hosted (phase 4). Required: there is no default, so a page that isn't configured says so instead of calling somewhere unexpected |
+| `AGENT_API_URL` | The API's address: `http://localhost:8000` locally, the API service's `https://...run.app` URL when hosted. Required: there is no default, so a page that isn't configured says so instead of calling somewhere unexpected |
 | `AGENT_API_KEY` | The key the API was started with, sent as `X-API-Key`. Required, and never shown in an error |
+| `AGENT_API_AUTH` | `google` on Cloud Run: also send a Google identity token for `AGENT_API_URL`, from the metadata server, because the API is private. Unset locally. Any other value is refused, so a typo can't quietly drop the token |
 | `APP_PASSWORD` | Optional page password. If it is unset, there is no password box |
 
 Everything else (`CMMS_DB_*`, `CONV_DB_URL`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`,
@@ -234,7 +241,7 @@ come back to the page only as the What happened rows.
 | `render_answer()`, `evidence_tabs()`, `last_answer()` | One answer: text, cost line, then its tabs. What happened first on the newest answer |
 | `show_notes()` | The tools' caveats, in the Caveats tab |
 | `photo_items()`, `attach_photos()`, `show_photos()`, `img_html()` | The photos an answer cites, fetched from the API by hash once per answer, with captions; drawn as `<img>` tags with the bytes inside (caption HTML-escaped) |
-| `USAGE_ICON`, `usage_help()` | The usage popover's icon and its tooltip, escaped for Markdown. The totals come from `answer_view.conversation_spend()` / `conversation_line()` |
+| `USAGE_ICON`, `usage_help()`, `spend_after()`, `spend_line()`, `NO_SPEND` | The usage popover's icon and its tooltip, escaped for Markdown; the conversation's spend as the API sent it (added up by the page only when nothing is saved) |
 | `split_latest()`, `history_parts()`, `earlier_label()`, `draw_messages()`, `FOLD_KEY` | The latest exchange drawn open, everything before it folded into one expander, unless the sidebar toggle turns folding off |
 | `TOP_CSS`, `TOP_MARKER`, `TOP_BAR`, `scroll_script()` | The top bar's layout; the invisible component that scrolls a new question into view |
 | `restored()`, `settle_cut_off()`, `interrupted_line()` | A conversation from `GET /sessions/{id}` as the page draws it; a cut-off question shown answered if the API finished it, else taken off with a note |
@@ -251,110 +258,87 @@ is the API's LangGraph thread.
 
 # Deploying on Google Cloud Run
 
-> **Phase 3 (15 Nov 2026): don't redeploy the page from the current code yet.** This section
-> describes the page as deployed on 15 Nov 2026, before phase 3: it runs the agent itself and
-> connects to MySQL as `agent_ro` and `agent_sessions`. The current `agent_ui.py` only calls
-> the agent API, and the API isn't hosted yet; deployed alone it would stop with "Missing
-> setting(s): AGENT_API_URL, AGENT_API_KEY". Phase 4 hosts the API as a second Cloud Run
-> service and replaces this section: the page then needs only `AGENT_API_URL`,
-> `AGENT_API_KEY` and `APP_PASSWORD`, and its image only `agent_ui.py`, `api_client.py`,
-> `answer_view.py` and `streamlit`. Until then, keep the running service as it is.
+Since phase 4 (16 Nov 2026) the hosted app is **two Cloud Run services**, next to the
+[LiteLLM proxy](https://github.com/ensanguine2279/sctp-aie-m5-jurong-marine-llm-proxy). The
+data stays on Aiven:
 
-This runs `scripts/agent_ui.py` as a container on Cloud Run, next to the
-[LiteLLM proxy](https://github.com/ensanguine2279/sctp-aie-m5-jurong-marine-llm-proxy). The database stays on Aiven. The page connects to
-it as the read-only `agent_ro` user, keeps conversations as the `agent_sessions` user, and
-reaches the LLM through the proxy.
+- **`jme-agent-api`**: the agent API (`scripts/`, the repo root's `Dockerfile`). **Private**: Cloud
+  Run lets a request in only with a Google identity token from an account allowed to invoke
+  it, and that account is the page's alone. It holds every secret: `agent_ro`'s password, the
+  proxy key, the conversations' Postgres URL and the API key.
+- **`jme-agent`**: the page (`frontend/`, its own `Dockerfile`). Public, behind `APP_PASSWORD`. It
+  holds only the API's address, the API key and the page password, and runs as its own service
+  account, which is what the API lets in.
 
 ```mermaid
 flowchart LR
-    P["Person<br/>browser"] -->|HTTPS| R["Cloud Run<br/>agent_ui.py"]
-    R -->|"agent_ro, TLS"| A[("Aiven MySQL")]
-    R -->|"agent_sessions, TLS"| A
-    R -->|"member key"| L["LLM proxy<br/>(VM, sslip.io)"]
-    S["Secret Manager"] -.-> R
-    R -->|stderr| G["Cloud Logging"]
+    P["Person<br/>browser"] -->|"HTTPS<br/>APP_PASSWORD"| W["jme-agent<br/>(page, public)<br/>SA jme-agent-page"]
+    W -->|"identity token + X-API-Key"| A["jme-agent-api<br/>(private)<br/>SA jme-agent-api"]
+    A -->|"agent_ro, TLS"| M[("Aiven MySQL<br/>jme_cmms")]
+    A -->|"agent_threads, TLS"| G[("Aiven Postgres<br/>conversations")]
+    A -->|"member key"| L["LLM proxy<br/>(VM, sslip.io)"]
+    S["Secret Manager"] -.-> A
+    S -.->|"API key, page password"| W
+    A -->|stderr| CL["Cloud Logging"]
 ```
 
-**Deployed end to end on 9 Nov 2026**, with conversations saved to `agent_sessions` from the
-hosted page. The problems hit on the way are in [Troubleshooting](#troubleshooting). For the
-redeploy after the settings rename and the move to `jme_cmms` (15 Nov 2026), see
-[Redeploying after the rename](#redeploying-after-the-rename-15-nov-2026).
+Two keys protect the API: **who may call it at all** (Cloud Run's check of the identity token:
+only `jme-agent-page` has `roles/run.invoker`) and **the API's own key** (`X-API-Key`,
+compared in constant time, the same as locally). The page gets its token from the metadata
+server that Cloud Run gives every container (`api_client.GoogleIdToken`, switched on by
+`AGENT_API_AUTH=google`), for the API's URL, and keeps it until five minutes before it expires.
+
+Until 16 Nov 2026 the hosted page was one service that ran the agent itself, connected to MySQL
+as `agent_ro` and `agent_sessions`, and held the proxy key. Its troubleshooting rows for those
+are kept at the end, under [Before phase 4](#before-phase-4-one-service).
 
 ## Files
 
-| File | What it is |
-|---|---|
-| `Dockerfile` | Python 3.12 slim. Installs `requirements-app.txt`, copies `scripts/` and starts Streamlit on `$PORT` |
-| `requirements-app.txt` | Only what the page needs. **Pin the versions** from your working environment before the demo |
-| `.dockerignore` | Keeps `.env`, `data/`, `docs/`, `tests/` and `logs/` out of the image |
-| `.gcloudignore` | Keeps `.env` and `.git` out of the **upload** (below) |
+| File | Service | What it is |
+|---|---|---|
+| `Dockerfile` (repo root) | API | Python 3.12 slim. Installs `requirements-api.txt`, copies `scripts/` (with `guard_names.py`) and starts uvicorn on `$PORT` |
+| `requirements-api.txt` | API | The agent, the databases, FastAPI. **Pin the versions** from your working environment before the demo |
+| `.dockerignore`, `.gcloudignore` (repo root) | API | Keep `.env*`, `data/`, `.git`, `frontend/`, `docs/`, `tests/` and `logs/` out of the image and out of the **upload**: `--source .` first uploads the folder to a Cloud Build bucket, and `data/` holds the client's files |
+| `frontend/Dockerfile` | page | Installs `frontend/requirements.txt`, copies `agent_ui.py` and `api_client.py`, starts Streamlit on `$PORT` |
+| `frontend/requirements.txt` | page | `streamlit` and `python-dotenv`, nothing else |
+| `frontend/.dockerignore`, `frontend/.gcloudignore` | page | Keep a `.env` out of the page's image and upload |
 
-The image holds no secrets and no data. Settings come from the environment and data comes from
-Aiven.
-
-`.dockerignore` keeps `.env` out of the image, but `gcloud run deploy --source .` first uploads
-the whole folder to a Cloud Build bucket. Keep no `.env` (or `.env.aiven`) in the deploy folder,
-or add a `.gcloudignore` containing:
+The root `.gcloudignore` (project copy: `claude/gcloudignore`):
 
 ```
 .env
 .env.*
 .git
+.venv/
 __pycache__/
+*.pyc
+data/
+logs/
+evals/results/
+frontend/
+docs/
+tests/
 ```
 
-The hosted page never reads a `.env`: every setting comes from `--set-env-vars` and
-`--set-secrets`.
+Neither image holds a secret or any data: settings come from `--set-env-vars` and
+`--set-secrets`, data from Aiven. `scripts/guard_names.py` (the staff names as hashes) must be
+committed: without it the API refuses to start (fail closed).
 
 ## 0. Get the files into Cloud Shell
 
-`gcloud run deploy --source .` builds whatever is in the current folder, so the files must be in
-Cloud Shell first. You need exactly these four items:
-
-```
-Dockerfile
-.dockerignore            # a hidden file: make sure it is included
-requirements-app.txt
-scripts/
-```
-
-Nothing else is needed. The `Dockerfile` copies the whole of `scripts/`, and `.dockerignore`
-keeps everything else out.
-
-**Option A: the zip, like the proxy kit.** On your computer, from the repo root:
+The simplest is git: commit everything, then in Cloud Shell `git clone <repo-url> && cd <repo>`
+(or `git pull` in the existing clone). Check:
 
 ```bash
-zip -r jme-agent.zip Dockerfile .dockerignore requirements-app.txt scripts -x "scripts/__pycache__/*"
+ls -la Dockerfile .dockerignore .gcloudignore requirements-api.txt scripts/agent_api.py \
+       scripts/guard_names.py frontend/Dockerfile frontend/agent_ui.py frontend/api_client.py
 ```
 
-On Windows without `zip`, select those four items in Explorer, then choose **Send to** and
-**Compressed folder**. Check that `.dockerignore` made it into the zip, because hidden files are
-easy to miss.
+All must exist. **Cloud Shell opens in your home folder after a reconnect**: `cd` into the
+clone before every deploy. (Deploying from your own computer works the same if `gcloud` is
+installed and logged in there.)
 
-Then, in Cloud Shell, open the ⋮ menu, choose **Upload** and pick `jme-agent.zip`. Unzip it and
-check the files:
-
-```bash
-mkdir -p jme-agent && unzip -o jme-agent.zip -d jme-agent && cd jme-agent
-ls -la Dockerfile .dockerignore requirements-app.txt scripts/agent_ui.py   # all four must exist
-```
-
-**Option B: git.** This works if the team repo on GitHub holds the `Dockerfile` and
-`requirements-app.txt` at the repo root (commit them first):
-
-```bash
-git clone <repo-url> && cd <repo>
-```
-
-**Option C: deploy from your own computer.** If `gcloud` is installed and logged in there, run
-section 2 from the repo root on your computer and skip the upload.
-
-Whichever option you use, stay in that folder for section 2. The deploy command ends with
-`--source .`, which means the current folder. **Cloud Shell opens in your home folder after a
-reconnect**, so `cd ~/jme-agent` (or your clone) again before every deploy, and run the `ls -la`
-check.
-
-## 1. One-off setup (Cloud Shell)
+## 1. One-off setup
 
 ```bash
 PROJECT=your-project-id
@@ -363,162 +347,179 @@ gcloud config set project $PROJECT
 gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
     artifactregistry.googleapis.com secretmanager.googleapis.com
 
-# secrets (printf, so no trailing newline is stored)
-printf '%s' 'THE_AGENT_RO_PASSWORD'      | gcloud secrets create agent-db-password         --data-file=-
-printf '%s' 'THE_SESSION_USER_PASSWORD'  | gcloud secrets create agent-session-db-password --data-file=-
-printf '%s' 'YOUR_PROXY_MEMBER_KEY'      | gcloud secrets create openai-api-key            --data-file=-
-printf '%s' 'A_PAGE_PASSWORD'            | gcloud secrets create app-password              --data-file=-
+# One service account per service: each gets only its own secrets, and the API lets in only
+# the page's.
+gcloud iam service-accounts create jme-agent-api  --display-name "JME agent API"
+gcloud iam service-accounts create jme-agent-page --display-name "JME agent page"
+API_SA=jme-agent-api@$PROJECT.iam.gserviceaccount.com
+PAGE_SA=jme-agent-page@$PROJECT.iam.gserviceaccount.com
 
-# let the service read them (default Compute Engine service account)
-SA=$(gcloud projects describe $PROJECT --format='value(projectNumber)')-compute@developer.gserviceaccount.com
-for s in agent-db-password agent-session-db-password openai-api-key app-password; do
-  gcloud secrets add-iam-policy-binding $s --member=serviceAccount:$SA \
+# Two new secrets (printf: no trailing newline). agent-db-password, openai-api-key and
+# app-password exist from the first deploy.
+printf '%s' 'THE_CONV_DB_URL_FROM_YOUR_AIVEN_SETTINGS' | gcloud secrets create conv-db-url --data-file=-
+python3 -c "import secrets; print(secrets.token_urlsafe(32), end='')" \
+    | gcloud secrets create agent-api-key --data-file=-
+
+for s in agent-db-password openai-api-key conv-db-url agent-api-key; do
+  gcloud secrets add-iam-policy-binding $s --member=serviceAccount:$API_SA \
+      --role=roles/secretmanager.secretAccessor
+done
+for s in agent-api-key app-password; do
+  gcloud secrets add-iam-policy-binding $s --member=serviceAccount:$PAGE_SA \
       --role=roles/secretmanager.secretAccessor
 done
 ```
 
-The secret names use **hyphens**, exactly as above, and the deploy command refers to them by
-these names. Check with `gcloud secrets list --format='value(name)'`; a secret made with
-underscores (`agent_session_db_password`) is a different secret, and the grant above doesn't
-cover it. The secrets' names didn't change with the settings rename: only the environment
-variable each one is attached to did (section 2).
+- **`conv-db-url`** is the `CONV_DB_URL` you used with `conversations.py setup` and `check`
+  against Aiven Postgres (the `agent_threads` user, ending in `?sslmode=require`). Never the
+  admin URL (`CONV_DB_ADMIN_URL`): that one is for setup only and is never deployed.
+- **`agent-api-key`** is new and random; both services read the same secret, so they always
+  agree. Your local `.env` keeps its own `AGENT_API_KEY`.
+- **`agent-db-password`** must still match the `CMMS_DB_AGENT_PASSWORD` that `agent_user.py`
+  set on Aiven (compare `gcloud secrets versions access latest --secret=agent-db-password |
+  sha256sum` with the SHA-256 of your setting).
+- **Aiven allow-lists**: Cloud Run has no fixed outgoing address, so both the MySQL and the
+  Postgres service must allow it (all addresses, or a static egress IP).
 
-Use the **agent_ro** password, never the owner's. `CMMS_DB_USERNAME` and `CMMS_DB_PASSWORD`
-are not set on Cloud Run, and `connect()` refuses the owner account anyway. The agent_ro
-password is the `CMMS_DB_AGENT_PASSWORD` that `agent_user.py` (or `pipeline.py --agent setup`)
-used against Aiven; the session password is the `CMMS_DB_SESSION_PASSWORD` that
-`sessions.py setup` used. Run both (and their checks) from your computer before the first
-deploy, with `--env-file` pointing at your Aiven settings. To confirm a secret holds the same
-password without printing either, compare
-`gcloud secrets versions access latest --secret=agent-session-db-password | sha256sum` with the
-SHA-256 of the value in your settings file.
-
-## 2. Deploy (from the folder with the `Dockerfile`, section 0)
+## 2. Deploy the API (from the repo root)
 
 ```bash
-gcloud run deploy jme-agent --source . --region $REGION \
-  --allow-unauthenticated --session-affinity \
-  --min-instances 0 --max-instances 1 --memory 1Gi --timeout 600 \
-  --set-env-vars "CMMS_DB_HOST=YOUR-SERVICE.aivencloud.com,CMMS_DB_PORT=12345,CMMS_DB_NAME=jme_cmms,CMMS_DB_AGENT_USERNAME=agent_ro,CMMS_DB_SESSION_USERNAME=agent_sessions,OPENAI_BASE_URL=https://35-240-177-226.sslip.io,AGENT_LOG_FILE=off" \
-  --set-secrets "CMMS_DB_AGENT_PASSWORD=agent-db-password:latest,CMMS_DB_SESSION_PASSWORD=agent-session-db-password:latest,OPENAI_API_KEY=openai-api-key:latest,APP_PASSWORD=app-password:latest"
+gcloud run deploy jme-agent-api --source . --region $REGION \
+  --no-allow-unauthenticated --service-account $API_SA \
+  --min-instances 0 --max-instances 1 --memory 1Gi --timeout 600 --concurrency 20 \
+  --set-env-vars "CMMS_DB_HOST=YOUR-SERVICE.aivencloud.com,CMMS_DB_PORT=12345,CMMS_DB_NAME=jme_cmms,CMMS_DB_AGENT_USERNAME=agent_ro,OPENAI_BASE_URL=https://35-240-177-226.sslip.io,AGENT_LOG_FILE=off" \
+  --set-secrets "CMMS_DB_AGENT_PASSWORD=agent-db-password:latest,OPENAI_API_KEY=openai-api-key:latest,CONV_DB_URL=conv-db-url:latest,AGENT_API_KEY=agent-api-key:latest"
+
+API_URL=$(gcloud run services describe jme-agent-api --region $REGION --format='value(status.url)')
+echo $API_URL
 ```
 
-**Replace `YOUR-SERVICE.aivencloud.com` and `12345`** with the `CMMS_DB_HOST` and
-`CMMS_DB_PORT` from your Aiven settings. The deploy succeeds with the placeholders, but the
-page then can't reach MySQL. Keep the filled-in command in a script in Cloud Shell (it holds no
-passwords) so every redeploy uses the same values. To fix only the settings on a running
-service, without a rebuild:
+**Replace `YOUR-SERVICE.aivencloud.com` and `12345`** with your Aiven `CMMS_DB_HOST` and
+`CMMS_DB_PORT`. Keep the filled-in commands in a script in Cloud Shell (they hold no passwords).
+
+- `--no-allow-unauthenticated`: nobody reaches it without a token from an invoker.
+- `--max-instances 1`: one question at a time per conversation is enforced by a lock inside
+  the process; two instances would each have their own.
+- `--timeout 600`: a streamed answer may take a while; the API itself gives up on a silent
+  question after 300 s.
+- `--concurrency 20`: a streamed question holds a request open; 20 is plenty for the demo.
+
+Check it as yourself (a project owner may invoke any service):
 
 ```bash
-gcloud run services update jme-agent --region $REGION \
-  --update-env-vars "CMMS_DB_HOST=...,CMMS_DB_PORT=...,CMMS_DB_NAME=..."
+curl -s -H "Authorization: Bearer $(gcloud auth print-identity-token)" $API_URL/health
+curl -s -o /dev/null -w '%{http_code}\n' $API_URL/health    # without a token: 403
 ```
 
-`--set-env-vars` and `--set-secrets` **replace** the service's whole list, so a deploy with the
-command above also removes any old variables (`DB_HOST`, `AGENT_DB_PASSWORD`, ...) left from an
-earlier deploy. `--update-env-vars` only adds or changes the ones named.
+`/health` must show `"guard_ready": true`, `"sessions": "on"` and `"store": "postgres"`.
 
-`--allow-unauthenticated` makes the URL public, so **`APP_PASSWORD` is what protects the page**.
-The page shows a password box first, and nothing connects until the password is right. If the
-`app-password` secret is missing, the page is open to anyone with the URL.
+## 3. Let the page call it, then deploy the page
 
-To make the page private to Google accounts instead:
+```bash
+gcloud run services add-iam-policy-binding jme-agent-api --region $REGION \
+  --member=serviceAccount:$PAGE_SA --role=roles/run.invoker
 
-1. Deploy with `--no-allow-unauthenticated`.
-2. Grant `roles/run.invoker` to each person who should see it.
-3. Each person opens it with `gcloud run services proxy jme-agent --region $REGION`. This means
-   every viewer needs `gcloud` installed.
+gcloud run deploy jme-agent --source frontend --region $REGION \
+  --allow-unauthenticated --session-affinity --service-account $PAGE_SA \
+  --min-instances 0 --max-instances 1 --memory 512Mi --timeout 3600 \
+  --set-env-vars "AGENT_API_URL=$API_URL,AGENT_API_AUTH=google" \
+  --set-secrets "AGENT_API_KEY=agent-api-key:latest,APP_PASSWORD=app-password:latest"
+```
 
-`--max-instances 1 --session-affinity` keeps a single container and one websocket per
-browser, which Streamlit needs. Conversations themselves no longer depend on it: they are
-saved in MySQL after every answer.
+`jme-agent` is the existing page service: this replaces it in place, with the same URL.
+`--set-env-vars` and `--set-secrets` **replace** its whole lists, so the old `CMMS_DB_*`,
+`OPENAI_*` and the two database passwords are removed from it. `--service-account` moves it
+off the default Compute Engine account.
 
-`AGENT_LOG_FILE=off` stops the page writing the log file. The container's disk is temporary, so
-the file would be lost anyway, and the same lines already go to Cloud Logging through stderr.
+- `AGENT_API_URL` is exactly `$API_URL` (the identity token is issued for that address).
+- `--allow-unauthenticated`: the page is public, so **`APP_PASSWORD` is what protects it**.
+- `--max-instances 1 --session-affinity`: one container and one websocket per browser, which
+  Streamlit needs. `--timeout 3600`: the websocket is cut at the timeout and Streamlit then
+  reconnects; an hour avoids that during the demo.
 
-## Redeploying after the rename (15 Nov 2026)
+## 4. Check it
 
-The page deployed on 9 and 11 Nov reads the old setting names and the `defaultdb` database.
-The current code reads only `CMMS_DB_*`, and the hosted data is now in `jme_cmms`, loaded by
-the `ingest` owner. A redeploy with the old settings would not start ("Set
-CMMS_DB_AGENT_PASSWORD"). In order:
-
-1. **On your computer, against Aiven** (your Aiven settings file, e.g. `.env.aiven`):
-   `pipeline.py --recreate --foreign-keys --agent setup` (creates `agent_ro` on `jme_cmms`),
-   `agent_user.py --check`, `sessions.py setup` and `sessions.py check`, then
-   `run_evals.py` (52/52). Done on 15 Nov 2026.
-2. **Make the two secrets match the passwords those scripts used** (each adds a new version;
-   `latest` is what the deploy reads):
+1. Open the page's URL, enter the password, ask the CNC-02 question: the status box steps
+   through the agent, the What happened tab is first.
+2. The sidebar says conversations are saved. Reload the link: the conversation comes back.
+3. A nameplate question: the Photos tab. Open it again from Recent: the photo is still there.
+4. **The restart proof** (checklist section 5): copy the link, start new revisions of both
+   services, open the link, ask "and what about CNC-03?":
 
    ```bash
-   printf '%s' 'THE_CMMS_DB_AGENT_PASSWORD'   | gcloud secrets versions add agent-db-password --data-file=-
-   printf '%s' 'THE_CMMS_DB_SESSION_PASSWORD' | gcloud secrets versions add agent-session-db-password --data-file=-
+   gcloud run services update jme-agent-api --region $REGION --update-env-vars RESTART=$(date +%s)
+   gcloud run services update jme-agent     --region $REGION --update-env-vars RESTART=$(date +%s)
    ```
 
-   Check without printing them: compare `gcloud secrets versions access latest
-   --secret=agent-db-password | sha256sum` with the SHA-256 of `CMMS_DB_AGENT_PASSWORD` in your
-   Aiven settings.
-3. **Put the current files in the deploy folder** (section 0): `scripts/` from the repo (the
-   whole folder: `db_config.py`, `agent_tools.py`, `sessions.py`, `agent_app.py`,
-   `agent_graph.py`, `agent_ui.py` all changed), `requirements-app.txt` (it has `langgraph`),
-   `Dockerfile`, `.dockerignore`.
-4. **Deploy with the section 2 command**, with `CMMS_DB_NAME=jme_cmms` and your real host and
-   port. It replaces every old variable.
-5. **Check the page**: the sidebar says conversations are saved; ask one of the kill-shot
-   questions and the CNC-02 question; open the What happened tab. In Cloud Run's logs, no
-   `Missing setting(s)` or `Access denied` lines.
-6. **Then clean up on Aiven**, as `avnadmin`, once the page answers from `jme_cmms`: the old
-   tables and views in `defaultdb` are no longer used. Conversations saved in `defaultdb`'s
-   `agent_sessions` stay behind there: the page's Recent list starts empty on `jme_cmms`.
+   The follow-up is answered in context and the usage popover shows the conversation's total.
+5. Logs: **Cloud Run → jme-agent-api → Logs** has one JSON line per event (model calls, tool
+   calls with their arguments, `api_ask`). The page's own log has only Streamlit's lines.
+6. The API stays closed: `curl -s -o /dev/null -w '%{http_code}\n' $API_URL/health` is `403`.
 
-## 3. Before the demo
+## 5. Clean up what phase 4 retired
 
-- **Open the URL a few minutes early.** With `--min-instances 0`, the first load after the
-  service has been idle is slow. For demo day, run
-  `gcloud run services update jme-agent --region $REGION --min-instances 1`. Set it back to 0
-  afterwards, because an idle instance still costs money.
+Once the page answers through the API:
+
+```bash
+gcloud secrets delete agent-session-db-password
+# the default Compute Engine account no longer needs the old secrets:
+SA_OLD=$(gcloud projects describe $PROJECT --format='value(projectNumber)')-compute@developer.gserviceaccount.com
+for s in agent-db-password openai-api-key app-password; do
+  gcloud secrets remove-iam-policy-binding $s --member=serviceAccount:$SA_OLD \
+      --role=roles/secretmanager.secretAccessor
+done
+```
+
+On Aiven MySQL, as `avnadmin`: drop the `agent_sessions` table and the `agent_sessions` user
+(`DROP TABLE jme_cmms.agent_sessions; DROP USER 'agent_sessions'@'%';`, and the same table in
+`defaultdb`), and the old tables and views left in `defaultdb`. Locally, the same for your
+MySQL container if you like.
+
+## 6. Before the demo
+
+- **Warm both services.** With `--min-instances 0` the first request after idling is slow, and
+  the API's start (LangGraph, the database pools) is the slower one. For demo day:
+  `gcloud run services update jme-agent-api --region $REGION --min-instances 1` and the same
+  for `jme-agent`; set both back to 0 afterwards (an idle instance still costs money).
 - **Run the kill-shot questions once on the hosted page.** The What happened table should match
-  what you see on your laptop.
-- **Prove the restart.** Ask a question, copy the link, run
-  `gcloud run services update jme-agent --region $REGION --update-env-vars RESTART=$(date +%s)`
-  (a new revision: a new container with empty memory), open the link and ask a follow-up. The
-  usage popover should show the conversation's total, not $0.
-- **Check the logs** under **Cloud Run → jme-agent → Logs**. Each line is one JSON event: model
-  calls, tool calls with their arguments, and `scale_guess_blocked`.
-- **To update the service**, change the code and run the same `gcloud run deploy` command again.
-- **Failed revisions** can be listed with
-  `gcloud run revisions list --service jme-agent --region $REGION` and removed with
-  `gcloud run revisions delete <name> --region $REGION`. The revision serving traffic can't be
-  deleted. A failed build never creates a revision.
+  your laptop's.
+- **To update** the API: the section 2 command again from the repo root; the page: the section 3
+  deploy command. Each builds only its own image.
+- **From your laptop against the hosted API** (for a test run of the local page or `curl`):
+  `gcloud run services proxy jme-agent-api --region $REGION --port 8000` serves the private API
+  on `http://localhost:8000` with your identity; set `AGENT_API_URL=http://localhost:8000`, the
+  hosted key in `AGENT_API_KEY`, and leave `AGENT_API_AUTH` unset.
 
 ## Troubleshooting
 
-The page shows only the error type (for example `OperationalError`), never the server's text.
-For the MySQL error code, search Cloud Run → jme-agent → Logs for the error type.
+The page shows the API's error message, never a stack trace; the API logs the error type.
 
 | Symptom | Where | Likely cause |
 |---|---|---|
-| `ModuleNotFoundError: streamlit` | Local | Run `pip install -r requirements-app.txt` in the active venv |
-| `TypeError` mentioning `vertical_alignment`, or `AttributeError: ... has no attribute 'popover'` | Local | Streamlit is older than 1.36. Run `pip install -U -r requirements-app.txt` |
-| No password box | Both | `APP_PASSWORD` is not set (or, on Cloud Run, the secret isn't attached) |
-| "Wrong password." when the password is right | Cloud Run | The secret was stored with a trailing newline. Recreate it with `printf '%s'` |
-| Page shows "Couldn't connect as the agent user: Set CMMS_DB_AGENT_PASSWORD ..." | Both | The settings still have the old names (`AGENT_DB_PASSWORD`, `DB_HOST`, ...), which aren't read since 14 Nov 2026. Locally rename them in `.env`; on Cloud Run deploy with the section 2 command |
-| Page shows "Couldn't connect as the agent user" | Both | One of these: wrong `CMMS_DB_HOST`/`CMMS_DB_PORT`; Aiven's allow-list blocks Cloud Run (Cloud Run has no fixed IP, so allow all addresses or add a static egress IP); or Aiven is powered off |
-| Log: `(2003, "Can't connect to MySQL server on 'YOUR-SERVICE.aivencloud.com' ([Errno -2] Name or service not known)")` | Cloud Run | The deploy went out with the placeholder host. Set the real `CMMS_DB_HOST`/`CMMS_DB_PORT` with `gcloud run services update ... --update-env-vars` (section 2). Happened 9 Nov 2026 |
-| Log: `(1045, "Access denied for user 'agent_ro'...")` or `'agent_sessions'` | Cloud Run | The secret differs from the password `agent_user.py` / `sessions.py setup` used (both recreate their user with the password in the settings file). Compare SHA-256s (section 1), add a corrected version, then start a new revision |
-| Log: `(1044, "Access denied for user 'agent_ro'@'%' to database ...")` | Cloud Run | `CMMS_DB_NAME` isn't the database `agent_ro` was granted on (`jme_cmms` since 15 Nov 2026) |
-| The connection error mentions secure transport / SSL | Both | Aiven requires TLS, and `db_config.py` has no SSL option yet. Add a `CMMS_DB_SSL_CA` setting (a small change, with a test) |
-| `cryptography` error at login | Both | `cryptography` is missing from `requirements-app.txt` |
-| `ModuleNotFoundError: langgraph` | Both | An old `requirements-app.txt`: the agent is a LangGraph graph since 12 Nov 2026. Use the current one |
-| "Set OPENAI_API_KEY" | Both | The key isn't set. On Cloud Run, either the secret isn't attached or the service account can't read it |
-| Sidebar: "Conversations aren't being saved (CMMS_DB_SESSION_PASSWORD isn't set)" | Both | Set it in `.env` and restart Streamlit (a browser refresh isn't enough), or attach the `agent-session-db-password` secret on Cloud Run as `CMMS_DB_SESSION_PASSWORD` |
-| Sidebar: "This conversation isn't being saved right now" | Both | The session user can't reach or use its table: `setup` not run, a wrong password, a wrong `CMMS_DB_HOST`, or the table missing. Run `python scripts/sessions.py check`, and on Cloud Run read the MySQL error code in the logs |
-| Spend says "This session: $0.0000 over 0 questions" on a reopened conversation | Both | The page is older than 10 Nov 2026: its spend was a counter in page memory. Deploy the current `agent_ui.py`; it shows "This conversation: ..." added up from the answers |
-| The link opens an empty conversation | Both | The conversation is older than `AGENT_SESSION_DAYS`, was never saved (no answer yet), the link was cut short, or it was saved in `defaultdb` before the move to `jme_cmms` |
-| Deploy: `Permission denied on secret: .../secrets/<name>/versions/latest for Revision service account ...` | Cloud Run | The service account can't read that secret, or the deploy names a secret that differs from the one granted (underscores vs hyphens). Check `gcloud secrets list`, then run the grant loop in section 1 for the names in `--set-secrets` |
-| No What happened tab under an answer | Both | A reloaded answer: the trace isn't saved with the conversation. On a new answer, `agent_app.ask()` didn't log JSON events to the logger it was given |
-| A **broken** image icon under an answer | Cloud Run | An older page that used `st.image`: the browser's second request for `/media/...` missed. Deploy the current `agent_ui.py`, then hard-refresh |
-| "photo not available here" in the Photos tab | Both | The images were loaded with `--no-photos` or before photos were stored, the form couldn't be redacted (`form_image_not_stored`), or `agent_ro` lacks `img_files_public` (re-run `agent_user.py`) |
-| Page loads, then keeps reconnecting | Cloud Run | `--session-affinity` is missing, or more than one instance is running |
-| Build fails in a step named `universal_builder` (exit status 51), log ends with "provide a main.py or app.py" | Cloud Run | Cloud Run found no `Dockerfile` in the folder you deployed from and tried to guess the language. Usually the deploy ran from the home folder (Cloud Shell opens there after a reconnect), or the `Dockerfile` sits in a subfolder or has another name (`Dockerfile.txt`). `cd ~/jme-agent` and run the `ls -la` check in section 0 |
-| Deploy fails while building | Cloud Run | To see the error, run `docker build -t jme-agent .` locally. Or run `gcloud builds list --limit=1`, then `gcloud builds log <ID> --region $REGION \| tail -40` |
+| Page: "The agent API can't be reached right now: The API answered HTTP 403." | page | Cloud Run refused the call before it reached the API: `AGENT_API_AUTH=google` isn't set on the page, the page doesn't run as `jme-agent-page`, or that account lacks `roles/run.invoker` on `jme-agent-api` (section 3) |
+| Page: "... (no_identity_token) ... unset it locally" | local | `AGENT_API_AUTH=google` in your local `.env`: there is no metadata server off Google Cloud. Remove it (use `gcloud run services proxy` to reach the hosted API) |
+| Page: "AGENT_API_AUTH=google needs AGENT_API_URL to be the API's https Cloud Run URL" | page | `AGENT_API_URL` isn't `$API_URL`. Use the URL `gcloud run services describe` prints |
+| Page: "Send the API key in the X-API-Key header. (unauthorised, HTTP 401)" | page | The page's `AGENT_API_KEY` differs from the API's: both must use the `agent-api-key` secret |
+| Page: "Missing setting(s): AGENT_API_URL, AGENT_API_KEY" | page | The page was deployed without the section 3 settings |
+| API revision fails to start; log: "the staff name list isn't loaded" | API | `scripts/guard_names.py` isn't in the image: not committed, git-ignored, or excluded by `.gcloudignore`. Build it (`guardrail.py build-names`) and commit it |
+| API log: "Set AGENT_API_KEY (16 characters or more)" | API | The `agent-api-key` secret isn't attached, or `API_SA` can't read it |
+| API log: "Couldn't connect to the database as the agent user: ..." | API | Wrong `CMMS_DB_HOST`/`CMMS_DB_PORT`/`CMMS_DB_NAME`, Aiven's MySQL allow-list, Aiven powered off, or `agent-db-password` out of step (1045: compare SHA-256s, add a version, new revision) |
+| `/health` says `"sessions": "off (...)"`, the sidebar says conversations aren't saved | API | `conv-db-url` not attached or not readable by `API_SA`, the URL wrong, or Aiven Postgres' allow-list blocks Cloud Run. The reason in brackets names which |
+| Deploy: `Permission denied on secret: ... for Revision service account ...` | both | That service's account can't read a secret it names (section 1's loops), or the name differs (hyphens, not underscores) |
+| `curl $API_URL/health` with a token still 403 | you | Your account isn't an invoker (only owners are by default): grant yourself `roles/run.invoker` on `jme-agent-api`, or use `gcloud run services proxy` |
+| The answer stops mid-way with "The answer stopped arriving" | page | The stream was cut: a new API revision while answering, or `--timeout` too short. The API still finishes and saves it: reopen the conversation from Recent |
+| Page loads, then keeps reconnecting | page | `--session-affinity` missing or more than one instance |
+| Build fails in `universal_builder` ("provide a main.py or app.py") | both | No `Dockerfile` where you deployed from: run the API deploy from the repo root and the page's with `--source frontend`; check section 0's `ls` |
+| Deploy fails while building | both | `gcloud builds list --limit=1`, then `gcloud builds log <ID> --region $REGION \| tail -40`; or build locally (`docker build -t api .`, `docker build -t page frontend`) |
+| "photo not available here" in the Photos tab | API | The scan isn't stored (loaded with `--no-photos`, a form that couldn't be redacted), or `agent_ro` lacks `img_files_public` (re-run `agent_user.py`) |
+| No What happened tab under an answer | — | A reloaded answer: the trace isn't saved with the conversation |
+
+### Before phase 4: one service
+
+Problems met on the single-service page (9 to 15 Nov 2026), kept for the record:
+the placeholder host deployed (2003, 9 Nov); `agent_ro` 1045 after the rename (the secret out
+of step, 15 Nov); a trailing newline in a secret ("Wrong password.", fixed with `printf '%s'`);
+a secret made with underscores that the grant didn't cover; `st.image`'s second request for
+`/media/...` missing after a redeploy (broken photos, 7 Nov: the page now draws photos as
+data URLs); the spend shown as "$0.0000 over 0 questions" on a reopened conversation (a page
+older than 10 Nov). 

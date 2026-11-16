@@ -1,0 +1,5 @@
+# The page (agent_ui.py) and its client (api_client.py, standard library only). Nothing of
+# the agent's: the page talks only to the agent API. Pin these from your working environment
+# (`pip freeze` / `uv pip freeze`) before the demo.
+streamlit>=1.36        # st.popover, st.columns' vertical_alignment, st.bottom
+python-dotenv

@@ -1,4 +1,4 @@
-"""Tests for scripts/agent_ui.py, the Streamlit page (no Streamlit needed: it is imported
+"""Tests for frontend/agent_ui.py, the Streamlit page (no Streamlit needed: it is imported
 inside main()). Since phase 3 (15 Nov 2026) the page only talks to the agent API, so these
 test what it draws and how it reads the API's replies; the end-to-end tests drive the page's
 helpers through api_client's ServiceTransport, the real AgentService and the real agent graph.
@@ -29,8 +29,40 @@ def test_the_page_imports_no_agent_database_or_key_code():
         elif isinstance(n, ast.ImportFrom) and n.module:
             top.add(n.module.split(".")[0])
     assert not top & {"agent_app", "agent_tools", "agent_graph", "sessions", "spend",
-                      "guardrail", "db_config", "conversations", "sqlalchemy", "openai"}
-    assert {"api_client", "answer_view"} <= top
+                      "guardrail", "db_config", "conversations", "sqlalchemy", "openai",
+                      "answer_view", "agent_api"}
+    assert "api_client" in top
+
+
+def test_the_page_folder_holds_only_the_page_and_its_client():
+    """The page's image is built from frontend/ alone (16 Nov 2026): every module the page
+    imports from the repo must be in that folder, so nothing of the agent's can be needed."""
+    import pathlib
+    folder = pathlib.Path(ui.__file__).resolve().parent
+    assert folder.name == "frontend"
+    assert pathlib.Path(ac.__file__).resolve().parent == folder
+    mine = {p.stem for p in folder.glob("*.py")}
+    assert mine == {"agent_ui", "api_client"}
+    docker = (folder / "Dockerfile").read_text()
+    assert "COPY agent_ui.py api_client.py" in docker and "scripts" not in docker
+
+
+def test_the_conversations_spend_is_the_apis_when_saved_and_added_up_when_not():
+    saved = {"session_id": "a" * 32, "usage": {"cost_usd": 0.002},
+             "spend": {"cost_usd": 0.005, "questions": 3, "complete": True,
+                       "line": "This conversation: $0.0050 over 3 questions"}}
+    prev = {"cost_usd": 0.003, "questions": 2, "complete": True}
+    assert ui.spend_after(prev, saved) == saved["spend"]           # the API's figure, as is
+    unsaved = {"session_id": None, "usage": {"cost_usd": 0.002, "cost_complete": True},
+               "spend": {"cost_usd": 0.002, "questions": 1, "complete": True}}
+    got = ui.spend_after(prev, unsaved)
+    assert got == {"cost_usd": 0.005, "questions": 3, "complete": True}
+    assert ui.spend_line(got) == "This conversation: $0.0050 over 3 questions"
+    unknown = ui.spend_after(ui.NO_SPEND, {"usage": {"cost_usd": None}})
+    assert unknown["complete"] is False and ui.spend_line(unknown).startswith(
+        "This conversation: at least $0.0000 over 1 question")
+    assert ui.spend_after(ui.NO_SPEND, {"usage": {"cost_usd": True}})["cost_usd"] == 0.0
+    assert ui.spend_line(saved["spend"]) == saved["spend"]["line"]
 
 
 def test_the_page_password_check():

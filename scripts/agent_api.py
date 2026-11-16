@@ -148,6 +148,15 @@ def outcome(events: list[dict]) -> tuple[str | None, str | None]:
     return refused, replaced
 
 
+def spend_of(shown: list[dict]) -> dict:
+    """A conversation's spend as the API reports it (GET /sessions/{id}, and every answer):
+    added up here, from each answer's cost, so a front end never does the sum. For an answer
+    that wasn't saved (no conversations), `shown` is that question alone."""
+    cost, questions, complete = av.conversation_spend(shown)
+    return {"cost_usd": round(cost, 6), "questions": questions, "complete": complete,
+            "line": av.conversation_line(cost, questions, complete)}
+
+
 def answer_entry(answer: str, sources: list[str], notes: list[str], usage: dict,
                  images: list[dict] | None = None) -> dict:
     """The answer as it is drawn and saved, whichever front end asked the question. images:
@@ -307,6 +316,7 @@ class AgentService:
                 "usage": _usage_out(usage), "cost_line": entry["cost"],
                 "trace": av.trace_rows(events),
                 "turns": sum(1 for m in shown if m.get("role") == "user"),
+                "spend": spend_of(shown),
                 "saved": saved, "save_error": save_error}
         if (sid or self.convs) and not saved:
             body["save_error"] = save_error or "not saved"
@@ -357,10 +367,9 @@ class AgentService:
             err, shown = self._load(session_id)
             if err:
                 return err
-            cost, questions, complete = av.conversation_spend(shown)
-            return Reply(200, {"session_id": session_id, "turns": questions, "messages": shown,
-                               "spend": {"cost_usd": round(cost, 6), "complete": complete,
-                                         "line": av.conversation_line(cost, questions, complete)}})
+            spent = spend_of(shown)
+            return Reply(200, {"session_id": session_id, "turns": spent["questions"],
+                               "messages": shown, "spend": spent})
         except Exception as e:
             _emit("api_error", route="session", error=type(e).__name__)
             return error(500, "internal", "Something went wrong reading that conversation.")
