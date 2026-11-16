@@ -12,16 +12,20 @@ is only what HTTP needs:
     - conversations by id (13 Nov 2026: conversations.py, Postgres): the agent's state is
       kept by LangGraph's checkpointer, one thread per conversation, saved when a turn
       finishes; a threads table keeps each one's title, question count and the display copy
-      the page draws (agent_ui.display_copy, so a refused question is only its placeholder),
-      and gives the recent list and the 7-day retention. The page still uses sessions.py
-      (MySQL) until it calls this API (phase 3), so the two don't share conversations yet;
+      the page draws (answer_view.display_copy, so a refused question is only its
+      placeholder), and gives the recent list and the 7-day retention. Since phase 3
+      (15 Nov 2026) the Streamlit page calls this API for everything (scripts/api_client.py),
+      so there is one store of conversations, whichever front end asked;
     - one question at a time per conversation in this process (a lock per session id), so
       two requests can't both append to the same conversation and lose one on save;
     - errors as JSON with a code, never a stack trace;
     - /ask/stream (11 Nov 2026): the same question as /ask, as server-sent events, one per
       step of the turn as it happens (the graph's guard_in, model, tools, guard_out), then
       the answer itself. Steps carry no question or answer text, only what kind of step it
-      was and which tools ran.
+      was and which tools ran. The first event is `session` (its id), as soon as the
+      conversation is known, so a client that loses the stream can still reopen it;
+    - the photos an answer cites (GET /photos/{sha256}) and the key's spend (GET /usage), so
+      a front end needs no database login and no LiteLLM key of its own.
 
 The agent is the LangGraph graph in agent_graph.py (the only engine since 12 Nov 2026).
 
@@ -33,10 +37,14 @@ tests in tests/test_agent_api.py run only where FastAPI is installed.
 Routes
     GET  /health                  no key. Is the guard loaded, are conversations saved, model
     POST /ask                     {"question": "...", "session_id": optional}
-    POST /ask/stream              the same body; text/event-stream: `step` events, then one
-                                  `answer` (the /ask body) or `error` ({"status", "error"})
+    POST /ask/stream              the same body; text/event-stream: `session` (once the
+                                  conversation is known), `step` events, then one `answer`
+                                  (the /ask body) or `error` ({"status", "error"})
     GET  /sessions?limit=8        the newest saved conversations
     GET  /sessions/{session_id}   one conversation, as the page would draw it
+    DELETE /sessions/{session_id} delete it: its checkpoints and its row
+    GET  /photos/{sha256}         a photo an answer cites (image bytes; redacted forms only)
+    GET  /usage                   this deployment's LLM spend against its budget (spend.py)
 
 Usage (personal repo, uv)
     uv add fastapi uvicorn langgraph langgraph-checkpoint-postgres "psycopg[binary]" psycopg-pool
@@ -67,7 +75,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import agent_app as app  # noqa: E402
 import agent_graph  # noqa: E402
-import agent_ui as ui  # noqa: E402
+import answer_view as av  # noqa: E402
 import conversations as conv  # noqa: E402
 
 API_TITLE = "JME maintenance assistant API"
@@ -75,7 +83,7 @@ API_VERSION = "0.1.0"
 KEY_HEADER = "X-API-Key"
 MAX_QUESTION = 2000           # characters; a question longer than this is refused, unasked
 STREAM_TIMEOUT = 300          # seconds /ask/stream waits for the next step before giving up
-RECENT_DEFAULT = ui.RECENT    # the page's sidebar shows the same number
+RECENT_DEFAULT = av.RECENT    # the page's sidebar shows the same number
 
 log = logging.getLogger("agent_api")
 log.addHandler(logging.NullHandler())
@@ -86,6 +94,16 @@ class Reply:
     """What a route sends back: an HTTP status and a JSON body."""
     status: int
     body: dict = field(default_factory=dict)
+
+
+@dataclass
+class Photo:
+    """GET /photos: the image itself, not JSON."""
+    data: bytes
+    mime: str
+    variant: str | None = None
+    source_file: str | None = None
+    status: int = 200
 
 
 def error(status: int, code: str, message: str) -> Reply:
@@ -105,10 +123,10 @@ def _short(sid: str | None) -> str | None:
 
 
 def _drop_logger(lg: logging.Logger) -> None:
-    """Forget a per-question logger from ui.trace_logger. The page makes one per question
-    and keeps it; a long-running API would keep every one, so it is removed once read."""
+    """Forget a per-question logger from answer_view.trace_logger. A long-running API would
+    keep every one, so it is removed once read."""
     for h in list(lg.handlers):
-        if isinstance(h, ui.TraceHandler):     # the shared file and stderr handlers stay open
+        if isinstance(h, av.TraceHandler):     # the shared file and stderr handlers stay open
             lg.removeHandler(h)
     lg.handlers.clear()
     logging.Logger.manager.loggerDict.pop(lg.name, None)
@@ -130,11 +148,12 @@ def outcome(events: list[dict]) -> tuple[str | None, str | None]:
     return refused, replaced
 
 
-def answer_entry(answer: str, sources: list[str], notes: list[str], usage: dict) -> dict:
-    """The answer as the page keeps it in `shown` (agent_ui.main), so the saved display copy
-    is the same whichever front end asked the question."""
+def answer_entry(answer: str, sources: list[str], notes: list[str], usage: dict,
+                 images: list[dict] | None = None) -> dict:
+    """The answer as it is drawn and saved, whichever front end asked the question. images:
+    the scans it cites (answer_view.image_refs), fetched by the page from GET /photos."""
     return {"role": "assistant", "text": answer, "sources": sources, "notes": notes,
-            "cost": ui.cost_line(usage), "cost_usd": float(usage.get("cost_usd") or 0.0),
+            "images": list(images or []), "cost": av.cost_line(usage), "cost_usd": float(usage.get("cost_usd") or 0.0),
             "cost_complete": bool(usage.get("cost_complete", True))}
 
 
@@ -162,7 +181,8 @@ class AgentService:
 
     def __init__(self, db, client, convs: conv.Conversations | None = None,
                  convs_why: str | None = None, *, api_key: str, model: str = app.MODEL,
-                 ask_fn: Callable | None = None, log_to_file: bool = True):
+                 ask_fn: Callable | None = None, log_to_file: bool = True,
+                 spend_fn: Callable | None = None, photo_fn: Callable | None = None):
         if not api_key:
             raise ValueError("an API key is required (AGENT_API_KEY)")
         self.db, self.client, self.model = db, client, model
@@ -170,6 +190,8 @@ class AgentService:
         self._key = api_key.encode()
         self._ask = ask_fn or self._run
         self._log_to_file = log_to_file
+        self._spend = spend_fn          # () -> spend.KeySpend; None: spend.key_spend()
+        self._photo = photo_fn or app.at.fetch_image
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
 
@@ -206,7 +228,7 @@ class AgentService:
             return error(404, "unknown_session", why), None
         drawable = [m for m in t.display if isinstance(m, dict) and m.get("role") in
                     ("user", "assistant") and isinstance(m.get("text"), str)]
-        return None, ui.display_copy(drawable)        # a refused question: its placeholder
+        return None, av.display_copy(drawable)        # a refused question: its placeholder
 
     # ---------------------------------------------------------------- routes ---
     def health(self) -> Reply:
@@ -217,7 +239,11 @@ class AgentService:
                 "model": self.model, "agent": "langgraph", "version": API_VERSION}
         return Reply(200 if guard else 503, body)
 
-    def ask(self, question, session_id: str | None = None, on_step=None) -> Reply:
+    def ask(self, question, session_id: str | None = None, on_step=None,
+            on_session=None) -> Reply:
+        """One question. on_session(sid) is called as soon as the conversation is known (a
+        new one's row is written, or a saved one is loaded), before the model is asked."""
+        said = on_session or (lambda sid: None)
         if not isinstance(question, str) or not question.strip():
             return error(422, "bad_question", "question must be non-empty text.")
         question = question.strip()
@@ -234,6 +260,7 @@ class AgentService:
                 ok, why = self.convs.threads.touch(sid, conv.NO_TITLE, 0, [])
                 if not ok:
                     return self._ask_in(None, question, [], on_step, save_error=why)
+                said(sid)
                 with self._lock(sid):
                     return self._ask_in(sid, question, [], on_step)
             if not conv.valid_id(session_id):
@@ -242,6 +269,7 @@ class AgentService:
                 err, shown = self._load(session_id)
                 if err:
                     return err
+                said(session_id)
                 return self._ask_in(session_id, question, shown, on_step)
         except Exception as e:                   # a bug, not a normal failure: no trace out
             _emit("api_error", route="ask", session=_short(session_id), error=type(e).__name__)
@@ -249,7 +277,7 @@ class AgentService:
                                           "It has been logged.")
 
     def _ask_in(self, sid, question, shown, on_step=None, save_error=None) -> Reply:
-        lg, handler = ui.trace_logger(log_to_file=self._log_to_file)
+        lg, handler = av.trace_logger(log_to_file=self._log_to_file)
         ctx = agent_graph.AgentContext(db=self.db, client=self.client, model=self.model,
                                        logger=lg)
         try:
@@ -262,20 +290,22 @@ class AgentService:
         sources = app.format_sources(raw)
         notes = app.format_notes(final.get("notes") or [])
         usage = dict(final.get("usage") or {})
+        images = av.image_refs(raw)
         refused, replaced = outcome(events)
-        entry = answer_entry(answer, sources, notes, usage)
+        entry = answer_entry(answer, sources, notes, usage, images)
         shown = list(shown) + [{"role": "user", "text": question}, entry]
         saved = False
         if sid and self.convs:
             msgs = final.get("messages") or []
             saved, save_error = self.convs.threads.touch(
-                sid, conv.title_of(msgs), conv.turns_of(msgs), ui.display_copy(shown))
+                sid, conv.title_of(msgs), conv.turns_of(msgs), av.display_copy(shown))
         _emit("api_ask", session=_short(sid), refused=refused, replaced=replaced,
               saved=saved, model_calls=usage.get("model_calls", 0))
         body = {"session_id": sid if saved else None, "answer": answer, "sources": sources,
-                "notes": notes, "refused": refused, "answer_replaced": replaced,
+                "notes": notes, "images": images, "refused": refused,
+                "answer_replaced": replaced,
                 "usage": _usage_out(usage), "cost_line": entry["cost"],
-                "trace": ui.trace_rows(events),
+                "trace": av.trace_rows(events),
                 "turns": sum(1 for m in shown if m.get("role") == "user"),
                 "saved": saved, "save_error": save_error}
         if (sid or self.convs) and not saved:
@@ -286,13 +316,16 @@ class AgentService:
                    timeout: float = STREAM_TIMEOUT):
         """The same question as ask(), as events: {"event": "step", "data": {...}} for each
         step as it happens, then {"event": "answer", "data": <ask()'s body>} or
-        {"event": "error", "data": {"status": ..., **error body}}. The question runs in its
-        own thread, so it finishes and is saved even if the client stops reading."""
+        {"event": "error", "data": {"status": ..., **error body}}. Before the steps,
+        {"event": "session", "data": {"session_id": ...}} once the conversation is known (not
+        sent when conversations are off). The question runs in its own thread, so it
+        finishes and is saved even if the client stops reading."""
         events: queue.Queue = queue.Queue()
 
         def work():
             try:
-                r = self.ask(question, session_id, on_step=lambda s: events.put(("step", s)))
+                r = self.ask(question, session_id, on_step=lambda s: events.put(("step", s)),
+                             on_session=lambda sid: events.put(("session", sid)))
             except Exception as e:               # ask() doesn't raise; this is belt and braces
                 _emit("api_error", route="ask_stream", error=type(e).__name__)
                 r = error(500, "internal", "Something went wrong answering that.")
@@ -307,6 +340,9 @@ class AgentService:
                     504, "timeout", f"No progress for {timeout:.0f} s; the question may still "
                                     f"finish and be saved.").body}}
                 return
+            if kind == "session":
+                yield {"event": "session", "data": {"session_id": item}}
+                continue
             if kind == "step":
                 yield {"event": "step", "data": item}
                 continue
@@ -321,10 +357,10 @@ class AgentService:
             err, shown = self._load(session_id)
             if err:
                 return err
-            cost, questions, complete = ui.conversation_spend(shown)
+            cost, questions, complete = av.conversation_spend(shown)
             return Reply(200, {"session_id": session_id, "turns": questions, "messages": shown,
                                "spend": {"cost_usd": round(cost, 6), "complete": complete,
-                                         "line": ui.conversation_line(cost, questions, complete)}})
+                                         "line": av.conversation_line(cost, questions, complete)}})
         except Exception as e:
             _emit("api_error", route="session", error=type(e).__name__)
             return error(500, "internal", "Something went wrong reading that conversation.")
@@ -341,6 +377,59 @@ class AgentService:
             return error(503, "store_down", "saved conversations can't be listed right now.")
         return Reply(200, {"sessions": [{"session_id": r.sid, "title": r.title, "turns": r.turns,
                                          "updated_at": _when(r.updated_at)} for r in rows]})
+
+    def delete_session(self, session_id) -> Reply:
+        """Delete one conversation: its checkpoints and its row. One that isn't there (never
+        was, or past the retention) counts as deleted, so deleting twice is fine."""
+        if not conv.valid_id(session_id):
+            return error(422, "bad_session_id", "session_id must be 32 hex characters.")
+        if self.convs is None:
+            return self._no_store()
+        try:
+            with self._lock(session_id):        # not while a question is being answered in it
+                ok, why = self.convs.delete(session_id)
+        except Exception as e:
+            _emit("api_error", route="delete", error=type(e).__name__)
+            return error(500, "internal", "Something went wrong deleting that conversation.")
+        _emit("api_delete", session=_short(session_id), ok=ok)
+        if not ok:
+            return error(503, "store_down", why or "the conversation couldn't be deleted")
+        with self._locks_guard:
+            self._locks.pop(session_id, None)
+        return Reply(200, {"session_id": session_id, "deleted": True})
+
+    def photo(self, sha256) -> "Photo | Reply":
+        """A photo an answer cites, by its SHA-256: from img_files_public, so an incident form
+        is only ever the redacted copy, and only if its bytes still match the hash recorded at
+        ingest (agent_tools.fetch_image). The page never connects to the database."""
+        if not isinstance(sha256, str) or not av._SHA256.fullmatch(sha256):
+            return error(422, "bad_sha256", "sha256 must be 64 lower-case hex characters.")
+        try:
+            got = self._photo(self.db, sha256)
+        except Exception as e:
+            _emit("api_error", route="photo", error=type(e).__name__)
+            return error(503, "db_down", "The photo can't be read right now.")
+        if not got:
+            return error(404, "no_photo", "No stored photo with that SHA-256 (or its bytes no "
+                                          "longer match the hash recorded at ingest).")
+        return Photo(bytes(got["bytes"]), got.get("mime") or "application/octet-stream",
+                     got.get("variant"), got.get("source_file"))
+
+    def usage(self) -> Reply:
+        """This deployment's spend against its budget, from the LiteLLM proxy with the API's
+        own key (spend.py). Always 200: a figure that isn't available says why (ok false)."""
+        try:
+            import spend
+            s = self._spend() if self._spend is not None else spend.key_spend()
+            line = spend.budget_line(s)
+        except Exception as e:
+            _emit("api_error", route="usage", error=type(e).__name__)
+            return Reply(200, {"ok": False, "error": "spend couldn't be read",
+                               "line": "Spend not available.", "model": self.model})
+        return Reply(200, {"ok": bool(s.ok), "spend": s.spend, "max_budget": s.max_budget,
+                           "used": s.used, "warn": bool(s.warn),
+                           "budget_reset_at": s.budget_reset_at, "error": s.error,
+                           "line": line, "model": self.model})
 
 
 # ======================================================================= wiring ===
@@ -392,7 +481,7 @@ def create_app(service: AgentService | None = None):
     resolve AskIn, which is defined in here (11 Nov 2026: the draft had it, and /ask would
     have failed on a real server)."""
     from fastapi import FastAPI, Header
-    from fastapi.responses import JSONResponse, StreamingResponse
+    from fastapi.responses import JSONResponse, Response, StreamingResponse
     from pydantic import BaseModel
 
     svc = service or service_from_env()
@@ -436,6 +525,29 @@ def create_app(service: AgentService | None = None):
     @api.get("/sessions/{session_id}")
     def one(session_id: str, x_api_key: str | None = Header(default=None)):
         return denied(x_api_key) or send(svc.session(session_id))
+
+    @api.delete("/sessions/{session_id}")
+    def delete(session_id: str, x_api_key: str | None = Header(default=None)):
+        return denied(x_api_key) or send(svc.delete_session(session_id))
+
+    @api.get("/photos/{sha256}")
+    def photo(sha256: str, x_api_key: str | None = Header(default=None)):
+        refused = denied(x_api_key)
+        if refused:
+            return refused
+        r = svc.photo(sha256)
+        if isinstance(r, Reply):
+            return send(r)
+        headers = {"Cache-Control": "private, max-age=3600"}
+        if r.variant:
+            headers["X-Photo-Variant"] = r.variant
+        if r.source_file and r.source_file.isascii():      # headers are latin-1 only
+            headers["X-Source-File"] = r.source_file
+        return Response(r.data, media_type=r.mime, headers=headers)
+
+    @api.get("/usage")
+    def usage(x_api_key: str | None = Header(default=None)):
+        return denied(x_api_key) or send(svc.usage())
 
     api.state.service = svc
     return api

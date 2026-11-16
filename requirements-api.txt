@@ -1,6 +1,16 @@
-# What the HTTP API needs (agent_api.py), on top of requirements-app.txt. Pin these to the
-# versions in your working environment (`pip freeze`, or `uv pip freeze`) before deploying.
--r requirements-app.txt
+# What the agent API (scripts/agent_api.py) needs: the agent, its tools, the databases and
+# the HTTP server. Pin these to the versions in your working environment (`pip freeze`, or
+# `uv pip freeze`) before deploying. Until 15 Nov 2026 this file included
+# requirements-app.txt; the page no longer needs the agent's packages, so the API lists them.
+openai
+langgraph>=1.0
+pandas
+pydantic
+sqlalchemy
+pymysql
+cryptography                    # pymysql's sha256/caching_sha2 logins (MySQL 8, Aiven)
+sqlglot
+python-dotenv
 fastapi
 uvicorn
 langgraph-checkpoint-postgres   # LangGraph's official Postgres checkpointer (conversations.py)

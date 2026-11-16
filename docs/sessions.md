@@ -1,4 +1,30 @@
-# Sessions: the conversation survives a restart
+# Sessions (retired 15 Nov 2026): the page's own MySQL store
+
+> **Retired in phase 3 (15 Nov 2026).** `scripts/sessions.py` and `tests/test_sessions.py` are
+> gone. The page no longer saves anything itself: it calls the [agent API](agent_api.md), which
+> keeps every conversation with LangGraph's checkpointer in Postgres and a threads table
+> ([`conversations.md`](conversations.md)), for the page and every other client alike. What
+> this store did, and where it lives now:
+>
+> | Here (sessions.py, MySQL) | Now (the API, Postgres) |
+> |---|---|
+> | `agent_sessions` table and login (`CMMS_DB_SESSION_*`) | LangGraph's checkpoint tables and the `agent_threads` table, the `agent_threads` login (`CONV_DB_URL`) |
+> | the page saved `messages` and a display copy after every answer | the API saves the finished turn (checkpointer) and the display copy (`answer_view.display_copy`) |
+> | `SessionStore.recent`, `delete`, `purge` | `GET /sessions`, `DELETE /sessions/{id}`, retention at API start (7 days) |
+> | a refused question kept only as its placeholder (`kept_question`) | the same rule, in `answer_view.kept_question`, server side |
+> | photos and the trace not saved | the trace still isn't; each answer now keeps the hashes of the scans it cites, so photos come back after a reload |
+>
+> **To clean up** once nothing runs the old build (the hosted page is still the pre-phase-3
+> build until phase 4): drop the `agent_sessions` table and the `agent_sessions` MySQL user, as
+> the admin, on each database that has them (local, and Aiven's `defaultdb` and `jme_cmms`),
+> and delete the `agent-session-db-password` secret on Cloud Run. Conversations saved there are
+> not moved to Postgres: they are at most 7 days old.
+>
+> The rest of this page is the record of how the store worked, kept for the design history
+> (PDPA split of logins, the refused-question fix of 9 Nov, the spend after a reload). Its
+> setting names are the ones of the time.
+
+Original title: Sessions: the conversation survives a restart
 
 Harness checklist section 5. Before this, the page kept the conversation in Streamlit's memory
 (`st.session_state`). A redeploy, Cloud Run replacing or scaling the container to zero, or a

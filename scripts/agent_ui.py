@@ -1,54 +1,56 @@
 #!/usr/bin/env python3
-"""A chat front end for the agent, for the demo: person -> app -> LLM -> tools -> back.
+"""A chat front end for the agent, for the demo: person -> page -> agent API -> LLM -> tools.
 
-A thin Streamlit page over `agent_app.py`; it adds no logic of its own. Under every
-answer it shows what the answer rests on, in tabs: the sources the tools cited, the tools'
-caveats, the photo behind each scanned source (from the database, hash-checked; incident
-forms only with the person and signature removed), and what happened on the way: each model
-call (with its time) and each tool call (with the arguments the model sent, whether the tool
-refused, and how long it took). That table is the live view of the path a question takes.
+Since phase 3 (15 Nov 2026) the page is only a front end. It holds no database login, no
+LiteLLM key and no agent code: every question, saved conversation, photo and spend figure
+comes from the agent API (scripts/agent_api.py) through scripts/api_client.py, with two
+settings, AGENT_API_URL and AGENT_API_KEY. Grounding, the guardrail on both sides of the
+model, saving and retention all happen in the API, the same for every client.
 
-Layout (10 Nov 2026: the sidebar held examples, recent conversations and spend, and was
-congested). Each part has one place:
+Under every answer it shows what the answer rests on, in tabs: the sources the tools cited,
+the tools' caveats, the photo behind each scanned source (from the API, which reads it from
+the database hash-checked; incident forms only with the person and signature removed), and
+what happened on the way: each model call (with its time) and each tool call (with the
+arguments the model sent, whether the tool refused, and how long it took). While a question
+is being answered, a status line follows the agent's steps as the API streams them.
+
+Layout (10 Nov 2026). Each part has one place:
 - sidebar: conversations only (New conversation, the newest saved ones, whether this one
   is saved);
 - bottom bar: a bin icon (Delete this conversation) left of the question box;
 - top bar: the title, an Examples popover once a conversation has started, and a usage
   popover (model, this conversation's cost, the key's spend against its cap). Near or over
-  the cap, or with the proxy unreachable, a warning also shows across the page;
+  the cap, or with the spend unavailable, a warning also shows across the page;
 - a new conversation opens on the example questions as a grid, which goes once one is asked;
 - each answer: its text, one cost line, then tabs (Sources, Caveats, Photos, What happened).
   On the newest answer What happened is the first tab, so it is open for the demo.
 
-The conversation survives a restart (#5): its id is in the page's link (?session=...), and
-after every answer it is saved through sessions.py (a table only the agent_sessions user can
-touch). Opening the link again, after a redeploy or on another device, reloads it, so a
-follow-up still has the earlier context. If the store isn't set up or is down, the sidebar
-says conversations aren't being saved and the page carries on in memory. The bin left of the
-question box, Delete this conversation (11 Nov 2026), removes it from the store at once, after
-a confirm, and starts a new one; its old link then opens a new conversation too.
+The conversation survives a restart (#5): the API saves it after every answer and gives it
+an id, which the page puts in its link (?session=...) as soon as the API sends it (the first
+event of the stream). Opening the link again, after a redeploy or on another device, reloads
+it from the API, photos included. If the API isn't saving conversations, the sidebar says so.
+The bin, Delete this conversation (11 Nov 2026), deletes it through the API at once, after a
+confirm, and starts a new one.
 
 A click while a question is being answered makes Streamlit stop the script and run it
-again, so that question is never answered. agent_app.ask() leaves the conversation as it
-was (11 Nov 2026: it used to keep half a turn, and the model refused every later question);
-the page drops the unanswered question from what it shows and says so (drop_unanswered).
+again. The API answers in its own thread, so the question still finishes and is saved; the
+page reloads the conversation and shows the answer if it is there, or says the question was
+cut off and may appear when the conversation is reopened (settle_cut_off).
 
-The conversation's spend is added up from the answers on the page (conversation_spend), so a
-conversation reopened from its link or from the list shows what it cost, not $0.
+The conversation's spend is added up from its answers (answer_view.conversation_spend), so a
+reopened conversation shows what it cost, not $0.
 
 Usage
     streamlit run scripts/agent_ui.py
 
-Needs the same .env as agent_app.py (AGENT_DB_*, OPENAI_API_KEY, OPENAI_BASE_URL) and
+Needs AGENT_API_URL (the API's address, e.g. http://localhost:8000 or its Cloud Run URL) and
+AGENT_API_KEY (the same key the API was started with), optionally APP_PASSWORD, and
 `streamlit` 1.36 or later (st.popover, and st.columns' vertical_alignment).
 Team repo: pip install -r requirements-app.txt.
 """
 from __future__ import annotations
 
 import hmac
-import json
-import logging
-import math
 import os
 import re
 import sys
@@ -57,7 +59,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import agent_app as app  # noqa: E402
+import answer_view as av  # noqa: E402
+import api_client  # noqa: E402
 
 TITLE = "JME maintenance assistant"
 CAPTION = "Answers come only from the shop's own data, through fixed tools, with the sources shown."
@@ -70,79 +73,46 @@ EXAMPLES = [
     "How many incidents in 2025 were severity 4 or worse?",
     "What is the name of employee EMP015?",          # the guardrail: a PDPA refusal, in code
 ]
+REFUSED_EXAMPLE = EXAMPLES[-1]
+
+_SID = re.compile(r"[0-9a-f]{32}")
 
 
-class TraceHandler(logging.Handler):
-    """Collects the JSON events agent_app logs during one question."""
-
-    def __init__(self):
-        super().__init__()
-        self.events: list[dict] = []
-
-    def emit(self, record):
-        try:
-            self.events.append(json.loads(record.getMessage()))
-        except ValueError:
-            pass
+def valid_id(sid) -> bool:
+    return isinstance(sid, str) and bool(_SID.fullmatch(sid))
 
 
-# The same file agent_app.py writes. AGENT_LOG_FILE=off turns the file off (a hosted
-# container's disk is temporary; its stderr goes to the platform's logs instead).
-LOG_FILE = os.environ.get("AGENT_LOG_FILE", "logs/agent_app.jsonl")
-_file_handler: logging.Handler | None = None
-_stderr_handler: logging.Handler | None = None
+# ==================================================================== photos ===
 
-
-def _shared_file_handler() -> logging.Handler:
-    """One file handler for the whole page process (not one per question)."""
-    global _file_handler
-    if _file_handler is None:
-        Path(LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
-        _file_handler = logging.FileHandler(LOG_FILE)
-        _file_handler.setFormatter(logging.Formatter("%(message)s"))
-    return _file_handler
-
-
-def trace_logger(log_to_file: bool = False) -> tuple[logging.Logger, TraceHandler]:
-    """A logger for one question: feeds the on-page table, and with `log_to_file`
-    also appends the same JSON lines to logs/agent_app.jsonl."""
-    handler = TraceHandler()
-    lg = logging.getLogger(f"agent_ui.{id(handler)}")
-    lg.setLevel(logging.INFO)
-    lg.propagate = False
-    lg.addHandler(handler)
-    if log_to_file:
-        global _stderr_handler
-        if _stderr_handler is None:           # Cloud Logging and similar read stderr
-            _stderr_handler = logging.StreamHandler(sys.stderr)
-            _stderr_handler.setFormatter(logging.Formatter("%(message)s"))
-        lg.addHandler(_stderr_handler)
-        if LOG_FILE and LOG_FILE.lower() != "off":
-            lg.addHandler(_shared_file_handler())
-    return lg, handler
-
-
-def photo_items(db, raw_sources: list[dict], fetch=None) -> list[dict]:
-    """The photos to show under an answer: one per image source, fetched from the
-    database and hash-checked (agent_tools.fetch_image). Forms come only redacted. A source
-    whose photo isn't stored, or fails the check, gets a note instead of a picture.
-    The model never produces these: they come from the tools' sources."""
-    import agent_tools as at
-
-    fetch = fetch or at.fetch_image
+def photo_items(fetch, images: list[dict]) -> list[dict]:
+    """The photos to show under an answer: one per scan it cites (answer_view.image_refs),
+    fetched from the API by SHA-256 (`fetch(sha)` -> {bytes, mime, variant} or None). Forms
+    come only redacted. A scan whose photo isn't stored, fails the hash check, or can't be
+    fetched right now gets a note instead of a picture. The model never produces these."""
     items = []
-    for s in at.image_sources(raw_sources):
-        img = fetch(db, s["sha256"])
-        what = s.get("what") or "Scan"
-        if img is None:
-            items.append({"note": f"{what}: {s.get('file')} - photo not available here."})
+    for ref in images or []:
+        what, file = ref.get("what") or "Scan", ref.get("file") or "scan"
+        try:
+            img = fetch(ref.get("sha256") or "")
+        except api_client.ApiError:
+            items.append({"note": f"{what}: {file} - photo can't be fetched right now."})
             continue
-        caption = f"{what}: {img['source_file']}"
-        if img["variant"] == "redacted":
+        if img is None:
+            items.append({"note": f"{what}: {file} - photo not available here."})
+            continue
+        caption = f"{what}: {file}"
+        if img.get("variant") == "redacted":
             caption += " (person and signature removed)"
-        items.append({"bytes": img["bytes"], "mime": img["mime"], "caption": caption,
-                      "file": img["source_file"]})
+        items.append({"bytes": img["bytes"], "mime": img.get("mime"), "caption": caption,
+                      "file": file})
     return items
+
+
+def attach_photos(m: dict, fetch) -> dict:
+    """Fetch an answer's photos once, the first time it is drawn (kept in the page's state)."""
+    if m.get("role") == "assistant" and m.get("images") and "photos" not in m:
+        m["photos"] = photo_items(fetch, m["images"])
+    return m
 
 
 def show_notes(st, notes: list[str]) -> None:
@@ -277,71 +247,54 @@ def render_answer(st, m: dict, latest: bool = False) -> None:
 
 def example_help(question: str) -> str | None:
     """Tooltip for an example button: only the one the guardrail refuses gets one, so the
-    audience knows the refusal is the point."""
-    if app.guardrail.check_input(question).allowed:
+    audience knows the refusal is the point. (The page no longer loads the guardrail: the
+    API refuses the question, in code, before the model is called.)"""
+    if question != REFUSED_EXAMPLE:
         return None
     return "Refused in code by the guardrail, before the model is called (PDPA)."
 
 
-def cost_line(usage: dict) -> str:
-    """Under each answer: what the question took. The cost is what the LiteLLM proxy
-    charged (x-litellm-response-cost); 'at least' when a call came back without one."""
-    n = usage.get("model_calls", 0)
-    if not n:
-        return "No model calls: answered in code."
-    calls = f"{n} model call{'s' if n != 1 else ''}"
-    tokens = f"{usage.get('prompt_tokens', 0) + usage.get('completion_tokens', 0):,} tokens"
-    cost = usage.get("cost_usd") or 0.0
-    if not usage.get("cost_complete", True):
-        return f"{calls}, {tokens}, at least ${cost:.4f} (a call came back without a cost)"
-    return f"{calls}, {tokens}, ${cost:.4f}"
+def step_line(step: dict) -> str:
+    """The status line while a question is answered, from one streamed step (no question or
+    answer text is in a step: only which node ran and which tools)."""
+    node = (step or {}).get("node")
+    n = step.get("round")
+    if node == "guard_in":
+        return ("Question checked by the guardrail" if step.get("passed", True)
+                else "Question refused by the guardrail, in code")
+    if node == "model":
+        if step.get("stopped"):
+            return "Stopped: too many tool calls"
+        if step.get("failed"):
+            return f"Model call failed (round {n})"
+        tools = step.get("tool_calls") or []
+        return (f"Model (round {n}) asked for: {', '.join(tools)}" if tools
+                else f"Model (round {n}) wrote the answer")
+    if node == "tools":
+        ran = ", ".join(str(t) for t in step.get("tools") or []) or "no tools"
+        return f"Tools (round {n}) ran: {ran}"
+    if node == "guard_out":
+        return ("Answer replaced by the guardrail before it was shown"
+                if step.get("answer_replaced") else "Answer checked by the guardrail")
+    return f"Step: {node}"
 
 
-_DOLLARS = re.compile(r"\$(\d+(?:\.\d+)?)")
+def answer_message(body: dict) -> dict:
+    """An /ask answer (the stream's `answer` event) as the page draws it."""
+    usage = body.get("usage") or {}
+    return {"role": "assistant", "text": body.get("answer") or "",
+            "sources": list(body.get("sources") or []), "notes": list(body.get("notes") or []),
+            "images": list(body.get("images") or []), "trace": list(body.get("trace") or []),
+            "cost": body.get("cost_line"), "cost_usd": float(usage.get("cost_usd") or 0.0),
+            "cost_complete": bool(usage.get("cost_complete", True))}
 
 
-def _cost_of(m: dict) -> tuple[float, bool]:
-    """(cost, known) of one answer on the page. An answer from 10 Nov 2026 on carries its
-    cost as a number (cost_usd, cost_complete). One saved before that has it only in its
-    cost line ('2 model calls, 9,936 tokens, $0.0012'), so it is read back from there, to
-    the line's 4 decimal places. A line with no figure leaves the total a lower bound."""
-    c = m.get("cost_usd")
-    if isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c) and c >= 0:
-        return float(c), m.get("cost_complete") is not False
-    line = m.get("cost")
-    if not isinstance(line, str):
-        return 0.0, False
-    if line.startswith("No model calls"):
-        return 0.0, True                                  # refused or answered in code
-    found = _DOLLARS.findall(line)
-    if not found:
-        return 0.0, False
-    return float(found[-1]), "at least" not in line
-
-
-def conversation_spend(shown: list[dict]) -> tuple[float, int, bool]:
-    """(cost in USD, questions, complete) of the conversation on the page, added up from
-    what each answer recorded. Derived from the conversation itself, so a conversation
-    reopened from its link or from Recent conversations shows what it has cost, and
-    New conversation shows $0, with no separate counter to keep in step (10 Nov 2026: the
-    old counter lived in page memory and started at $0 on every load).
-    complete is False when any answer's cost wasn't known: the total is then a lower bound."""
-    total, questions, complete = 0.0, 0, True
-    for m in shown:
-        if not isinstance(m, dict):
-            continue
-        if m.get("role") == "user":
-            questions += 1
-        elif m.get("role") == "assistant":
-            cost, known = _cost_of(m)
-            total += cost
-            complete = complete and known
-    return total, questions, complete
-
-
-def conversation_line(cost: float, questions: int, complete: bool = True) -> str:
-    q = f"{questions} question{'s' if questions != 1 else ''}"
-    return f"This conversation: {'' if complete else 'at least '}${cost:.4f} over {q}"
+def error_text(data: dict) -> tuple[str, bool]:
+    """(what to say, may it still finish) for the stream's `error` event."""
+    err = (data or {}).get("error") or {}
+    status = data.get("status")
+    return (err.get("message") or "The question couldn't be answered.",
+            status in (504, 0))
 
 
 USAGE_ICON = ":material/payments:"   # the usage popover's button: an icon, no words
@@ -395,67 +348,57 @@ def scroll_script(nonce: int) -> str:
             "</script>")
 
 
-# What is saved of each message: no photos, no trace. cost_usd and cost_complete let the
-# page add up a reopened conversation's spend exactly (conversation_spend).
-DISPLAY_KEYS = ("role", "text", "sources", "notes", "cost", "cost_usd", "cost_complete")
-
-
-def kept_question(text: str) -> str:
-    """A question as it may be stored or redrawn: as typed, or, if the guardrail refuses it,
-    only the placeholder ask() puts in `messages`. A refused question can hold a staff name
-    or an injection; the page used to save it as typed in the display copy (found 9 Nov
-    2026, while adding the sidebar's list of saved conversations)."""
-    v = app.guardrail.check_input(text)
-    return text if v.allowed else f"[question withheld by the guardrail: {v.rule}]"
-
-
-def _kept(m: dict) -> dict:
-    if m.get("role") == "user" and isinstance(m.get("text"), str):
-        return {**m, "text": kept_question(m["text"])}
-    return m
-
-
-def display_copy(shown: list[dict]) -> list[dict]:
-    """What is saved of the page's display: the text and what was shown under it. Photos
-    are left out (large, and re-fetchable from the database), and so is the trace. A
-    question the guardrail refuses is saved only as its placeholder (kept_question)."""
-    return [{k: m[k] for k in DISPLAY_KEYS if m.get(k) not in (None, [], "")}
-            for m in map(_kept, shown)]
-
-
-def restored(loaded) -> tuple[list[dict], list[dict]] | None:
-    """(messages, shown) for a conversation loaded by sessions.SessionStore, the system
-    prompt fresh from code; None if nothing was found. Questions go through kept_question
-    again, so a row saved before that existed is cleaned when it is drawn."""
-    if not (loaded.ok and loaded.found):
+def restored(payload: dict | None) -> list[dict] | None:
+    """What to draw of a conversation from GET /sessions/{id}: its questions and answers
+    (the API keeps a refused question only as its placeholder); None if there is none."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("messages"), list):
         return None
-    shown = [_kept(m) for m in loaded.display if isinstance(m, dict) and m.get("role") in
-             ("user", "assistant") and isinstance(m.get("text"), str)]
-    return app.new_conversation() + loaded.messages, shown
+    return [dict(m) for m in payload["messages"] if isinstance(m, dict) and
+            m.get("role") in ("user", "assistant") and isinstance(m.get("text"), str)]
 
 
-def drop_unanswered(shown: list[dict]) -> str | None:
-    """At the start of a run: a question left at the end of the page with no answer was cut
-    off (the page was clicked while it was being answered, and Streamlit stopped the script).
-    It is taken off the page, in place, and returned (as kept_question gives it) for the page
-    to say so; None when there is none. agent_app.ask() never put it in the conversation, so
-    the page and the model's history stay in step (11 Nov 2026)."""
-    if shown and isinstance(shown[-1], dict) and shown[-1].get("role") == "user":
-        return kept_question(str(shown.pop().get("text") or ""))
+def _questions(shown: list[dict]) -> int:
+    return sum(1 for m in shown if isinstance(m, dict) and m.get("role") == "user")
+
+
+def settle_cut_off(shown: list[dict], sid: str | None, load) -> tuple[list[dict], str | None]:
+    """At the start of a run: a question at the end of the page with no answer was cut off
+    (the page was clicked while it was being answered, and Streamlit stopped the script).
+    The API kept answering it in its own thread, so the conversation is reloaded (`load(sid)`
+    -> the GET /sessions/{id} body): if the answer is there, it is drawn and nothing is said.
+    Otherwise the question is taken off the page and a note says so. Returns (shown, note)."""
+    if not (shown and isinstance(shown[-1], dict) and shown[-1].get("role") == "user"):
+        return shown, None
+    if valid_id(sid):
+        try:
+            back = restored(load(sid))
+        except api_client.ApiError:
+            back = None
+        if back and _questions(back) >= _questions(shown) and back[-1].get("role") == "assistant":
+            return back, None
+    return shown[:-1], interrupted_line(valid_id(sid))
+
+
+def interrupted_line(may_finish: bool) -> str:
+    """The note shown once after a question was cut off, escaped for Streamlit. The question
+    itself isn't repeated: the page no longer runs the guardrail that decides what of a
+    question may be redrawn."""
+    more = (" It may still be answered: reopen this conversation from the list in a moment."
+            if may_finish else " Ask it again if you still need it.")
+    return md_plain("Your last question wasn't answered here: the page was clicked while it "
+                    "was being worked on." + more)
+
+
+def delete_conversation(client, sid: str | None) -> str | None:
+    """Delete the conversation on the page through the API (Delete this conversation).
+    None when it is gone (one the API never saved counts as gone), else why not."""
+    if not valid_id(sid):
+        return None
+    try:
+        client.delete(sid)
+    except api_client.ApiError as e:
+        return e.message
     return None
-
-
-def interrupted_line(question: str) -> str:
-    """The note shown once after a question was cut off, escaped for Streamlit."""
-    return md_plain(f"\"{question}\" wasn't answered: the page was clicked while it was "
-                    f"being worked on. Ask it again if you still need it.")
-
-
-def delete_conversation(store, sid: str) -> str | None:
-    """Delete the conversation on the page from the store (Delete this conversation).
-    None when it is gone, else why it couldn't be deleted. Never raises."""
-    ok, error = store.delete(sid)
-    return None if ok else (error or "couldn't delete the conversation")
 
 
 DELETE_LABEL = "Delete this conversation"
@@ -472,8 +415,8 @@ INPUT_BAR = [1, 14]                   # used as-is only by a browser without :ha
 # smaller"). Its height comes from the textarea's padding and line height, so those are
 # trimmed; the box still grows with a long question. The bin follows the box's height
 # (fit_bin_script), so it shrinks with it. Tune the two numbers here.
-INPUT_PAD = "0.1rem"                  # above and below the text (Streamlit's is larger)
-INPUT_LINE = "1"                      # line height of the text
+INPUT_PAD = "0.3rem"                  # above and below the text (Streamlit's is larger)
+INPUT_LINE = "1.35"                   # line height of the text
 INPUT_CSS = """<style>
 [data-testid="stChatInput"] textarea {
   padding-top: PAD !important; padding-bottom: PAD !important;
@@ -499,7 +442,7 @@ INPUT_CSS = """<style>
 </style>""".replace("PAD", INPUT_PAD).replace("LINE", INPUT_LINE)
 
 
-DELETE_ICON_SCALE = 0.4               # the bin icon's size, as a share of the button's height
+DELETE_ICON_SCALE = 0.6               # the bin icon's size, as a share of the button's height
 
 
 def fit_bin_script(nonce: int) -> str:
@@ -587,7 +530,7 @@ DELETE_WARNING = ("Deletes this conversation from the saved conversations now, f
                   "starts a new one. Its link will open a new conversation.")
 
 
-RECENT = 8                       # saved conversations listed in the sidebar
+RECENT = av.RECENT               # saved conversations listed in the sidebar
 
 
 def ago(when, now: datetime | None = None) -> str:
@@ -619,18 +562,25 @@ def md_plain(text: str) -> str:
     return _MD.sub(r"\\\1", text)
 
 
-def recent_label(r, current_sid: str | None, now: datetime | None = None) -> str:
-    """One line in the sidebar's list: the first question, how many, and when (or that it
-    is the conversation on the page)."""
-    when = "open now" if r.sid == current_sid else ago(r.updated_at, now)
-    n = f"{r.turns} question{'s' if r.turns != 1 else ''}"
-    return md_plain(f"{r.title} ({n}, {when})" if when else f"{r.title} ({n})")
+def recent_label(r: dict, current_sid: str | None, now: datetime | None = None) -> str:
+    """One line in the sidebar's list (a GET /sessions row): the first question, how many,
+    and when (or that it is the conversation on the page)."""
+    turns = int(r.get("turns") or 0)
+    when = "open now" if r.get("session_id") == current_sid else ago(r.get("updated_at"), now)
+    n = f"{turns} question{'s' if turns != 1 else ''}"
+    title = r.get("title") or "(untitled)"
+    return md_plain(f"{title} ({n}, {when})" if when else f"{title} ({n})")
 
 
-def save_line(store_on: bool, why: str | None, save_error: str | None) -> tuple[bool, str]:
-    """(ok, sidebar text) for whether this conversation is being kept."""
-    if not store_on:
-        return False, f"Conversations aren't being saved ({why}). This one lasts until the page closes."
+def save_line(sessions: str | None, save_error: str | None) -> tuple[bool, str]:
+    """(ok, sidebar text) for whether this conversation is being kept. `sessions` is the
+    API's /health field: "on", or "off (why)"."""
+    if sessions != "on":
+        why = str(sessions or "the API didn't say")
+        if why.startswith("off (") and why.endswith(")"):
+            why = why[5:-1]
+        return False, (f"Conversations aren't being saved ({why}), so each question is "
+                       f"answered on its own, without the earlier ones.")
     if save_error:
         return False, f"This conversation isn't being saved right now: {save_error}."
     return True, "Saved after every answer. Keep this page's link to come back to it."
@@ -639,57 +589,6 @@ def save_line(store_on: bool, why: str | None, save_error: str | None) -> tuple[
 def password_ok(typed: str, expected: str) -> bool:
     """Constant-time check of the page password."""
     return hmac.compare_digest(typed.encode(), expected.encode())
-
-
-def trace_rows(events: list[dict]) -> list[dict]:
-    """One table row per model call or tool call, in the order they happened."""
-    rows = []
-    for e in events:
-        kind = e.get("event")
-        if kind == "chat_call":
-            tools = ", ".join(e.get("tool_calls") or []) or "(answered)"
-            cost = e.get("cost_usd")
-            rows.append({"step": f"model, round {e['round']}",
-                         "detail": f"asked for: {tools}"
-                                   + (f" (${cost:.4f})" if cost is not None else ""),
-                         "seconds": round(e["ms"] / 1000, 1)})
-        elif kind == "tool_call":
-            state = "ok" if e.get("ok") else f"refused: {e.get('error_code')}"
-            rows.append({"step": f"tool, round {e['round']}",
-                         "detail": f"{e['tool']} {e['arguments']} -> {state}",
-                         "seconds": round(e["ms"] / 1000, 2)})
-        elif kind == "chat_error":
-            rows.append({"step": f"model, round {e['round']}", "detail": f"failed: {e['error']}",
-                         "seconds": None})
-        elif kind == "clarification_returned":
-            rows.append({"step": "app", "detail": "tool asked a question; passed to the user",
-                         "seconds": None})
-        elif kind == "max_rounds_exceeded":
-            rows.append({"step": "app", "detail": "stopped: too many tool calls", "seconds": None})
-        elif kind == "input_refused":
-            rows.append({"step": "guardrail", "seconds": None,
-                         "detail": f"question refused in code ({e.get('rule')}: "
-                                   f"{e.get('reason')}); the model was not called"})
-        elif kind == "guard_not_ready":
-            rows.append({"step": "guardrail", "seconds": None,
-                         "detail": "refused: the staff name list isn't loaded (fail closed)"})
-        elif kind == "year_unclear":
-            rows.append({"step": "app", "seconds": None,
-                         "detail": f"year written short ({e.get('written')}): asked which "
-                                   f"year; the model was not called"})
-        elif kind == "completed_read_as_closed":
-            rows.append({"step": "app", "seconds": None,
-                         "detail": "'completed' read as status CLOSED (the CMMS has no "
-                                   "completion date); the answer must say so"})
-        elif kind == "history_repaired":
-            rows.append({"step": "app", "seconds": None,
-                         "detail": f"conversation mended: {e.get('dropped')} unanswered tool "
-                                   f"call(s) or stray result(s) from a cut-off question removed"})
-        elif kind == "output_blocked":
-            rows.append({"step": "guardrail", "seconds": None,
-                         "detail": f"answer replaced before it was shown ({e.get('rule')}: "
-                                   f"{e.get('reason')})"})
-    return rows
 
 
 def main() -> None:
@@ -710,102 +609,105 @@ def main() -> None:
             st.error("Wrong password.")
         st.stop()
 
-    import guardrail
-    try:
-        guardrail.require_names()              # fail closed: no page without the name list
-    except guardrail.GuardNotReady as e:
-        st.error(str(e))
-        st.stop()
+    ApiError = api_client.ApiError
 
     @st.cache_resource
-    def connect():
-        import agent_tools as at
-        return at.connect(), app.build_client()
+    def api():
+        return api_client.from_env()               # AGENT_API_URL and AGENT_API_KEY
 
     try:
-        db, client = connect()
-    except SystemExit as e:           # build_client exits with a readable message
+        client = api()
+    except ValueError as e:
         st.error(str(e))
         st.stop()
-    except Exception as e:
-        st.error(f"Couldn't connect as the agent user: {e}")
-        st.stop()
 
-    import spend
+    @st.cache_data(ttl=60, show_spinner=False)
+    def api_health():
+        return client.health()                     # an ApiError isn't cached: tried again
+
+    try:
+        health = api_health()
+    except ApiError as e:
+        st.error(f"The agent API can't be reached right now: {e.message}")
+        st.stop()
+    if not health.get("guard_ready"):              # fail closed, as the API does
+        st.error("The agent API isn't ready: its staff name list isn't loaded, so it refuses "
+                 "every question (fail closed). Build the list and restart the API.")
+        st.stop()
+    store_on = health.get("sessions") == "on"
+    model = health.get("model") or "the model"
 
     @st.cache_data(ttl=30, show_spinner=False)
-    def key_budget():
-        return spend.key_spend()                   # never raises; cached 30 s
+    def key_budget() -> dict:
+        try:
+            return client.usage()                  # never fails on the API's side
+        except ApiError as e:
+            return {"ok": False, "warn": False, "line": f"Spend not available: {e.message}."}
 
-    import sessions
-
-    @st.cache_resource
-    def session_store():
-        store, why = sessions.store_from_env()    # never raises
-        if store:
-            store.purge()                          # retention, once per process start
-        return store, why
-
-    store, store_why = session_store()
+    @st.cache_data(ttl=3600, show_spinner=False, max_entries=200)
+    def fetch_photo(sha: str):
+        return client.photo(sha)                   # an ApiError isn't cached: tried again
 
     def start_fresh():
-        st.session_state.messages = app.new_conversation()
-        st.session_state.shown = []   # what to draw: role, text, sources, trace, cost
-        st.session_state.sid = sessions.new_session_id()
+        st.session_state.shown = []   # what to draw: role, text, sources, images, trace, cost
+        st.session_state.sid = None   # the API gives the id with the first answer's stream
         st.session_state.save_error = None
-        st.query_params["session"] = st.session_state.sid
+        st.query_params.pop("session", None)
 
-    if "messages" not in st.session_state:        # a new page load, or the app restarted
-        sid = st.query_params.get("session")      # read before start_fresh replaces it
-        start_fresh()                             # a new id, unless the link's loads below:
-        if store and sessions.valid_id(sid):
-            loaded = store.load(sid)
-            back = restored(loaded)
-            if back:
-                st.session_state.messages, st.session_state.shown = back
-                st.session_state.sid = sid
-                st.query_params["session"] = sid
-            elif not loaded.ok:
-                st.session_state.save_error = loaded.error
+    def open_conversation(sid: str) -> bool:
+        """Switch the page to a saved conversation, from the API."""
+        try:
+            back = restored(client.session(sid))
+        except ApiError as e:
+            back = None
+            st.session_state.save_error = ("that conversation is no longer saved"
+                                           if e.status == 404 else e.message)
+        if back is None:
+            return False
+        st.session_state.shown, st.session_state.sid = back, sid
+        st.session_state.save_error = None
+        st.query_params["session"] = sid
+        return True
+
+    if "shown" not in st.session_state:            # a new page load, or the page restarted
+        sid = st.query_params.get("session")       # read before start_fresh clears it
+        start_fresh()
+        if store_on and valid_id(sid):
+            open_conversation(sid)
 
     # A question the last run never finished (the page was clicked while it was answered).
-    cut = drop_unanswered(st.session_state.shown)
+    st.session_state.shown, cut = settle_cut_off(st.session_state.shown, st.session_state.sid,
+                                                 client.session)
     if cut:
         st.session_state.interrupted = cut
-
-    def open_saved(sid: str) -> None:
-        """Switch the page to a saved conversation, as if its link had been opened."""
-        loaded = store.load(sid)
-        back = restored(loaded)
-        if back:
-            st.session_state.messages, st.session_state.shown = back
-            st.session_state.sid = sid
-            st.session_state.save_error = None
-            st.query_params["session"] = sid
-        else:
-            st.session_state.save_error = loaded.error or "that conversation is no longer saved"
-        st.rerun()
 
     # ---- sidebar: conversations only ------------------------------------------------
     with st.sidebar:
         if st.button("New conversation", use_container_width=True, type="primary"):
             start_fresh()
             st.rerun()
-        if store:
-            # The newest saved conversations (#5). Titles come from `messages`, where a
-            # refused question is only its placeholder. Read once per run: one that is
-            # saved by this run's answer shows from the next click on.
+        if store_on:
+            # The newest saved conversations (#5). Titles come from the API, where a refused
+            # question is only its placeholder. One saved by this run's answer shows from
+            # the next click on.
             st.caption("Recent")
-            recent = store.recent(RECENT)          # never raises
+            try:
+                recent = client.recent(RECENT)
+            except ApiError:
+                recent = None
             if recent is None:
                 st.caption("Couldn't list saved conversations right now.")
             elif not recent:
                 st.caption("No saved conversations yet.")
             for r in recent or []:
-                here = r.sid == st.session_state.sid
-                if st.button(recent_label(r, st.session_state.sid), key=f"recent_{r.sid}",
+                rid = r.get("session_id")
+                if not valid_id(rid):
+                    continue
+                here = rid == st.session_state.sid
+                if st.button(recent_label(r, st.session_state.sid), key=f"recent_{rid}",
                              use_container_width=True, disabled=here):
-                    open_saved(r.sid)
+                    open_conversation(rid)
+                    st.rerun()
         st.divider()
         fold = st.toggle("Fold earlier questions", value=True, key=FOLD_KEY,
                          help="On: only the latest question and answer stay open, the rest "
@@ -820,7 +722,7 @@ def main() -> None:
             st.caption(DELETE_WARNING)
             if st.button("Delete", type="primary", key="delete_confirm",
                          use_container_width=True):
-                why = delete_conversation(store, st.session_state.sid)
+                why = delete_conversation(client, st.session_state.sid)
                 if why is None:
                     start_fresh()
                     st.session_state.delete_error = None
@@ -828,7 +730,7 @@ def main() -> None:
                 st.session_state.delete_error = why
 
     def show_saved():
-        ok, text = save_line(store is not None, store_why, st.session_state.get("save_error"))
+        ok, text = save_line(health.get("sessions"), st.session_state.get("save_error"))
         (save_box.caption if ok else save_box.warning)(text)
 
     show_saved()
@@ -850,21 +752,21 @@ def main() -> None:
     warn_box = st.empty()                          # the key near or over its cap (#7)
     interrupted = st.session_state.pop("interrupted", None)
     if interrupted:
-        st.info(interrupted_line(interrupted))
+        st.info(interrupted)
 
     def show_spend():
-        # Spend (#7): this conversation's cost, added up from each answer's cost header
-        # (exact and immediate, and the same after a reload or reopening it); the key's
-        # total against its cap from the proxy (about a minute behind).
-        cost, questions, complete = conversation_spend(st.session_state.shown)
+        # Spend (#7): this conversation's cost, added up from each answer's cost (exact,
+        # and the same after a reload); the key's total against its cap from the API, which
+        # asks the proxy with its own key (about a minute behind).
+        cost, questions, complete = av.conversation_spend(st.session_state.shown)
         ks = key_budget()
         with usage_box.container(), st.popover(USAGE_ICON,
-                                               help=usage_help(app.MODEL, cost, complete)):
-            st.caption(f"Model: {app.MODEL}")
-            st.markdown(conversation_line(cost, questions, complete))
-            st.markdown(spend.budget_line(ks))
-        if ks.warn or not ks.ok:
-            warn_box.warning(spend.budget_line(ks))
+                                               help=usage_help(model, cost, complete)):
+            st.caption(f"Model: {model}")
+            st.markdown(av.conversation_line(cost, questions, complete))
+            st.markdown(md_plain(ks.get("line") or "Spend not available."))
+        if ks.get("warn") or not ks.get("ok"):
+            warn_box.warning(md_plain(ks.get("line") or "Spend not available."))
         else:
             warn_box.empty()
 
@@ -886,8 +788,9 @@ def main() -> None:
     # Read before the history is drawn (the box stays pinned to the bottom wherever it is
     # called), so a new question folds the previous exchange at once, not one run later.
     # The Delete icon (a bin) sits left of the box, in the pinned bottom bar.
+    can_delete = show_delete(store_on and valid_id(st.session_state.sid), st.session_state.shown)
     bottom = getattr(st, "bottom", None)           # Streamlit's pinned bottom container
-    if show_delete(store is not None, st.session_state.shown) and bottom is not None:
+    if can_delete and bottom is not None:
         with bottom:
             st.markdown(INPUT_MARKER, unsafe_allow_html=True)   # for INPUT_CSS; hidden
             del_col, box_col = st.columns(INPUT_BAR)
@@ -899,13 +802,15 @@ def main() -> None:
         components.html(fit_bin_script(len(st.session_state.shown)), height=0)  # bin height
     else:
         typed = st.chat_input(INPUT_PLACEHOLDER)
-        if show_delete(store is not None, st.session_state.shown):
+        if can_delete:
             with st.sidebar:                       # no bottom bar in this Streamlit: fall back
                 delete_control()
     if st.session_state.get("delete_error"):
         st.warning(f"Not deleted: {st.session_state.delete_error}.")
     question = typed or picked
 
+    for m in st.session_state.shown:               # photos: fetched once, when first drawn
+        attach_photos(m, fetch_photo)
     # Folding on (the sidebar toggle): earlier exchanges in one expander, the latest open.
     earlier, latest = history_parts(st.session_state.shown, bool(question), fold)
     if earlier:
@@ -923,30 +828,41 @@ def main() -> None:
     import streamlit.components.v1 as components
     components.html(scroll_script(len(st.session_state.shown)), height=0)
     with st.chat_message("assistant"):
-        lg, handler = trace_logger(log_to_file=True)
-        raw: list[dict] = []
-        tool_notes: list[str] = []
-        usage: dict = {}
-        with st.spinner("Asking the model and checking the data..."):
-            answer, sources = app.ask(db, client, st.session_state.messages, question,
-                                      logger=lg, raw_sources=raw, notes=tool_notes,
-                                      usage=usage)
-            photos = photo_items(db, raw)
-            notes = app.format_notes(tool_notes)
+        entry, problem, may_finish = None, None, False
+        with st.status("Asking the agent...", expanded=False) as status:
+            try:
+                for evt in client.ask_stream(question, st.session_state.sid):
+                    kind, data = evt.get("event"), evt.get("data") or {}
+                    if kind == "session" and valid_id(data.get("session_id")):
+                        # Known before the answer: a cut-off question can still be found.
+                        st.session_state.sid = data["session_id"]
+                        st.query_params["session"] = st.session_state.sid
+                    elif kind == "step":
+                        status.update(label=step_line(data))
+                    elif kind == "answer":
+                        entry = answer_message(data)
+                        st.session_state.save_error = data.get("save_error")
+                    elif kind == "error":
+                        problem, may_finish = error_text(data)
+            except ApiError as e:
+                problem, may_finish = e.message, e.status == 0
+            if entry is None and problem is None:
+                problem, may_finish = "The answer stopped arriving.", True
+            status.update(label="Answered" if entry else "Not answered",
+                          state="complete" if entry else "error")
+        if entry is None:
+            st.session_state.shown.pop()           # the question wasn't answered here
+            more = (" It may still be answered: reopen this conversation from the list in a "
+                    "moment." if may_finish and valid_id(st.session_state.sid) else "")
+            st.error(md_plain(problem + more))
+            return
+        attach_photos(entry, fetch_photo)
         # On the page before the top bar is redrawn, so the conversation's total includes it.
-        st.session_state.shown.append({
-            "role": "assistant", "text": answer, "sources": sources, "notes": notes,
-            "photos": photos, "trace": trace_rows(handler.events), "cost": cost_line(usage),
-            "cost_usd": float(usage.get("cost_usd") or 0.0),
-            "cost_complete": bool(usage.get("cost_complete", True))})
-        key_budget.clear()                         # re-read the key's spend from the proxy
+        st.session_state.shown.append(entry)
+        key_budget.clear()                         # re-read the key's spend
         show_spend()                               # and redraw the top bar with this question
-        render_answer(st, st.session_state.shown[-1], latest=True)
-    if store:                                      # keep it for a restart (#5); never raises
-        _, st.session_state.save_error = store.save(
-            st.session_state.sid, st.session_state.messages,
-            display_copy(st.session_state.shown))
-        show_saved()
+        render_answer(st, entry, latest=True)
+    show_saved()
 
 
 if __name__ == "__main__":
