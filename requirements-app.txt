@@ -1,6 +1,0 @@
-# What the Streamlit page (scripts/agent_ui.py) needs. Since phase 3 (15 Nov 2026) the page
-# only talks to the agent API (scripts/api_client.py, standard library), so it needs no
-# database driver, no OpenAI client and no LangGraph. The API has its own list:
-# requirements-api.txt.
-streamlit>=1.36        # st.popover, st.columns' vertical_alignment, st.bottom
-python-dotenv

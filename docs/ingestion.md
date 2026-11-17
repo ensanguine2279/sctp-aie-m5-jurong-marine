@@ -93,12 +93,14 @@ e.g. `uv run python scripts/ingest_cmms.py data/sql/jurongmarine_cmms.sql --dry-
 ## Database (Docker)
 
 `docker-compose.yml` runs MySQL in a container, configured from the same `.env`
-as the scripts: on first start it creates `DB_NAME` and the user
-`DB_USERNAME`/`DB_PASSWORD`. Data lives in the `mysql-data` volume, so it
+as the scripts: on first start it creates `CMMS_DB_NAME` and the user
+`CMMS_DB_USERNAME`/`CMMS_DB_PASSWORD`. Data lives in the `mysql-data` volume, so it
 survives `docker compose down`; `docker compose down -v` wipes it.
 
-Changing `DB_NAME`, `DB_USERNAME` or a password in `.env` after the first start
-has no effect on the existing database. Either change it in MySQL, or wipe and
+Changing `CMMS_DB_NAME`, `CMMS_DB_USERNAME` or a password in `.env` after the first start
+has no effect on the existing database. (These were `DB_NAME`, `DB_USERNAME`, ... until
+14 Nov 2026; `docker-compose.yml` reads the new names too. Our database is `jme_cmms`, owned by
+`ingest`, locally and on Aiven.) Either change it in MySQL, or wipe and
 recreate with `docker compose down -v && docker compose up -d`.
 
 ```bash

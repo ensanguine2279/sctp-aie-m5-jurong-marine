@@ -18,13 +18,15 @@ Standard library only: nothing to `pip install` (team repo) or `uv add` (persona
 
 ## Where it runs
 
-`agent_app.ask()` calls it, so the CLI, the Streamlit page and the eval suite all get it:
+The agent's graph calls it (`guard_in` on the question, `model` and `guard_out` on the
+answer, [`agent_graph.md`](agent_graph.md)), so every way in gets it: the CLI and the eval
+suite through `agent_app.ask()`, the API, and the page through the API:
 
 ```mermaid
 flowchart LR
     U["question"] --> I{"check_input"}
     I -->|refused| R["the guard's message<br/>no model call"]
-    I -->|allowed| M["run_turn<br/>model + tools"]
+    I -->|allowed| M["model + tools<br/>(graph nodes)"]
     M --> O{"check_output"}
     O -->|personal data| B["answer replaced"]
     O -->|clean| A["answer"]
@@ -126,7 +128,8 @@ the storeman named in the spares sheet's title (trap list S1). The GM's e-mail
 (`0000_gm_brief_email.txt`, D1) also has names; add them with `--extra` if the email is ever
 loaded anywhere the app can read (today it isn't). Rebuild after the staff list changes and
 commit `guard_names.py`; `test_the_name_list_matches_the_dump_and_holds_no_plaintext` fails
-until you do. The Docker image copies `scripts/`, so the list ships with the app.
+until you do. The API's Docker image copies `scripts/`, so the list ships with the API; the
+page's image (`frontend/`) has no copy and doesn't need one.
 
 **What the hashing is and isn't.** It keeps the names out of a casual read of the repo, the
 code review and the logs. It is not encryption: with the salt in the same file, a list of
@@ -139,9 +142,10 @@ Without `guard_names.py` the guard can't catch names, so the app doesn't run wit
 (found 9 Nov 2026: the file hadn't been copied into the repo, and the app would have run
 without its name checks, saying nothing):
 
-- `agent_app.py`, the Streamlit page and `run_evals.py` stop at start-up with a message naming
-  the file and the `build-names` command (`guardrail.require_names()`; the runner exits 2
-  before connecting or spending).
+- `agent_app.py`, the API and `run_evals.py` stop at start-up with a message naming the file
+  and the `build-names` command (`guardrail.require_names()`; the runner exits 2 before
+  connecting or spending). The page asks the API's `/health` and stops too if it says the
+  list isn't loaded.
 - If a question still reaches `ask()` without the list (a caller that skipped the start-up
   check), it is refused with a "can't answer right now" message and the model isn't called
   (`guard_not_ready` in the log, a `guardrail` row on the page).
@@ -174,7 +178,7 @@ phrasings, injection in five, PDPA in seven (the original `pdpa-employee-name` p
 expects `max_model_calls: 0`, the `input_refused` event and the rule's wording. Independently,
 **every** turn of **every** case is checked for staff names, by the runner, from the dump.
 
-Before the guard (8 Nov 2026, run through the real loop and runner with the model stubbed):
+Before the guard (8 Nov 2026, run through the real agent and runner with the model stubbed):
 0 of 20 passed, each on "1 model call(s), at most 0 allowed". After: 20 of 20, with no model call.
 `test_every_guardrail_eval_case_passes_without_calling_the_model` keeps it that way.
 
@@ -192,7 +196,7 @@ three SOPs quoted whole not; the guard's own messages pass the output guard and 
 the name list matches the dump and holds no plaintext; `build-names` output loadable; patterns
 still working without a name list; odd input (empty, full-width letters, non-breaking spaces)
 handled and deterministic; the CLI; and the 20 guardrail eval cases passing through the real
-loop and runner with a model that fails the test if called; failing closed (`require_names`
+agent and runner with a model that fails the test if called; failing closed (`require_names`
 with the fix in its message; a missing, broken or empty name list counting as not ready). Two
 tests record bugs found while writing the guard: a phone number followed by a full stop was
 missed, and "forget the rules above" wasn't caught.
@@ -201,6 +205,7 @@ The wiring is tested in `tests/test_agent_app.py` (the model never called on a r
 question kept out of `messages` and a PDPA one out of the log, the conversation carrying on
 after a refusal, a leaking answer replaced in `messages` and absent from the log, every
 question refused and the app refusing to start without the name list),
-`tests/test_agent_ui.py` (the guardrail rows; every example question answered except the PDPA
-one, which is refused and the only one with a tooltip) and `tests/test_multiturn.py` (each
+`tests/test_answer_view.py` (the guardrail rows in the trace), `tests/test_agent_ui.py` (every
+example question answered except the PDPA one, which is refused and the only one with a
+tooltip) and `tests/test_multiturn.py` (each
 multi-turn follow-up refused by the guard exactly when its case says so).

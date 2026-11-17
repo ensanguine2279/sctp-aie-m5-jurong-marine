@@ -14,8 +14,8 @@ python scripts/agent_tools.py call compare_sensor_windows '{"machine": "CNC-02"}
 ```
 
 With uv (personal repo): `uv add pydantic sqlglot`, then `uv run python scripts/agent_tools.py ...`.
-`call` connects with `AGENT_DB_USERNAME` / `AGENT_DB_PASSWORD` from `.env`, and refuses to
-run if that is the owner account (`DB_USERNAME`). `--trace` also prints the SQL that ran.
+`call` connects with `CMMS_DB_AGENT_USERNAME` / `CMMS_DB_AGENT_PASSWORD` from `.env`, and refuses to
+run if that is the owner account (`CMMS_DB_USERNAME`). `--trace` also prints the SQL that ran.
 
 ## The tools
 
@@ -91,11 +91,14 @@ Every query runs with `MAX_EXECUTION_TIME` 10 s on MySQL.
 
 ## Photos: `fetch_image` (not a tool)
 
-The page shows the photo behind each image source (`agent_ui.md`). `fetch_image(db,
-image_sha256)` reads it from `img_files_public` and recomputes its SHA-256: bytes that don't
-match the hash recorded at ingest are never returned (logged as `image_hash_mismatch`).
-`image_sources(sources)` picks an answer's image sources, once each. Neither is offered to
-the model: it never handles images or links. `query_sql` refuses `image_bytes`.
+The page shows the photo behind each image source ([`agent_ui.md`](agent_ui.md#photos-under-the-answer)).
+Since 15 Nov 2026 it gets them from the API: each answer lists the scans it cites
+(`images`, built by `answer_view.image_refs` from the tools' image sources), and the page
+fetches each one from `GET /photos/{sha256}`. The API calls `fetch_image(db, image_sha256)`,
+which reads it from `img_files_public` and recomputes its SHA-256: bytes that don't match the
+hash recorded at ingest are never returned (logged as `image_hash_mismatch`; the API answers
+404). `image_sources(sources)` picks an answer's image sources, once each. Neither is offered
+to the model: it never handles images or links. `query_sql` refuses `image_bytes`.
 
 ## Machine names
 
@@ -148,7 +151,7 @@ code is `needs_clarification` or `ambiguous_machine`.
 
 ## Tests
 
-`tests/test_agent_tools.py` (125 tests, no MySQL): the tools run their real SQL on an
+`tests/test_agent_tools.py` (136 tests, no MySQL): the tools run their real SQL on an
 in-memory SQLite database whose tables have the names and columns of the granted views,
 filled with a small sample shaped like the client's data (machine names and some values are
 illustrative) and the client's three SOPs loaded through `ingest_sops.process`. Covers:
@@ -169,7 +172,8 @@ weekly coverage; CNC-02 `machine_specific` against flat machines, with the verdi
 quoted whole with lines 3-6, nothing for welding, the missing machine manual; query_sql
 refusing writes, two statements, employees, `SELECT *`, the logged severity, `SLEEP` and
 `UNION`, and capping rows; a dead database giving `tool_failed`; bad, extra and JSON-string
-arguments; and the app refusing the owner account.
+arguments; and the app refusing the owner account (14 Nov 2026: and the old setting names,
+`AGENT_DB_*`, alone never connecting).
 
 **Checked against the real database (5 Nov 2026):** every tool was run once with
 `call ... --trace` against the client's real MySQL data, not just the SQLite sample.

@@ -1,11 +1,15 @@
-# agent_app.py: the agent's loop
+# agent_app.py: `ask()` and the agent's rules
 
-`scripts/agent_app.py` is the thing a person actually talks to. It's a plain
-OpenAI-style function-calling loop with no framework underneath: send the
-conversation and `agent_tools.tool_schemas()` to the model, run whatever tool it
-picks through `agent_tools.run_tool`, feed the result back, repeat until the model
-answers in plain text. No vector store, no LangGraph, no memory beyond this process —
-see [Why this loop, and not LangGraph yet](#why-this-loop-and-not-langgraph-yet).
+`scripts/agent_app.py` holds the agent's rules and its command-line entry point. The turn
+itself runs as a [LangGraph graph](agent_graph.md) (`scripts/agent_graph.py`, the only engine
+since 12 Nov 2026): four nodes (`guard_in`, `model`, `tools`, `guard_out`) that send the
+conversation and `agent_tools.tool_schemas()` to the model, run whatever tool it picks
+through `agent_tools.run_tool`, feed the result back, and repeat until the model answers in
+plain text. The nodes call the pieces in this file for the work: the system prompt, the
+chat call (`complete`), the severity-scale guard, the date rules, the short-year and
+"completed" rules, the source and note formatting. `ask()` is the entry point the CLI and the
+eval suite use; the [API](agent_api.md) runs the same graph with LangGraph's checkpointer
+([`conversations.md`](conversations.md)). No vector store.
 
 ```bash
 pip install openai             # add to requirements.txt (team repo)
@@ -19,8 +23,8 @@ With uv (personal repo): `uv add openai`, then `uv run python scripts/agent_app.
 Needs, in `.env` (same file as the ingest scripts):
 
 ```bash
-AGENT_DB_USERNAME=agent_ro
-AGENT_DB_PASSWORD=...                                    # from agent_user.py
+CMMS_DB_AGENT_USERNAME=agent_ro
+CMMS_DB_AGENT_PASSWORD=...                                    # from agent_user.py
 OPENAI_API_KEY=...                                        # your llm proxy member key
 OPENAI_BASE_URL=https://35-240-177-226.sslip.io           # the llm proxy (https://github.com/ensanguine2279/sctp-aie-m5-jurong-marine-llm-proxy)
 ```
@@ -39,19 +43,20 @@ just asked for in the prompt:
 | 4 (honest degradation) | A failure never becomes an invented value | A tool that asks for a clarification (`needs_clarification`, `ambiguous_machine`, e.g. a severity number with no scale) has its message returned to the user **in code**; the model is not called again, so it can't answer over the question (found on the real run, 5 Nov 2026: gpt-4o-mini invented a count after the tool refused). A failed chat-API call (budget cap, network, timeout) is caught as `ChatError` and gives a plain "I couldn't reach the language model" — never a guess. A tool error (`needs_clarification`, `no_data`, `tool_failed`, ...) goes back to the model as the tool's own message, and the system prompt tells it to say so, not paper over it. A model that keeps calling tools past `MAX_TOOL_ROUNDS` (6) gets stopped with an honest "try a narrower question" instead of looping forever |
 | 5 (state) | A follow-up resolves against the earlier turns, and "last month" is the calendar's last month, never the model's guess | The whole conversation (questions, answers, tool results) goes back to the model with every follow-up. Relative periods are resolved in code: `ask()` puts today's date (Singapore) and where the data ends, read from the database, into the system prompt; a period with no data is said to have none, then answered for the latest full month the data has ([below](#relative-dates-and-follow-ups-5)) |
 
-Cross-restart state is the page's job, not the loop's: `ask()` works on a plain list of
-messages, and the page saves that list after every answer and loads it back from the link
-(`scripts/sessions.py`, [`sessions.md`](sessions.md)). The loop itself keeps nothing between
-processes.
+Cross-restart state is the API's: it runs the graph on a LangGraph thread per conversation,
+saved in Postgres by the checkpointer when each turn finishes
+([`conversations.md`](conversations.md)), so a follow-up after a restart still has the
+earlier turns. `ask()` itself works on a plain list of messages and keeps nothing between
+processes: that is all the CLI and the eval suite need.
 
 What it does **not** do, by design (see the capstone task list, not an oversight):
 
 - **No human-in-the-loop gate (#6).** Not needed: every tool is read-only.
 
-The eval suite (#8) runs this loop against the real model and database:
+The eval suite (#8) runs the agent through `ask()` against the real model and database:
 `scripts/run_evals.py` over `evals/cases.yaml` ([`evals.md`](evals.md)).
 
-## The loop
+## Calling it
 
 ```python
 import agent_app as app, agent_tools as at
@@ -69,16 +74,18 @@ for s in sources:
 answer2, sources2 = app.ask(db, client, messages, "and what about CNC-03?")
 ```
 
-`ask()` is the entry point every caller uses: it runs the input guardrail, refreshes the
-dates in the system prompt, then `run_turn`, then the output guardrail
-([`guardrail.md`](guardrail.md)). `run_turn(db, client, messages, ...)`
-is the part doing the actual looping: call the
-model (`complete`), append its message, and if it asked for a tool, run every tool
-call it made (there can be more than one in a round), append each tool's result as a
-`role: "tool"` message, and go again — up to `MAX_TOOL_ROUNDS` times. It returns the
-final plain-text answer, the sources gathered along the way, and which tools ran (for
-`--debug` and the log). It never raises: a chat failure or an exhausted round budget
-both return a message instead.
+`ask()` mends the conversation if a cut-off turn left a tool call with no result
+(`answered_only`), runs the graph once on a copy (`agent_graph.run`), and puts the finished
+conversation back all at once, so a turn cut off half way changes nothing. In the graph,
+`guard_in` runs the input guardrail and refreshes the dates in the system prompt; `model`
+calls the model (`complete`) and appends its message; if it asked for tools, `tools` runs
+every tool call it made (there can be more than one in a round) and appends each result as a
+`role: "tool"` message, and `model` goes again, up to `MAX_TOOL_ROUNDS` times; `guard_out`
+adds the required caveats and runs the output guardrail ([`guardrail.md`](guardrail.md)).
+`ask()` returns the final plain-text answer and the sources gathered along the way (and, if
+asked, the raw sources, the tools' notes and the usage). It never raises: a chat failure or an
+exhausted round budget both return a message instead. Node by node:
+[`agent_graph.md`](agent_graph.md#how-its-built).
 
 ## Relative dates and follow-ups (#5)
 
@@ -112,7 +119,7 @@ the data runs to today, that fallback never comes up.
 | `latest_full_month(end)` | The latest calendar month the data covers to its last day: June 2026 for data ending 30 Jun 2026; for data ending mid-month, the month before |
 | `dates_note(dates, today)` | The section added to the system prompt, in words |
 | `ask()` | Sets the system message to `SYSTEM_PROMPT` plus that section before every question that reaches the model, so a conversation reloaded the next day gets the new date. A refused question reads nothing |
-| `period_check()` | In `run_turn`, after every tool call with a `date_from`: a period that **starts** after the data ends is run again by the loop for the latest full month, and the model gets both results and a note (`period_after_data`); a period that **runs past** the data's end gets a note that it covers only up to that day (`period_past_data`); anything else is passed through unchanged |
+| `period_check()` | In the graph's `tools` node, after every tool call with a `date_from`: a period that **starts** after the data ends is run again by the agent for the latest full month, and the model gets both results and a note (`period_after_data`); a period that **runs past** the data's end gets a note that it covers only up to that day (`period_past_data`); anything else is passed through unchanged |
 
 On 10 Nov 2026, with the client's data, the model is told:
 
@@ -144,7 +151,7 @@ model, in the prompt, to fall back to June. On the first real eval run (10 Nov 2
 asked "and what about last month?", it queried October 2026 (right), got nothing, and answered
 "CNC-02 had no work orders in October 2026"; asked "this month", it said "I could not check
 that". So `period_check()` now does it, as the severity-scale guard does for scales: when a
-tool call's `date_from` is after the data's last day, the loop runs the same tool with the
+tool call's `date_from` is after the data's last day, the agent runs the same tool with the
 latest full month's dates and sends the model one tool message holding
 
 ```json
@@ -239,11 +246,14 @@ year asked about with no model call, then "November 2025" counted as CLOSED and 
 
 ## The demo front end
 
-`scripts/agent_ui.py` is a Streamlit chat page over the same `ask()`; it adds no logic.
+`frontend/agent_ui.py` is a Streamlit chat page. Since 15 Nov 2026 it doesn't call `ask()`:
+it calls the [agent API](agent_api.md), which runs the same graph, and holds no database
+login, LLM key or agent code ([`agent_ui.md`](agent_ui.md)).
 
 ```bash
-pip install -r requirements-app.txt   # team repo: streamlit 1.36 or later; with uv (personal repo): uv pip install -r requirements-app.txt
-streamlit run scripts/agent_ui.py
+uvicorn agent_api:create_app --factory --app-dir scripts --port 8000   # the API (needs AGENT_API_KEY)
+pip install -r frontend/requirements.txt   # team repo; personal repo: uv run streamlit ...
+streamlit run frontend/agent_ui.py         # with AGENT_API_URL=http://localhost:8000 and AGENT_API_KEY
 ```
 
 Under each answer it shows one line with what the answer cost, then tabs for what it rests
@@ -256,16 +266,17 @@ questions, including the PDPA one, are a grid on a new conversation and a lightb
 top bar after that; the sidebar holds New conversation, the saved conversations and a toggle
 that folds earlier questions into one line. The layout is described in
 [`agent_ui.md`](agent_ui.md#what-the-page-shows). Its trace comes from the same events as the
-log, collected per question, and the page also appends them to `logs/agent_app.jsonl` (run from
-the folder you start Streamlit in), so the file has the same lines as the table.
-`tests/test_agent_ui.py` (no Streamlit needed) covers the trace table and the page's other
-helpers; how the page looks is checked by running it. Setting `APP_PASSWORD` puts a password
-box in front of the page, and `AGENT_LOG_FILE=off` stops it writing the file (it still logs to
-stderr). To host it, see [`agent_ui.md`](agent_ui.md#deploying-on-google-cloud-run).
+log: the API collects them per question (`answer_view.trace_rows`) and sends them with the
+answer, and writes the same lines to stderr and `logs/agent_app.jsonl` (`AGENT_LOG_FILE=off`
+turns the file off). `tests/test_answer_view.py` covers the trace table, `tests/test_agent_ui.py`
+(no Streamlit needed) the page's helpers; how the page looks is checked by running it. Setting
+`APP_PASSWORD` puts a password box in front of the page. Hosting (two Cloud Run services, the
+API private): [`agent_ui.md`](agent_ui.md#deploying-on-google-cloud-run).
 
 ## Logging (toward #7, observability)
 
-Every call to `run_turn` logs, as one JSON line per event, on the `agent_app` logger.
+Every question logs, as one JSON line per event, on the `agent_app` logger (or the logger
+the caller passes in, as the API does per question).
 Every line carries a UTC `ts` (ISO 8601, milliseconds):
 
 - `tool_call`: one per tool the model called: tool name, the **arguments the model sent**
@@ -276,8 +287,8 @@ Every line carries a UTC `ts` (ISO 8601, milliseconds):
   requested, how long the call took, and `cost_usd`, what the proxy charged for it.
 - `chat_error`: a failed chat call and why.
 - `scale_guess_blocked`: the model gave a severity scale the user never stated; it was removed before the tool ran.
-- `clarification_returned`: a tool asked a question and the loop passed it on.
-- `max_rounds_exceeded`: the loop was stopped rather than left to run forever.
+- `clarification_returned`: a tool asked a question and the agent passed it on.
+- `max_rounds_exceeded`: the agent was stopped rather than left to run forever.
 - `input_refused`: the guardrail refused the question in code: `rule` (`injection`, `pdpa`,
   `out_of_scope`) and `reason` (which family of pattern fired). No model call follows.
 - `output_blocked`: the guardrail replaced the answer: `rule` (`pii`) and `reason`
@@ -287,7 +298,12 @@ Every line carries a UTC `ts` (ISO 8601, milliseconds):
 - `dates_unknown`: where the data ends couldn't be read, so the model was told to ask for
   exact dates instead of assuming the period asked about is covered.
 - `period_after_data`: a tool was asked for a period that starts after the data ends; the
-  loop ran it again for the latest full month (`fallback`, `fallback_arguments`).
+  agent ran it again for the latest full month (`fallback`, `fallback_arguments`).
+- `graph_step`: one per node of the graph, with no question or answer text
+  ([`agent_graph.md`](agent_graph.md#what-each-step-reports)).
+- `ungrounded_answer_retried`, `ungrounded_answer`, `caveat_added`, `history_repaired`: an
+  answer with facts and no tool call asked again; one still without a tool call; a required
+  caveat added in code; a conversation mended ([`agent_graph.md`](agent_graph.md#how-its-built)).
 - `period_past_data`: a tool was asked for a period that runs past the data's end; the result
   carries a note that it covers only up to that day.
 - `year_unclear`: the question had a year written short (`written`, e.g. "nov 202"); the user
@@ -326,7 +342,8 @@ python scripts/spend.py --json   # with uv: uv run python scripts/spend.py
 On the page, each answer has a line such as "2 model calls, 9,936 tokens, $0.0012", each
 model row in **What happened** shows its cost, and the usage popover (the icon at the right of
 the top bar; its tooltip shows the conversation's total) shows the conversation's total and the
-key's spend against its budget, re-read from the proxy after every answer. From 80% of the
+key's spend against its budget, re-read after every answer (the API asks the proxy with its
+own key, `GET /usage`; the page holds no LLM key). From 80% of the
 budget a warning shows across the page, outside the popover, so a nearly spent key is seen
 before the demo rather than as a budget error during it. Team-wide spend stays with the proxy's own tools
 (`spend_report.py`, `daily_report.py`, the `/ui` dashboard; see
@@ -377,41 +394,43 @@ How to read it:
 | `args:` | The arguments the model sent, truncated at 500 characters. Here it sent `severity_scale: 5_is_worst` although the user never said which scale: the guess the guard now blocks. For a relative period, the dates here show how the model resolved it (October, then June as the fallback) |
 | `REFUSED needs_clarification` | The tool declined and the user was asked instead of getting a number |
 | `** scale_guess_blocked` | The model's scale had no quote from the user, so it was removed before the tool ran. Its arguments are shown on that line, the arguments the tool actually got are on the `tool` line below it |
-| `** clarification_returned` | The loop passed the tool's question straight to the user, with no second model call |
+| `** clarification_returned` | The agent passed the tool's question straight to the user, with no second model call |
 | `** chat_error` | The model call failed (budget cap, network, timeout), with the reason |
 | `eval case …, turn N` | The question was asked by `run_evals.py`; the case id is in `evals/cases.yaml` |
 | `sources=0` after a number is given | A number with no source: investigate |
 | `** input_refused` and no `model` line | The guardrail refused the question in code; the model was never called. A PDPA question shows as `Q: [withheld: pdpa]`. `read_log.py` prints the event but not its `rule` / `reason`: `grep input_refused logs/agent_app.jsonl` has them |
 | `** output_blocked` | The guardrail replaced the model's answer before it was shown (rule and kind in the JSON line, never the text) |
 
-**On the hosted page** the same lines go to Cloud Logging (stderr). Read the latest ones into
+**On the hosted app** the same lines go to Cloud Logging (stderr), from the API service
+(`jme-agent-api`): the page logs none of the agent's events. Read the latest ones into
 the same script (the exact filter has not been run against the live service; if the fields
 come back as `textPayload` instead of `jsonPayload`, the script reads both):
 
 ```bash
-gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="jme-agent"'     --freshness=1h --limit=200 --format=json | python scripts/read_log.py
+gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="jme-agent-api"'     --freshness=1h --limit=200 --format=json | python scripts/read_log.py
 ```
 
-Or open **Cloud Run, jme-agent, Logs** in the console and search for `turn`.
+Or open **Cloud Run, jme-agent-api, Logs** in the console and search for `turn`.
 
-**Limits:** lines carry no session id. If two people use the hosted page at the same moment,
+**Limits:** the agent's event lines carry no session id (the API's `api_ask` line has the
+first 8 characters). If two people use the hosted page at the same moment,
 their events interleave and the grouping above can mix two questions together. For a one-person
 demo or a local run this doesn't matter; adding a turn id to every event would fix it.
 
-## Why this loop, and not LangGraph yet
+## Why a graph
 
-A plain function-calling loop was built first because it's the smallest thing that
-answers a question end to end, grounded and cited — nothing else in the checklist
-(evals, guardrails) has anything to run against until this exists. LangGraph adds
-real value on top (a checkpointer for #5, which `sessions.py` now does in a table, explicit guardrail nodes for #3), but none
-of that is needed to get a working demo; it's the next layer, not a prerequisite for
-this one. The guardrail is two function calls in `ask()`, so it would become two nodes
-unchanged. See the task list for when it gets built.
+A plain function-calling loop was built first (5 Nov 2026), because it was the smallest thing
+that answered a question end to end, grounded and cited, and nothing else in the checklist had
+anything to run against until it existed. LangGraph came next (11-12 Nov 2026), beside it and
+then in its place once it matched the loop on every test and 52/52 evals: the guardrail became
+two nodes unchanged, the conversation moved into the graph's state, and LangGraph's Postgres
+checkpointer replaced the page's own MySQL store for conversations (13-15 Nov 2026). Why and
+how: [`agent_graph.md`](agent_graph.md), [`conversations.md`](conversations.md).
 
 ## Tests
 
-`tests/test_agent_app.py` (33 tests, no database, no real LLM call): the loop's own
-logic only — `agent_tools.run_tool` and the chat call are both stubbed, since tool
+`tests/test_agent_app.py` (37 tests, no database, no real LLM call): `ask()` and the rules,
+through the graph — `agent_tools.run_tool` and the chat call are both stubbed, since tool
 correctness is already covered by `tests/test_agent_tools.py`. Covers: a plain
 text answer needing no tool; one tool call round-tripping into the next model call;
 several tool calls in one round all running and all being cited; a failed chat call
@@ -420,11 +439,11 @@ with an honest message rather than looping forever; the assistant-message shape
 matching what the API expects, with and without tool calls; source label
 deduplication, keeping first-seen order; a new conversation starting with only the
 system prompt; and `ask()` appending the question, returning formatted sources, and
-a severity scale the user never named (no quote, an invented quote, a quote naming no scale) being stripped so the tool asks, and one the user did name passing; a clarification going straight to the user with no further model call; logging one `turn` summary line; every log line carrying a timestamp and each tool call logging its arguments and refusal code. **The guardrail in `ask()`:** a refused question never reaching the model; the question kept out of `messages` and a PDPA one out of the log; the conversation carrying on after a refusal with nothing of the refused question in the next prompt; an answer with personal data replaced, in `messages` too, and absent from the log; an ordinary answer passing unchanged; without the staff name list, every question refused with no model call and the app refusing to start. **Spend:** the proxy's cost header read on each call, an unknown cost kept as unknown (never 0), each call's and question's cost logged and handed out of `ask()`, a call without a cost making the question total unknown, a refused question costing nothing. `tests/test_spend.py` (10 tests, no network, and no settings from your shell) covers `spend.py`: the proxy's reply as returned for the app's key on 9 Nov 2026, the percentage and the 80% warning, a key with no cap, the request going to `/key/info` with the app's key, and a down proxy, a refused key or a bad reply never raising. The guard's own rules are tested in `tests/test_guardrail.py` ([`guardrail.md`](guardrail.md#tests)). One test documents, rather than hides, that a bug
+a severity scale the user never named (no quote, an invented quote, a quote naming no scale) being stripped so the tool asks, and one the user did name passing; a turn stopped half way leaving the conversation exactly as it was, and a conversation saved with a tool call and no result answered again with the orphan removed (`history_repaired`); a clarification going straight to the user with no further model call; logging one `turn` summary line; every log line carrying a timestamp and each tool call logging its arguments and refusal code. **The guardrail in `ask()`:** a refused question never reaching the model; the question kept out of `messages` and a PDPA one out of the log; the conversation carrying on after a refusal with nothing of the refused question in the next prompt; an answer with personal data replaced, in `messages` too, and absent from the log; an ordinary answer passing unchanged; without the staff name list, every question refused with no model call and the app refusing to start. **Spend:** the proxy's cost header read on each call, an unknown cost kept as unknown (never 0), each call's and question's cost logged and handed out of `ask()`, a call without a cost making the question total unknown, a refused question costing nothing. `tests/test_spend.py` (10 tests, no network, and no settings from your shell) covers `spend.py`: the proxy's reply as returned for the app's key on 9 Nov 2026, the percentage and the 80% warning, a key with no cap, the request going to `/key/info` with the app's key, and a down proxy, a refused key or a bad reply never raising. The guard's own rules are tested in `tests/test_guardrail.py` ([`guardrail.md`](guardrail.md#tests)). One test documents, rather than hides, that a bug
 in `run_tool` itself (not a normal tool error) still propagates today — a deliberate
 choice to surface in a test, not a gap to silently paper over.
 
-`tests/test_multiturn.py` (29 tests, no database, no real LLM call; a stand-in `Db` and a
+`tests/test_multiturn.py` (33 tests, no database, no real LLM call; a stand-in `Db` and a
 scripted chat call): **where the data ends**: read from each source (a DATE, date text and
 DATETIME text all understood) and only once; no database, a down one or an empty one giving no
 dates, a failure not cached. **What "today" means**: the calendar's date in Singapore, unless
@@ -442,20 +461,22 @@ not; real multi-turn cases in `cases.yaml`; every follow-up refused by the guard
 case says so; the frozen today in `cases.yaml` and the October / June dates the cases expect
 following from it; the runner reading `today:` (a bad value refused) and `--check` showing it.
 **The fallback in code** (found on the first real eval run): a period after the data ends run
-again for the latest full month through the real `run_turn`, both results and the note in one
+again for the latest full month through `ask()`, both results and the note in one
 tool message, `period_after_data` logged once beside one `tool_call`, both cited, the note
 among the caveats; a period inside the data passed through untouched; one running past the
 data's end noted (`period_past_data`) with no second query; no change without the data's dates
-(no database, or a down one).
+(no database, or a down one). Found on the same run: **"still open" on data that ends in
+June**, the data's end date added when a question asks how things stand now and the answer
+doesn't give it (`caveat_added`), and never when it does.
 
-`tests/test_clarify.py` (11 tests, no database, no real LLM call): a year written short found
+`tests/test_clarify.py` (16 tests, no database, no real LLM call): a year written short found
 in five spellings, and full years, days, ids and plain questions left alone; the question back
 offering the two latest years the data has that month in (November 2025 or 2024 for data
 ending 30 Jun 2026), and a plain question when the month or the data's end isn't known; the
 model never called for a short year, the question and reply both kept, and the user's "2025"
 reaching the model with the question it completes; the completed note for "completed",
 "complete" and "finished", only on work-order tools; carried into a follow-up that names no
-status and ended by one that does; the note reaching the model in the tool result and the page in the notes.
+status and ended by one that does; the note reaching the model in the tool result and the page in the notes; the runner's grounding taking the period a successful tool call ran for; and **what the answer must say, enforced in code** (a fixed sentence added when either part is missing, `caveat_added`).
 
 `tests/test_read_log.py` (5 tests, standard library only): the documented example prints
 exactly as shown above; other lines skipped and an unfinished question shown; gcloud output
@@ -464,5 +485,5 @@ shown; the command line reading a file and keeping the last N questions.
 
 **Not covered:** a real call to the llm proxy. That is what the eval suite is for
 (`python scripts/run_evals.py`, [`evals.md`](evals.md)): it asks the kill-shot questions, the
-trap-list questions and the multi-turn follow-ups through this loop against the real database
+trap-list questions and the multi-turn follow-ups through `ask()` against the real database
 and proxy.

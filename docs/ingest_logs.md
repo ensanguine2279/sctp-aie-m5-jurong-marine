@@ -94,21 +94,25 @@ The default input path is relative to the repo root, so run the script from ther
 
 ## Configuration (`.env`)
 
-Shared with `ingest_spares.py` and `docker-compose.yml`. Copy `.env.example`
+Shared with the other ingest scripts and `docker-compose.yml`. Copy `.env.example`
 to `.env` and fill it in. `.env` is git-ignored and must never be committed.
+Every setting for the shop database starts with `CMMS_DB_` (14 Nov 2026, when a second
+database came in for the conversations; before that they were `DB_*`). Only these names
+are read: a `.env` still on the old ones fails with `Missing setting(s) CMMS_DB_...`
+([Settings](../README.md#settings-one-prefix-per-database)).
 
 | Key | Example | Used for |
 |---|---|---|
-| `DB_HOST` | `localhost` | MySQL host |
-| `DB_PORT` | `3307` | MySQL port (the container publishes 3307 to avoid clashing with a MySQL on Windows) |
-| `DB_NAME` | `jurong_marine` | Database |
-| `DB_USERNAME` | `ingest` | MySQL user (not `root`) |
-| `DB_PASSWORD` | | That user's password |
+| `CMMS_DB_HOST` | `localhost` | MySQL host |
+| `CMMS_DB_PORT` | `3307` | MySQL port (the container publishes 3307 to avoid clashing with a MySQL on Windows) |
+| `CMMS_DB_NAME` | `jme_cmms` | Database |
+| `CMMS_DB_USERNAME` | `ingest` | MySQL user (not `root`) |
+| `CMMS_DB_PASSWORD` | | That user's password |
 | `MYSQL_ROOT_PASSWORD` | | Container admin password only; the script doesn't use it |
 
-**Precedence:** a value already set in your shell (`export DB_PORT=...`) wins
+**Precedence:** a value already set in your shell (`export CMMS_DB_PORT=...`) wins
 over `.env`, even if it is empty. If the script connects to the wrong port or
-says `using password: NO`, check `env | grep DB_`.
+says `using password: NO`, check `env | grep CMMS_DB_`.
 
 **Which `.env`:** without `--env-file`, the script searches from the `scripts/`
 folder upward and uses the first `.env` it finds.
@@ -477,8 +481,8 @@ weekly means, indexed to each machine's January–March average.
 |---|---|---|
 | `CSV not found: data/logs/vibration_temp_2026H1.csv` | Script run from outside the repo root, or the file isn't in `data/logs/` | `cd` to the repo root, or pass the path |
 | `Missing setting(s) ...` | No `.env` found, or keys missing | Copy `.env.example` to `.env`, or pass `--env-file` |
-| `Can't connect ... Connection refused` | Nothing listening on `DB_HOST:DB_PORT` | `docker compose ps` shows the published port; it must match `DB_PORT`. Check `env \| grep DB_PORT` for a shell override. |
-| `Access denied ... (using password: NO)` | Empty `DB_PASSWORD` reached the script | `unset DB_PASSWORD` in the shell, or pass `--env-file .env` |
+| `Can't connect ... Connection refused` | Nothing listening on `CMMS_DB_HOST:CMMS_DB_PORT` | `docker compose ps` shows the published port; it must match `CMMS_DB_PORT`. Check `env \| grep CMMS_DB_PORT` for a shell override. |
+| `Access denied ... (using password: NO)` | Empty `CMMS_DB_PASSWORD` reached the script | `unset CMMS_DB_PASSWORD` in the shell, or pass `--env-file .env` |
 | `Access denied ... (using password: YES)` | Password differs from the one the container was created with | Reset with `ALTER USER` as root, or `docker compose down -v && docker compose up -d` (deletes data) |
 | `Unknown column ...` / `Unknown table ...` | Tables were created by an older version | Run once with `--recreate` |
 | `CSV is missing column(s)` | Header doesn't match | Check the header row against [Input file](#input-file) |
