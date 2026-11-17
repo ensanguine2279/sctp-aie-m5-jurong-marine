@@ -92,19 +92,23 @@ python scripts/ingest_spares.py XLSX [options]
 
 ## Configuration (`.env`)
 
-Shared with `ingest_logs.py` and `docker-compose.yml`. Copy `.env.example`
+Shared with the other ingest scripts and `docker-compose.yml`. Copy `.env.example`
 to `.env` and fill it in. `.env` is git-ignored and must never be committed.
+Every setting for the shop database starts with `CMMS_DB_` (14 Nov 2026, when a second
+database came in for the conversations; before that they were `DB_*`). Only these names
+are read: a `.env` still on the old ones fails with `Missing setting(s) CMMS_DB_...`
+([Settings](../README.md#settings-one-prefix-per-database)).
 
 | Key | Example | Used for |
 |---|---|---|
-| `DB_HOST` | `localhost` | MySQL host |
-| `DB_PORT` | `3307` | MySQL port |
-| `DB_NAME` | `jurong_marine` | Database |
-| `DB_USERNAME` | `ingest` | MySQL user (not `root`) |
-| `DB_PASSWORD` | | That user's password |
+| `CMMS_DB_HOST` | `localhost` | MySQL host |
+| `CMMS_DB_PORT` | `3307` | MySQL port |
+| `CMMS_DB_NAME` | `jme_cmms` | Database |
+| `CMMS_DB_USERNAME` | `ingest` | MySQL user (not `root`) |
+| `CMMS_DB_PASSWORD` | | That user's password |
 
-A value already set in your shell (`export DB_PORT=...`) wins over `.env`, even
-if it is empty; check `env | grep DB_` if the connection goes to the wrong place.
+A value already set in your shell (`export CMMS_DB_PORT=...`) wins over `.env`, even
+if it is empty; check `env | grep CMMS_DB_` if the connection goes to the wrong place.
 Without `--env-file`, the script uses the first `.env` it finds searching
 upward from the `scripts/` folder. The password is never printed.
 
@@ -407,6 +411,6 @@ line has no total, because its figures are separate counts rather than one break
 | `No header row with 'Part No' found` | Header text changed, or the wrong sheet is active | Check the header cell, and which sheet is active when the file is saved |
 | `Sheet is missing column(s)` | A required header is missing or renamed | Compare with [Input file](#input-file) |
 | `Missing setting(s) ...` | No `.env` found, or keys missing | Copy `.env.example` to `.env`, or pass `--env-file` |
-| `Can't connect ... Connection refused` | Nothing listening on `DB_HOST:DB_PORT` | `docker compose ps` shows the published port; it must match `DB_PORT`. Check `env \| grep DB_PORT` |
-| `Access denied ... (using password: NO)` | Empty `DB_PASSWORD` reached the script | `unset DB_PASSWORD`, or pass `--env-file .env` |
+| `Can't connect ... Connection refused` | Nothing listening on `CMMS_DB_HOST:CMMS_DB_PORT` | `docker compose ps` shows the published port; it must match `CMMS_DB_PORT`. Check `env \| grep CMMS_DB_PORT` |
+| `Access denied ... (using password: NO)` | Empty `CMMS_DB_PASSWORD` reached the script | `unset CMMS_DB_PASSWORD`, or pass `--env-file .env` |
 | `Unknown column ...` / `Unknown table ...` | Tables were created by an older version | Run once with `--recreate` |

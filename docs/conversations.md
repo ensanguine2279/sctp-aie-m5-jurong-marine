@@ -3,9 +3,8 @@
 Since 13 Nov 2026 the API keeps conversations the way production LangGraph apps do: the
 agent's state is saved by LangGraph's **checkpointer**, one **thread** per conversation, in
 Postgres. A small **threads table** next to it holds what a front end lists and what retention
-needs. This replaces [`sessions.py`](sessions.md) for the API. The page still uses
-`sessions.py` (MySQL) until it calls the API (phase 3), so for now the two don't share
-conversations.
+needs. Since 15 Nov 2026 (phase 3) this is the only store of conversations: the page calls the
+API for everything, and [`sessions.py`](sessions.md), the page's own MySQL store, is retired.
 
 ```mermaid
 flowchart LR
@@ -20,7 +19,7 @@ flowchart LR
 | Part | What it holds | Why |
 |---|---|---|
 | Checkpoints (`PostgresSaver`, [langgraph-checkpoint-postgres](https://pypi.org/project/langgraph-checkpoint-postgres/)) | The graph's state per thread: the conversation in the chat API's format, and the last turn's results | A follow-up runs from the thread's saved state: no front end passes the history back. LangChain's official checkpointer for production |
-| `agent_threads` | Per conversation: `title` (its first question), `turns`, `display` (what the page draws: each answer with its sources, caveats and cost, `agent_ui.display_copy`), `created_at`, `updated_at` | The recent list, retention and deletion. Open-source checkpointers have no expiry (TTL), and no cheap "newest conversations" query |
+| `agent_threads` | Per conversation: `title` (its first question), `turns`, `display` (what the page draws: each answer with its sources, caveats, cost and the scans it cites, `answer_view.display_copy`), `created_at`, `updated_at` | The recent list, retention and deletion. Open-source checkpointers have no expiry (TTL), and no cheap "newest conversations" query |
 
 Both live in one Postgres database, in a schema of their own, `agent`. The shop's data stays
 in MySQL; this database holds only conversations.
@@ -40,7 +39,7 @@ ever put there. Each rule below is tested, by reading the state the checkpointer
   answer before putting it in the state. So no snapshot holds it, even part way through a
   turn.
 - **Tool results.** These come from the `agent_ro` views, which can't read names
-  ([database access](README.md#database-access-for-the-app-pdpa)).
+  ([database access](../README.md#database-access-for-the-app-pdpa)).
 
 **When a turn is saved.** The graph runs with `durability="exit"`, so a thread is saved
 once, when the turn finishes ([LangGraph docs](https://docs.langchain.com/oss/python/langgraph/checkpointers)).
@@ -70,7 +69,7 @@ AGENT_CONVERSATION_DAYS=7                   # optional
 ```
 
 The `CONV_DB_` prefix is this database's, as `CMMS_DB_` is the shop's (14 Nov 2026,
-[Settings](README.md#settings-one-prefix-per-database)). Until then these were `PG_DB`,
+[Settings](../README.md#settings-one-prefix-per-database)). Until then these were `PG_DB`,
 `PG_ADMIN_USER`, `PG_ADMIN_PASSWORD`, `PG_ADMIN_URL` and `AGENT_PG_URL`. Only the new
 names are read: with an old one alone, conversations are off and `/health` says
 `CONV_DB_URL isn't set`.
@@ -139,7 +138,8 @@ fails. A row whose first question never finished isn't listed (`turns = 0`).
 2. runs the graph on its thread (`Conversations.ask`), with no history passed in;
 3. writes the row: title, turns, and the display copy with the new answer.
 
-`GET /sessions` and `GET /sessions/{id}` read the threads table. Without `CONV_DB_URL`, or
+`GET /sessions` and `GET /sessions/{id}` read the threads table; `DELETE /sessions/{id}`
+deletes a conversation's checkpoints and its row (15 Nov 2026). Without `CONV_DB_URL`, or
 with the packages or the database missing, the API still answers, with conversations off, and
 `/health` says why. Details: [`agent_api.md`](agent_api.md).
 
@@ -175,5 +175,6 @@ Postgres' error codes):
 - **check:** passing only when its own tables work; failing (and cleaning up) if the agent
   user can change the schema; an odd error counted as a failure.
 
-**Written in a sandbox with neither Postgres nor these packages.** Setup and check have run
-only against a stand-in. Run `setup` and `check` on your Postgres before relying on them.
+**Run on real Postgres** (written in a sandbox without it): `setup` and `check` passed
+locally (Docker) and on Aiven Postgres (14-15 Nov 2026), and the API's follow-up and restart
+were checked on both. Run `check` again after any change to the agent user or the schema.

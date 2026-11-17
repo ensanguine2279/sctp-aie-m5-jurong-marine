@@ -98,8 +98,9 @@ python scripts/ingest_cmms.py [DUMP] [options]
 ## Configuration (`.env`)
 
 The same `.env` as `ingest_logs.py` and `ingest_spares.py`, read through
-`db_config.load_db_config`: `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USERNAME`,
-`DB_PASSWORD`. Shell values win over `.env`; the password is never printed. See
+`db_config.load_db_config`: `CMMS_DB_HOST`, `CMMS_DB_PORT`, `CMMS_DB_NAME`, `CMMS_DB_USERNAME`,
+`CMMS_DB_PASSWORD` (named `DB_*` until 14 Nov 2026; the old names are no longer read). Shell
+values win over `.env`; the password is never printed. See
 [`ingest_logs.md`](ingest_logs.md#configuration-env) for the details.
 
 ---

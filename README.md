@@ -164,8 +164,8 @@ Saved conversations are in Postgres, kept by the API, with their own user, `agen
 limited to one schema (`python scripts/conversations.py setup`, then `check`): see
 [`conversations.md`](docs/conversations.md). `agent_ro` never gets access to them. (Until
 phase 3, 15 Nov 2026, the page kept its own copy in MySQL as the `agent_sessions` user,
-through `sessions.py`; that is retired, and the user and table can be dropped once the hosted
-page is replaced: [`sessions.md`](docs/sessions.md).) The page itself holds no database login
+through `sessions.py`; that is retired, and since the hosted page was replaced (17 Nov 2026)
+its user and table can be dropped: [`sessions.md`](docs/sessions.md).) The page itself holds no database login
 at all: only the API's address and key (`AGENT_API_URL`, `AGENT_API_KEY`).
 
 ```bash
@@ -211,10 +211,11 @@ Rename them all at once with this table:
 | `PG_DB`, `PG_ADMIN_USER`, `PG_ADMIN_PASSWORD` (docker compose) | `CONV_DB_NAME`, `CONV_DB_ADMIN_USERNAME`, `CONV_DB_ADMIN_PASSWORD` |
 
 Settings that aren't a database login keep their names: `AGENT_API_KEY`, `AGENT_API_URL`
-(the page's: where the API is, since phase 3),
-`AGENT_SESSION_DAYS`, `AGENT_CONVERSATION_DAYS`, `IMAGE_ENGINE`, `OPENAI_*`, and
-`MYSQL_ROOT_PASSWORD` (the MySQL image's own). Some docs written before the rename still
-show the old names: read them as the new ones.
+and `AGENT_API_AUTH` (the page's: where the API is and how to call it, since phase 3 and 4),
+`AGENT_CONVERSATION_DAYS`, `IMAGE_ENGINE`, `OPENAI_*`, and `MYSQL_ROOT_PASSWORD` (the MySQL
+image's own). `AGENT_SESSION_DAYS` and `CMMS_DB_SESSION_*` went with `sessions.py` (phase 3).
+The docs use the new names throughout since 17 Nov 2026; an old name appears only where a doc
+tells the history.
 
 ## The agent's tools
 
@@ -317,7 +318,7 @@ together and was congested):
 It needs Streamlit 1.36 or later and nothing else of the agent's (`frontend/requirements.txt`;
 the API's packages are in `requirements-api.txt`). **Hosted (16 Nov 2026, phase 4) as two
 Cloud Run services**: `jme-agent-api` (the root `Dockerfile`, **private**: only the page's
-service account may invoke it, and it holds every secret) and `jme-agent` (the page, built from
+service account may invoke it, and it holds every secret) and `jme-frontend` (the page, built from
 `frontend/` alone, public behind `APP_PASSWORD`, holding only the API's address and key):
 [Deploying on Google Cloud Run](docs/agent_ui.md#deploying-on-google-cloud-run).
 After a redeploy, hard-refresh the page (Ctrl+Shift+R) before testing.
@@ -425,11 +426,11 @@ FROM cmms_work_orders GROUP BY 1, 2, 3 HAVING n > 1 ORDER BY wo_date;
 | Names also appear in the spares sheet title (`storeman: Halim`) | stored only in `critical_spares_raw.source_title`, which the app user can't read; keep it that way. The guardrail also blocks it (`build-names --extra`) |
 | Views, grants and run logging have only been tested without a database | run `relationships.py` and `agent_user.py --check` on the real database |
 | The guardrail cases on the real model | `python scripts/run_evals.py --tag guardrail` (no model calls), then the full suite: every in-scope case must still pass. Commit `evals/results/latest.txt` |
-| The page's layout in a browser: the top bar's icons, the usage popover's width, the scroll to a new question, the folding, **Delete this conversation** and the note after a question cut off by a click (11 Nov 2026). The tests cover the helpers, not the rendering | `streamlit run scripts/agent_ui.py`, ask two or three questions in a row, with the sidebar open and closed; click an example while a question is running; delete a conversation and reopen its link ([`agent_ui.md`](docs/agent_ui.md#what-the-page-shows)) |
+| The page's layout in a browser: the top bar's icons, the usage popover's width, the scroll to a new question, the folding, **Delete this conversation** and the note after a question cut off by a click (11 Nov 2026). The tests cover the helpers, not the rendering | `streamlit run frontend/agent_ui.py`, ask two or three questions in a row, with the sidebar open and closed; click an example while a question is running; delete a conversation and reopen its link ([`agent_ui.md`](docs/agent_ui.md#what-the-page-shows)) |
 | The LangGraph graph as the only engine (12 Nov 2026): the loop retired, the conversation moved into the graph's state, the database and client into its runtime context. Written in a sandbox without langgraph (its tests ran on `tests/mini_langgraph.py` there) | `uv run pytest` (the header must say `langgraph: 1.x`, not the stand-in), then `python scripts/run_evals.py`: 52/52 as before |
 | Conversations in Postgres (13 Nov 2026): written in a sandbox with neither Postgres nor `langgraph-checkpoint-postgres`; setup and check ran only against a stand-in | Done 14-15 Nov 2026, locally and on Aiven: setup, check, ask, follow-up, restart |
 | The page on the API (phase 3, 15 Nov 2026) | Done 16 Nov 2026 by the user in real Streamlit: status line, reload, photos from Recent, cut-off click, delete, API down |
-| The two Cloud Run services (phase 4, 16 Nov 2026): the identity token and the deploy steps written without Google Cloud; the token logic tested against a stand-in metadata server | Deploy as in [`agent_ui.md`](docs/agent_ui.md#deploying-on-google-cloud-run), then its section 4 checks (the API answering 403 without a token, the page's six checks, the restart proof on both services) |
+| The two Cloud Run services (phase 4, 16 Nov 2026) | Done 17 Nov 2026 by the user: `jme-agent-api` (private) and `jme-frontend` deployed, the page's checks and the restart proof passed on both. Left: delete the old single-service `jme-agent` and the retired secrets ([`agent_ui.md`](docs/agent_ui.md#5-clean-up-what-phase-4-retired)) |
 
 ## Testing with pytest
 

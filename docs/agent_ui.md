@@ -266,13 +266,13 @@ data stays on Aiven:
   Run lets a request in only with a Google identity token from an account allowed to invoke
   it, and that account is the page's alone. It holds every secret: `agent_ro`'s password, the
   proxy key, the conversations' Postgres URL and the API key.
-- **`jme-agent`**: the page (`frontend/`, its own `Dockerfile`). Public, behind `APP_PASSWORD`. It
+- **`jme-frontend`**: the page (`frontend/`, its own `Dockerfile`). Public, behind `APP_PASSWORD`. It
   holds only the API's address, the API key and the page password, and runs as its own service
   account, which is what the API lets in.
 
 ```mermaid
 flowchart LR
-    P["Person<br/>browser"] -->|"HTTPS<br/>APP_PASSWORD"| W["jme-agent<br/>(page, public)<br/>SA jme-agent-page"]
+    P["Person<br/>browser"] -->|"HTTPS<br/>APP_PASSWORD"| W["jme-frontend<br/>(page, public)<br/>SA jme-agent-page"]
     W -->|"identity token + X-API-Key"| A["jme-agent-api<br/>(private)<br/>SA jme-agent-api"]
     A -->|"agent_ro, TLS"| M[("Aiven MySQL<br/>jme_cmms")]
     A -->|"agent_threads, TLS"| G[("Aiven Postgres<br/>conversations")]
@@ -298,7 +298,7 @@ are kept at the end, under [Before phase 4](#before-phase-4-one-service).
 |---|---|---|
 | `Dockerfile` (repo root) | API | Python 3.12 slim. Installs `requirements-api.txt`, copies `scripts/` (with `guard_names.py`) and starts uvicorn on `$PORT` |
 | `requirements-api.txt` | API | The agent, the databases, FastAPI. **Pin the versions** from your working environment before the demo |
-| `.dockerignore`, `.gcloudignore` (repo root) | API | Keep `.env*`, `data/`, `.git`, `frontend/`, `docs/`, `tests/` and `logs/` out of the image and out of the **upload**: `--source .` first uploads the folder to a Cloud Build bucket, and `data/` holds the client's files |
+| `.dockerignore`, `.gcloudignore` (repo root) | API | Keep `.env*`, `data/`, `.cache/` (the OCR cache: raw form text), `reports/`, `evals/`, `.git`, `frontend/`, `docs/`, `tests/` and `logs/` out of the image and out of the **upload**: `--source .` first uploads the folder to a Cloud Build bucket, and `data/` holds the client's files |
 | `frontend/Dockerfile` | page | Installs `frontend/requirements.txt`, copies `agent_ui.py` and `api_client.py`, starts Streamlit on `$PORT` |
 | `frontend/requirements.txt` | page | `streamlit` and `python-dotenv`, nothing else |
 | `frontend/.dockerignore`, `frontend/.gcloudignore` | page | Keep a `.env` out of the page's image and upload |
@@ -309,12 +309,18 @@ The root `.gcloudignore` (project copy: `claude/gcloudignore`):
 .env
 .env.*
 .git
+.gitignore
 .venv/
+.vscode/
+.idea/
 __pycache__/
 *.pyc
+.pytest_cache/
+.cache/
 data/
 logs/
-evals/results/
+reports/
+evals/
 frontend/
 docs/
 tests/
@@ -323,6 +329,18 @@ tests/
 Neither image holds a secret or any data: settings come from `--set-env-vars` and
 `--set-secrets`, data from Aiven. `scripts/guard_names.py` (the staff names as hashes) must be
 committed: without it the API refuses to start (fail closed).
+
+## Two deploy scripts (17 Nov 2026)
+
+The commands below are also in two scripts (project: `claude/jme-api-deploy.sh` and
+`claude/jme-frontend-deploy.sh`), which read `~/jme-env.sh` (`PROJECT`, `REGION`, `API_SA`,
+`PAGE_SA`), unzip `~/jme-api-deploy.zip` or `~/jme-frontend-deploy.zip` into a fresh folder,
+check the Dockerfile is the right one, deploy, and stop at the first error or empty setting.
+The page's script looks up the API's URL itself and grants the page's account the invoker role
+every time (harmless when it already has it): the first hosted run gave 403 because that grant
+had gone out with an empty `$PAGE_SA`. Run them with `bash ~/jme-api-deploy.sh`, then
+`bash ~/jme-frontend-deploy.sh`. Zip the API from the repo root (`Dockerfile`, `.dockerignore`,
+`.gcloudignore`, `requirements-api.txt`, `scripts`) and the page as the `frontend` folder alone.
 
 ## 0. Get the files into Cloud Shell
 
@@ -419,17 +437,17 @@ curl -s -o /dev/null -w '%{http_code}\n' $API_URL/health    # without a token: 4
 gcloud run services add-iam-policy-binding jme-agent-api --region $REGION \
   --member=serviceAccount:$PAGE_SA --role=roles/run.invoker
 
-gcloud run deploy jme-agent --source frontend --region $REGION \
+gcloud run deploy jme-frontend --source frontend --region $REGION \
   --allow-unauthenticated --session-affinity --service-account $PAGE_SA \
   --min-instances 0 --max-instances 1 --memory 512Mi --timeout 3600 \
   --set-env-vars "AGENT_API_URL=$API_URL,AGENT_API_AUTH=google" \
   --set-secrets "AGENT_API_KEY=agent-api-key:latest,APP_PASSWORD=app-password:latest"
 ```
 
-`jme-agent` is the existing page service: this replaces it in place, with the same URL.
-`--set-env-vars` and `--set-secrets` **replace** its whole lists, so the old `CMMS_DB_*`,
-`OPENAI_*` and the two database passwords are removed from it. `--service-account` moves it
-off the default Compute Engine account.
+`jme-frontend` is a new service (17 Nov 2026: the page was renamed from `jme-agent`, the
+single-service page of 9-15 Nov), so it has a new URL. **Delete the old `jme-agent` service**
+once `jme-frontend` answers (section 5): it is the pre-phase-3 page, public, and still holds
+the database passwords and the proxy key.
 
 - `AGENT_API_URL` is exactly `$API_URL` (the identity token is issued for that address).
 - `--allow-unauthenticated`: the page is public, so **`APP_PASSWORD` is what protects it**.
@@ -448,7 +466,7 @@ off the default Compute Engine account.
 
    ```bash
    gcloud run services update jme-agent-api --region $REGION --update-env-vars RESTART=$(date +%s)
-   gcloud run services update jme-agent     --region $REGION --update-env-vars RESTART=$(date +%s)
+   gcloud run services update jme-frontend     --region $REGION --update-env-vars RESTART=$(date +%s)
    ```
 
    The follow-up is answered in context and the usage popover shows the conversation's total.
@@ -461,6 +479,7 @@ off the default Compute Engine account.
 Once the page answers through the API:
 
 ```bash
+gcloud run services delete jme-agent --region $REGION    # the old single-service page
 gcloud secrets delete agent-session-db-password
 # the default Compute Engine account no longer needs the old secrets:
 SA_OLD=$(gcloud projects describe $PROJECT --format='value(projectNumber)')-compute@developer.gserviceaccount.com
@@ -480,7 +499,7 @@ MySQL container if you like.
 - **Warm both services.** With `--min-instances 0` the first request after idling is slow, and
   the API's start (LangGraph, the database pools) is the slower one. For demo day:
   `gcloud run services update jme-agent-api --region $REGION --min-instances 1` and the same
-  for `jme-agent`; set both back to 0 afterwards (an idle instance still costs money).
+  for `jme-frontend`; set both back to 0 afterwards (an idle instance still costs money).
 - **Run the kill-shot questions once on the hosted page.** The What happened table should match
   your laptop's.
 - **To update** the API: the section 2 command again from the repo root; the page: the section 3
@@ -496,7 +515,7 @@ The page shows the API's error message, never a stack trace; the API logs the er
 
 | Symptom | Where | Likely cause |
 |---|---|---|
-| Page: "The agent API can't be reached right now: The API answered HTTP 403." | page | Cloud Run refused the call before it reached the API: `AGENT_API_AUTH=google` isn't set on the page, the page doesn't run as `jme-agent-page`, or that account lacks `roles/run.invoker` on `jme-agent-api` (section 3) |
+| Page: "The agent API can't be reached right now: The API answered HTTP 403." | page | Cloud Run refused the call before it reached the API (seen 17 Nov 2026: the invoker grant had run with an empty `$PAGE_SA`). The API log's `textPayload` says which: "not authenticated" = no token sent; "not authorized" = the account isn't an invoker. Causes: `AGENT_API_AUTH=google` isn't set on the page, the page doesn't run as `jme-agent-page`, or that account lacks `roles/run.invoker` on `jme-agent-api` (section 3) |
 | Page: "... (no_identity_token) ... unset it locally" | local | `AGENT_API_AUTH=google` in your local `.env`: there is no metadata server off Google Cloud. Remove it (use `gcloud run services proxy` to reach the hosted API) |
 | Page: "AGENT_API_AUTH=google needs AGENT_API_URL to be the API's https Cloud Run URL" | page | `AGENT_API_URL` isn't `$API_URL`. Use the URL `gcloud run services describe` prints |
 | Page: "Send the API key in the X-API-Key header. (unauthorised, HTTP 401)" | page | The page's `AGENT_API_KEY` differs from the API's: both must use the `agent-api-key` secret |
@@ -522,4 +541,4 @@ of step, 15 Nov); a trailing newline in a secret ("Wrong password.", fixed with 
 a secret made with underscores that the grant didn't cover; `st.image`'s second request for
 `/media/...` missing after a redeploy (broken photos, 7 Nov: the page now draws photos as
 data URLs); the spend shown as "$0.0000 over 0 questions" on a reopened conversation (a page
-older than 10 Nov). 
+older than 10 Nov).

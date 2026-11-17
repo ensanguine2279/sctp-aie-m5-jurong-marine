@@ -61,20 +61,23 @@ names is reported as `REFUSED`, not granted.
 
 ## Settings
 
-The same `.env` as the other scripts, plus:
+The same `.env` as the other scripts (`CMMS_DB_HOST`, `_PORT`, `_NAME`, and the owner
+`CMMS_DB_USERNAME` / `_PASSWORD`), plus these. Every name starts with `CMMS_DB_`, the shop
+database's prefix (14 Nov 2026, [Settings](../README.md#settings-one-prefix-per-database)); the
+old names (`AGENT_DB_*`, `DB_ADMIN_*`) are no longer read:
 
 ```bash
-AGENT_DB_USERNAME=agent_ro         # the app connects with these two
-AGENT_DB_PASSWORD=...
-DB_ADMIN_USERNAME=root             # an account allowed to create users and grant
-DB_ADMIN_PASSWORD=...              # falls back to MYSQL_ROOT_PASSWORD
+CMMS_DB_AGENT_USERNAME=agent_ro         # the app connects with these two
+CMMS_DB_AGENT_PASSWORD=...
+CMMS_DB_ADMIN_USERNAME=root             # an account allowed to create users and grant
+CMMS_DB_ADMIN_PASSWORD=...              # falls back to MYSQL_ROOT_PASSWORD
 ```
 
-- The **app** connects with `AGENT_DB_USERNAME` / `AGENT_DB_PASSWORD`, never `DB_USERNAME`.
-- The **admin** account is only for running this script. The ingest user (`DB_USERNAME`)
+- The **app** connects with `CMMS_DB_AGENT_USERNAME` / `CMMS_DB_AGENT_PASSWORD`, never `CMMS_DB_USERNAME`.
+- The **admin** account is only for running this script. The ingest user (`CMMS_DB_USERNAME`)
   can't create users, so it won't do.
 - Every run recreates the app user with the password from `.env`, so changing
-  `AGENT_DB_PASSWORD` and re-running changes it. Connections the app already has open
+  `CMMS_DB_AGENT_PASSWORD` and re-running changes it. Connections the app already has open
   keep working until they close; reconnect the app after a run.
 - `--host` (default `%`, any host) is where the app may connect from. Keep `%` with Docker:
   the port mapping makes local connections look remote to MySQL.
@@ -129,13 +132,13 @@ day: run `--check` live.
 (1142) for any object the app user has no grant on, including one that doesn't exist, so
 the app user can never see that something is missing. The check therefore asks the admin
 account which allowed objects exist: after a setup run it uses the plan, and with
-`--check` alone it connects as admin if `DB_ADMIN_PASSWORD` (or `MYSQL_ROOT_PASSWORD`) is
+`--check` alone it connects as admin if `CMMS_DB_ADMIN_PASSWORD` (or `MYSQL_ROOT_PASSWORD`) is
 set. A denied object then shows as one of:
 
 ```
   skip    sops: not created yet                                        # load it, then re-run
   FAIL    sops: exists but not granted; run agent_user.py without --check to grant it
-  FAIL    sops: denied (not granted, or not created yet; set DB_ADMIN_PASSWORD so --check can tell which)
+  FAIL    sops: denied (not granted, or not created yet; set CMMS_DB_ADMIN_PASSWORD so --check can tell which)
 ```
 
 On 4 Nov 2026 a `--check` showed the 8 image and SOP objects denied while the 11 older
@@ -151,13 +154,13 @@ SHOW GRANTS FOR 'agent_ro'@'%';   -- USAGE (connect only) + one SELECT line per 
 | Message | Cause | Fix |
 |---|---|---|
 | `... is refused access to a database it would need` (MySQL 3879) | hosted MySQL keeps the admin out of some databases; older versions of this script used `REVOKE ALL`, which needs them | use the current script; if it still fails, the `Failed at` and `MySQL said` lines show which step and database |
-| `... is not allowed to create users or grant` (MySQL 1227) | the admin account isn't an admin, e.g. `DB_ADMIN_USERNAME` is the ingest user | `DB_ADMIN_USERNAME=root` (Docker) or `avnadmin` (Aiven) with its password |
-| `Login refused for ...` (MySQL 1045) | wrong admin user or password | check `DB_ADMIN_USERNAME` / `DB_ADMIN_PASSWORD` |
-| `Set AGENT_DB_PASSWORD in .env` | no password for the app user | add it to `.env` |
+| `... is not allowed to create users or grant` (MySQL 1227) | the admin account isn't an admin, e.g. `CMMS_DB_ADMIN_USERNAME` is the ingest user | `CMMS_DB_ADMIN_USERNAME=root` (Docker) or `avnadmin` (Aiven) with its password |
+| `Login refused for ...` (MySQL 1045) | wrong admin user or password | check `CMMS_DB_ADMIN_USERNAME` / `CMMS_DB_ADMIN_PASSWORD` |
+| `Set CMMS_DB_AGENT_PASSWORD in .env` | no password for the app user | add it to `.env` |
 | `Invalid user name: 'agent_ro\r'` (or another value ending in `\r`) | an older script, and a CRLF `.env` loaded with `source .env`, so the shell's values end in `\r` and win over `.env` | use the current scripts (they strip it); fix the file with `sed -i 's/\r$//' .env`, then open a new shell or `unset` the variables |
 | `skip <object>: not created yet` | a source isn't loaded, or `relationships.py` hasn't run | load it, run `relationships.py`, then this script again |
 | `FAIL <object>: exists but not granted` | the user's grants are from an older setup run (the allow-list has grown since), or the setup ran with an older script | run `agent_user.py` without `--check` |
-| `FAIL <object>: denied (not granted, or not created yet ...)` | `--check` alone with no admin password, so it can't tell which | set `DB_ADMIN_PASSWORD`, or run `SHOW GRANTS FOR 'agent_ro'@'%'` as admin |
+| `FAIL <object>: denied (not granted, or not created yet ...)` | `--check` alone with no admin password, so it can't tell which | set `CMMS_DB_ADMIN_PASSWORD`, or run `SHOW GRANTS FOR 'agent_ro'@'%'` as admin |
 | `REFUSED <object>: has personal-data column(s) emp_name` | a view now selects names | take the column out of the view |
 
 **Passwords never appear in errors:** every script's database connection hides query
@@ -167,17 +170,19 @@ pasted somewhere, change it in `.env` and run the script again.
 
 ## Hosted MySQL (Aiven)
 
-Use Aiven's admin account in place of `root`: `DB_ADMIN_USERNAME=avnadmin` and its
+Use Aiven's admin account in place of `root`: `CMMS_DB_ADMIN_USERNAME=avnadmin` and its
 password from the Aiven console. Take the host and port from the console too (the port
-is not 3306; the database is usually `defaultdb`).
+is not 3306). Use a database of your own rather than Aiven's default `defaultdb`: ours is
+`jme_cmms`, owned by the user `ingest` (`CMMS_DB_USERNAME`), as locally (15 Nov 2026).
 
 **Don't create the app user in the Aiven console:** a user made there gets admin-level
 privileges by default. Let this script create it with SQL; even if it already exists,
 the script drops it and recreates it with `SELECT` on the allow-list only. Then run
 `--check`.
 
-Aiven requires encrypted connections; the scripts don't set up SSL yet, so expect to add
-that before connecting to Aiven.
+The scripts connect to Aiven as they are (the loads, this script and its `--check`, the
+agent and the eval suite all ran there on 15 Nov 2026). If a host ever refuses a connection
+for lack of TLS settings, add a `CMMS_DB_SSL_CA` setting to `db_config.py`, with a test.
 
 ## Removing the user
 
@@ -193,7 +198,7 @@ again recreates the user from `.env`.
 
 ## Tests
 
-`tests/test_agent_user.py` (29 tests, no database): the allow-list never includes employees
+`tests/test_agent_user.py` (30 tests, no database): the allow-list never includes employees
 or raw tables (nor the scans' raw OCR, nor the raw SOP files) and follows the ingest
 prefixes, the scans' audit and comparison views granted, the photos' public view granted
 but never the table behind it or the raw OCR, the SOP table and views granted,
@@ -205,9 +210,11 @@ rejected, MySQL error codes read correctly, readable setup errors, connections t
 query values, and settings with Windows line endings (set in the shell with a trailing
 `\r`, or in a CRLF `.env`) read without the `\r`.
 
-The dry-run tests use a `clean_env` fixture: they remove the `AGENT_*`, `DB_ADMIN_*`,
-`MYSQL_ROOT_PASSWORD` and `DB_NAME` variables and point `--env-file` at an empty file, so
-whatever is exported in your shell or in the repo's `.env` can't change the result.
+Every test starts with no database setting set: `tests/conftest.py` clears every
+`CMMS_DB_*` and `CONV_DB_*` setting (and the names from before 14 Nov 2026) and
+`MYSQL_ROOT_PASSWORD`, and the dry-run tests point `--env-file` at an empty file, so whatever
+is exported in your shell or in the repo's `.env` can't change the result. Since 14 Nov 2026
+the old names alone (`AGENT_DB_*`, `DB_NAME`) aren't enough: a test checks it.
 
 **Not covered:** anything that needs MySQL, i.e. creating the user and the grants. The
 real test is `agent_user.py --check` against your database.
