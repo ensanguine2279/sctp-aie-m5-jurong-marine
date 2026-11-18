@@ -52,17 +52,29 @@ The [ER diagram](docs/er_diagram.md) shows the cleaned schema.
 
 ## What's in the repo
 
+Four folders of Python, kept apart (since 17 Nov 2026; a test checks it, `tests/test_layout.py`):
+
+| Folder | What | Runs where |
+|---|---|---|
+| `ingest/` | The loaders, the linking, the pipeline, the app user's setup | Your computer, by hand or through `ingest/pipeline.py`. Never in an image |
+| `scripts/` | The agent, its API, the guardrail, the evals | The API's image (`jme-agent-api`) |
+| `common/` | What both use: `db_config.py` (settings, the database connection) and `sop_search.py` (the SOP keyword search, cut out of `ingest_sops.py` so the API never imports a loader) | Both: the API's image copies it |
+| `frontend/` | The page and its API client | The page's image (`jme-frontend`) |
+
+Each script that imports from `common/` puts it on `sys.path` itself, so `python ingest/ingest_logs.py ...` works from any folder with no `PYTHONPATH`.
+
 | Script | What it does | Details |
 |---|---|---|
-| `scripts/ingest_logs.py` | Loads the sensor log CSV (`vibration_temp_*.csv`) | [`ingest_logs.md`](docs/ingest_logs.md) |
-| `scripts/ingest_spares.py` | Loads the critical spares sheet (`critical_spares.xlsx`) | [`ingest_spares.md`](docs/ingest_spares.md) |
-| `scripts/ingest_cmms.py` | Loads the CMMS SQL dump (`jurongmarine_cmms.sql`) | [`ingest_cmms.md`](docs/ingest_cmms.md) |
-| `scripts/ingest_images.py` | Loads the scanned nameplates and incident report forms (`data/images/`): read by Tesseract, the class vision model, or both; photos stored for the app (forms redacted) | [`ingest_images.md`](docs/ingest_images.md) |
-| `scripts/ingest_sops.py` | Loads the SOP documents (`data/sops/`): steps with line numbers, machine links, keyword search | [`ingest_sops.md`](docs/ingest_sops.md) |
-| `scripts/relationships.py` | Links the loaded sources (CMMS, sensors, spares, scans, SOPs) and creates the views | [`relationships.md`](docs/relationships.md), [ER diagram](docs/er_diagram.md) |
-| `scripts/pipeline.py` | Runs all the loads and the linking in order, writes a Markdown report | [`pipeline.md`](docs/pipeline.md) |
-| `scripts/audit_sensor_csv.py` | Profiles a sensor CSV without loading it: formats, units, ids, gaps, duplicates, outliers, with line numbers. Run it alone, or first in the pipeline with `pipeline.py --audit` | [`trap_list.md`](docs/trap_list.md#sensor-log-vibration_temp_2026h1csv) |
-| `scripts/agent_user.py` | Creates the app's read-only database user (PDPA) | [`agent_user.md`](docs/agent_user.md) |
+| `ingest/ingest_logs.py` | Loads the sensor log CSV (`vibration_temp_*.csv`) | [`ingest_logs.md`](docs/ingest_logs.md) |
+| `ingest/ingest_spares.py` | Loads the critical spares sheet (`critical_spares.xlsx`) | [`ingest_spares.md`](docs/ingest_spares.md) |
+| `ingest/ingest_cmms.py` | Loads the CMMS SQL dump (`jurongmarine_cmms.sql`) | [`ingest_cmms.md`](docs/ingest_cmms.md) |
+| `ingest/ingest_images.py` | Loads the scanned nameplates and incident report forms (`data/images/`): read by Tesseract, the class vision model, or both; photos stored for the app (forms redacted) | [`ingest_images.md`](docs/ingest_images.md) |
+| `ingest/ingest_sops.py` | Loads the SOP documents (`data/sops/`): steps with line numbers, machine links, keyword search | [`ingest_sops.md`](docs/ingest_sops.md) |
+| `ingest/relationships.py` | Links the loaded sources (CMMS, sensors, spares, scans, SOPs) and creates the views | [`relationships.md`](docs/relationships.md), [ER diagram](docs/er_diagram.md) |
+| `ingest/pipeline.py` | Runs all the loads and the linking in order, writes a Markdown report | [`pipeline.md`](docs/pipeline.md) |
+| `ingest/audit_sensor_csv.py` | Profiles a sensor CSV without loading it: formats, units, ids, gaps, duplicates, outliers, with line numbers. Run it alone, or first in the pipeline with `pipeline.py --audit` | [`trap_list.md`](docs/trap_list.md#sensor-log-vibration_temp_2026h1csv) |
+| `ingest/agent_user.py` | Creates the app's read-only database user (PDPA) | [`agent_user.md`](docs/agent_user.md) |
+| `common/db_config.py`, `common/sop_search.py` | The settings and database connection every script uses, and the SOP search the loader and the agent's `find_sop` share (MySQL `MATCH ... AGAINST` and `search_sops` compare the same words) | [`ingest_sops.md`](docs/ingest_sops.md) |
 | `scripts/agent_tools.py` | The fixed tools the app's LLM calls, as the read-only user, with citations | [`agent_tools.md`](docs/agent_tools.md) |
 | `scripts/agent_app.py`, `frontend/agent_ui.py` | `ask()` and the rules the agent uses (prompt, guards, dates), and the Streamlit page, with each answer's sources, caveats, photos and trace in tabs under it. Since phase 3 (15 Nov 2026) the page holds no database login, LLM key or agent code: it calls the API for everything. Since 16 Nov 2026 it lives in `frontend/` with its client, and its image is built from that folder alone | [`agent_app.md`](docs/agent_app.md), [`agent_ui.md`](docs/agent_ui.md) |
 | `scripts/agent_graph.py` | The agent: one question's turn as a LangGraph graph (`guard_in`, `model`, `tools`, `guard_out`), the way production LangGraph apps are built: the conversation in the graph's state, the database and model client passed in as its runtime context, compiled once. The only engine since 12 Nov 2026 (the plain loop that came first was retired once the graph matched it on every test and 52/52 evals) | [`agent_graph.md`](docs/agent_graph.md) |
@@ -169,9 +181,9 @@ its user and table can be dropped: [`sessions.md`](docs/sessions.md).) The page 
 at all: only the API's address and key (`AGENT_API_URL`, `AGENT_API_KEY`).
 
 ```bash
-python scripts/agent_user.py --dry-run   # the plan and SQL, password hidden; no database needed
-python scripts/agent_user.py             # create/update the user, then check it
-python scripts/agent_user.py --check     # only the check (exit 1 if anything is wrong)
+python ingest/agent_user.py --dry-run   # the plan and SQL, password hidden; no database needed
+python ingest/agent_user.py             # create/update the user, then check it
+python ingest/agent_user.py --check     # only the check (exit 1 if anything is wrong)
 ```
 
 The check connects **as the app user** and must show every allowed view working and
@@ -454,7 +466,7 @@ pip install -r requirements-dev.txt
 
 ```ini
 [pytest]
-pythonpath = scripts frontend   # lets tests "import ingest_logs", "import agent_ui", ...
+pythonpath = scripts frontend ingest common   # lets tests "import ingest_logs", "import agent_ui", ...
 testpaths = tests       # where to look for test files
 ```
 
@@ -533,7 +545,8 @@ With uv (personal repo): put `uv run` in front, e.g. `uv run pytest -v`.
 | `tests/test_pipeline.py` | [`pipeline.py`](docs/pipeline.md): step order and flags (images after the CMMS), foreign keys dropped first and re-added last (never in a dry run), sample rows with names kept out of the report, counts from every script's summary, the images folder hashed like the load, a failure stopping the rest, `--keep-going`, Ctrl+C, the report's tables, `--save-log`, `--audit`; the SOP step (after the CMMS and before the linking, its folder hashed like the load, one summary line per SOP with the step table and the rejected email's name kept out); the image engine (`--image-engine`, else `IMAGE_ENGINE` from `.env`) passed on and shown in the report header, the photo lines in the summary | 44 |
 | `tests/test_agent_user.py` | [`agent_user.py`](docs/agent_user.md): the allow-list never includes employees or raw tables (nor the raw OCR, nor the raw SOP files), the scans' and SOPs' objects granted, objects with `emp_name` refused, missing objects skipped, a refused object told apart as "not created yet" or "exists but not granted", `SELECT`-only grants after a full reset, password never written into SQL or output, bad user/host/database names rejected, MySQL error codes read correctly, errors never include the password, failed steps named with MySQL's message, no statement needing rights over every database, the access check reads no rows; settings with Windows line endings (from the shell or a CRLF `.env`) read without the trailing `\r`, and no settings leak in from your shell or `.env`; the public photo view granted, the photo table itself probed and refused; the old setting names (`AGENT_DB_*`, `DB_NAME`) alone not enough | 30 |
 | `tests/test_shared.py` | `db_config.py`, `lineage.py`: password never printed, passwords with special characters, values of a failed query kept out of error messages, table-name check, file SHA-256, a run recorded without a file, values passed to MySQL are plain Python types, `getenv` and `load_db_config` strip a trailing `\r` (CRLF `.env`); 14 Nov 2026, **the setting names**: the old names alone not enough (the load fails, naming the new ones, never a value), an empty password allowed, missing settings named by their new names, another login to the shop database | 13 |
-| **Total** | | **1098** |
+| `tests/test_layout.py` | The folders stay apart (17 Nov 2026): `scripts/` imports nothing from `ingest/` and the reverse, `common/` imports neither, no module name in two folders, the API's image copies `scripts/` and `common/` and never `ingest/`; each loader's `--help` runs from another folder with no `PYTHONPATH`, and `agent_tools` finds `sop_search` and `db_config` in `common/` the way the API's image does | 16 |
+| **Total** | | **1114** |
 
 **Not covered:** anything that needs MySQL, i.e. creating tables, views and users,
 the inserts, the one-transaction rollback and the `ingest_runs` record. After
@@ -557,7 +570,7 @@ tests/test_agent_app.py ..........................                              
 tests/test_agent_tools.py ...................................................... [ 11%]
 ...
 tests/test_spares.py ..................                                          [100%]
-========== 1098 passed in 26s ==========
+========== 1114 passed in 30s ==========
 ```
 
 | Mark | Meaning |
@@ -572,7 +585,7 @@ tests/test_spares.py ..................                                         
 | Message | Cause | Fix |
 |---|---|---|
 | `collected 0 items` | pytest isn't running from the repo root, or `tests/` is missing | `cd` to the folder with `pytest.ini`; check `ls tests` |
-| `ModuleNotFoundError: No module named 'ingest_logs'` (or `db_config`, `relationships`, `agent_tools`) | `pytest.ini` not found, the scripts aren't in `scripts/`, or `frontend` is missing from `pythonpath` (`agent_ui`, `api_client`) | Run from the repo root; check `pythonpath = scripts` matches the folder name |
+| `ModuleNotFoundError: No module named 'ingest_logs'` (or `db_config`, `relationships`, `agent_tools`) | `pytest.ini` not found, or a folder is missing from `pythonpath`: `ingest` (`ingest_logs`, `relationships`), `common` (`db_config`, `sop_search`), `frontend` (`agent_ui`, `api_client`) | Run from the repo root; check `pythonpath = scripts frontend ingest common` |
 | `ModuleNotFoundError: No module named 'pandas'` (or `openpyxl`, `cv2`, `openai`, `dotenv`, `pydantic`, `sqlglot`, `yaml`, ...) | Virtual environment not active, or requirements not installed | Activate `.venv`, then `pip install -r requirements-dev.txt` (`yaml` is the `pyyaml` package) |
 | `ModuleNotFoundError: No module named 'mini_langgraph'` | `tests/mini_langgraph.py` wasn't copied with the two new test files | Copy it into `tests/`; the graph and API tests import it (it does nothing where langgraph is installed) |
 | `pytest: command not found` | pytest not installed in the active environment | `pip install -r requirements-dev.txt`, or use `python -m pytest` |

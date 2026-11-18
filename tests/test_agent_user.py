@@ -1,4 +1,4 @@
-"""Tests for scripts/agent_user.py (the app's read-only user). No database needed."""
+"""Tests for ingest/agent_user.py (the app's read-only user). No database needed."""
 from __future__ import annotations
 
 import pytest

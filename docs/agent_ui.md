@@ -296,9 +296,9 @@ are kept at the end, under [Before phase 4](#before-phase-4-one-service).
 
 | File | Service | What it is |
 |---|---|---|
-| `Dockerfile` (repo root) | API | Python 3.12 slim. Installs `requirements-api.txt`, copies `scripts/` (with `guard_names.py`) and starts uvicorn on `$PORT` |
+| `Dockerfile` (repo root) | API | Python 3.12 slim. Installs `requirements-api.txt`, copies `scripts/` (with `guard_names.py`) and `common/` (`db_config.py`, `sop_search.py`), never `ingest/`, and starts uvicorn on `$PORT` |
 | `requirements-api.txt` | API | The agent, the databases, FastAPI. **Pin the versions** from your working environment before the demo |
-| `.dockerignore`, `.gcloudignore` (repo root) | API | Keep `.env*`, `data/`, `.cache/` (the OCR cache: raw form text), `reports/`, `evals/`, `.git`, `frontend/`, `docs/`, `tests/` and `logs/` out of the image and out of the **upload**: `--source .` first uploads the folder to a Cloud Build bucket, and `data/` holds the client's files |
+| `.dockerignore`, `.gcloudignore` (repo root) | API | Keep `.env*`, `data/`, `.cache/` (the OCR cache: raw form text), `reports/`, `evals/`, `.git`, `frontend/`, `ingest/`, `docs/`, `tests/` and `logs/` out of the image and out of the **upload**: `--source .` first uploads the folder to a Cloud Build bucket, and `data/` holds the client's files |
 | `frontend/Dockerfile` | page | Installs `frontend/requirements.txt`, copies `agent_ui.py` and `api_client.py`, starts Streamlit on `$PORT` |
 | `frontend/requirements.txt` | page | `streamlit` and `python-dotenv`, nothing else |
 | `frontend/.dockerignore`, `frontend/.gcloudignore` | page | Keep a `.env` out of the page's image and upload |
@@ -340,7 +340,7 @@ The page's script looks up the API's URL itself and grants the page's account th
 every time (harmless when it already has it): the first hosted run gave 403 because that grant
 had gone out with an empty `$PAGE_SA`. Run them with `bash ~/jme-api-deploy.sh`, then
 `bash ~/jme-frontend-deploy.sh`. Zip the API from the repo root (`Dockerfile`, `.dockerignore`,
-`.gcloudignore`, `requirements-api.txt`, `scripts`) and the page as the `frontend` folder alone.
+`.gcloudignore`, `requirements-api.txt`, `scripts`, `common`; not `ingest`: since 17 Nov 2026 the API script stops if `common/` is missing or `ingest/` is there) and the page as the `frontend` folder alone.
 
 ## 0. Get the files into Cloud Shell
 
@@ -349,6 +349,7 @@ The simplest is git: commit everything, then in Cloud Shell `git clone <repo-url
 
 ```bash
 ls -la Dockerfile .dockerignore .gcloudignore requirements-api.txt scripts/agent_api.py \
+       common/db_config.py common/sop_search.py \
        scripts/guard_names.py frontend/Dockerfile frontend/agent_ui.py frontend/api_client.py
 ```
 

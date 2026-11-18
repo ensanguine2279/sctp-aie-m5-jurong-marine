@@ -1,4 +1,4 @@
-"""Tests for scripts/ingest_spares.py (critical spares sheet). No database needed.
+"""Tests for ingest/ingest_spares.py (critical spares sheet). No database needed.
 
 Run:  pytest tests/test_spares.py
 """

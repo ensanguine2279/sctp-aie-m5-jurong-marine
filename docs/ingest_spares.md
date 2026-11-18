@@ -6,8 +6,8 @@ and imperial, machine lists) and keeps a full audit trail: every cleaned part
 can be traced back to the exact sheet row and revision it came from, and every
 load is recorded.
 
-- **Script:** `scripts/ingest_spares.py`
-- **Shared modules:** `scripts/db_config.py` (settings, DB connection), `scripts/lineage.py` (run log)
+- **Script:** `ingest/ingest_spares.py`
+- **Shared modules:** `common/db_config.py` (settings, DB connection), `ingest/lineage.py` (run log)
 - **Tests:** `tests/test_spares.py` (`pytest`, no database needed)
 - **Companion:** [`ingest_logs.md`](ingest_logs.md) for the sensor log script, which uses the same structure
 - **Data audit:** problems found in the client's sheet, cell by cell, in [`trap_list.md`](trap_list.md#critical-spares-sheet-critical_sparesxlsx)
@@ -36,13 +36,13 @@ load is recorded.
 
 ```bash
 # 1. Check what the script makes of the sheet. No database needed.
-python scripts/ingest_spares.py data/tabular/critical_spares.xlsx --dry-run
+python ingest/ingest_spares.py data/tabular/critical_spares.xlsx --dry-run
 
 # 2. First real load (creates the tables)
-python scripts/ingest_spares.py data/tabular/critical_spares.xlsx --recreate
+python ingest/ingest_spares.py data/tabular/critical_spares.xlsx --recreate
 
 # 3. Loading a new revision of the sheet
-python scripts/ingest_spares.py data/tabular/critical_spares.xlsx
+python ingest/ingest_spares.py data/tabular/critical_spares.xlsx
 ```
 
 Requires the MySQL container to be running (`docker compose up -d`) and a
@@ -78,7 +78,7 @@ Fully blank rows are skipped and are not stored.
 ## Command-line options
 
 ```
-python scripts/ingest_spares.py XLSX [options]
+python ingest/ingest_spares.py XLSX [options]
 ```
 
 | Option | Default | What it does |

@@ -1,4 +1,4 @@
-"""Tests for scripts/ingest_images.py. No database, no Tesseract and no LLM needed:
+"""Tests for ingest/ingest_images.py. No database, no Tesseract and no LLM needed:
 the OCR text below is what Tesseract actually read from the two sample scans (with its
 mistakes), passed in as an Extraction. One test reads the real scans if Tesseract and
 data/images/ are there, and is skipped otherwise."""

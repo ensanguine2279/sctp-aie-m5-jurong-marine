@@ -10,7 +10,7 @@ Week 1 checkpoint (due Thu 5 Nov 2026). Every problem we have found in the clien
 |---|---|---|
 | `sql/jurongmarine_cmms.sql` | Whole dump, read in full | 12 machines, 32 employees, 1,603 work orders (10001–11603), 85 incidents (900–984) |
 | `tabular/critical_spares.xlsx` | Every cell (openpyxl) | 1 sheet `Spares`, A1:H13, 10 parts, rev 11 |
-| `logs/vibration_temp_2026H1.csv` | Every row (`scripts/audit_sensor_csv.py`) | 106,384 readings + header, 4.6 MB, SHA-256 `05c18527…6bd023` |
+| `logs/vibration_temp_2026H1.csv` | Every row (`ingest/audit_sensor_csv.py`) | 106,384 readings + header, 4.6 MB, SHA-256 `05c18527…6bd023` |
 | `images/` (12 nameplates, 30 incident reports) | **All 30 incident forms loaded** and linked to the CMMS by `relationships.py`: 0 orphans after the I10 fix (was 1). All 30 forms compared field by field with the CMMS (`incident_report_vs_cmms`). **All 12 nameplates loaded** and compared with the CMMS (`machine_nameplate`), every OCR reading in `ocr_notes` reviewed. Checked by eye: `IR-2024-900.jpg`, `IR-2025-904.jpg`, `IR-2025-906.jpg`, `IR-2025-914.jpg`, and the plates of BLAST-01, CNC-03, CRN-02, CMP-01 and WELD-02; the other 7 plates only through their OCR readings | 30 incident forms (21 old-scale, 9 new-scale), 12 nameplates (one per CMMS machine) |
 | `docs/sops/` | **Every line** of all 4 files, and every SOP statement checked against the CMMS (machines, employees, all 85 incidents) and the nameplates | 3 SOPs (19 lines in all) + 1 email that isn't an SOP |
 
@@ -61,7 +61,7 @@ Not errors, but the app must get them right: below minimum stock are **BRG-6310*
 
 ## Sensor log (`vibration_temp_2026H1.csv`)
 
-Line numbers count the header as line 1. Reproduce with `python scripts/audit_sensor_csv.py data/logs/vibration_temp_2026H1.csv` (about 40 s).
+Line numbers count the header as line 1. Reproduce with `python ingest/audit_sensor_csv.py data/logs/vibration_temp_2026H1.csv` (about 40 s).
 
 **Shape:** 5 machines (CMP-01, CNC-01, CNC-02, CNC-03, PMP-T01), about 21,270 readings each, one reading per machine every 12 minutes from 2026-01-01 00:00 to 2026-06-30 23:48 SGT. Every timestamp sits exactly on the 12-minute grid, and the file is in time order throughout.
 
@@ -84,7 +84,7 @@ Not a data error, but the headline for Ask 2: **CNC-02's vibration rises from 2.
 
 ## Images (`images/`): incident forms and nameplates
 
-Read with `python scripts/ingest_images.py data/images --dry-run` ([`ingest_images.md`](ingest_images.md)), which reads each image three ways (Tesseract on three preprocessed versions) and votes per field. The scans below were also checked by eye. All 30 forms are loaded and compared with the CMMS field by field: the only disagreements are five truncated descriptions (I11), and the only fields that couldn't be compared are the severity numbers on three new-scale forms (911, 922, 955) and on 906, whose CMMS value is `ambiguous` (I12).
+Read with `python ingest/ingest_images.py data/images --dry-run` ([`ingest_images.md`](ingest_images.md)), which reads each image three ways (Tesseract on three preprocessed versions) and votes per field. The scans below were also checked by eye. All 30 forms are loaded and compared with the CMMS field by field: the only disagreements are five truncated descriptions (I11), and the only fields that couldn't be compared are the severity numbers on three new-scale forms (911, 922, 955) and on 906, whose CMMS value is `ambiguous` (I12).
 
 **Incident form `IR-2024-900.jpg` vs CMMS incident 900:** all seven shared fields agree (date 2024-07-01, LTH-01, EMP001, `weld flash burn`, severity 4, 0 lost days, `found during audit`). The form adds immediate action, root cause, signature and the printed severity scale.
 **Nameplate `nameplate_BLAST-01.jpg` vs CMMS machine BLAST-01:** model `Custom SG-Fab` and the 2014 date agree. The plate adds serial, power, weight, lubricant and grease interval, which no other source has.

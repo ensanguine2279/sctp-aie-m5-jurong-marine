@@ -13,18 +13,18 @@ database ([why MySQL](../README.md#why-mysql)).
 
 | Script | Source | Details |
 |---|---|---|
-| `scripts/ingest_logs.py` | Sensor log CSV (`vibration_temp_*.csv`) | [`ingest_logs.md`](ingest_logs.md) |
-| `scripts/ingest_spares.py` | Critical spares sheet (`critical_spares.xlsx`) | [`ingest_spares.md`](ingest_spares.md) |
-| `scripts/ingest_cmms.py` | CMMS SQL dump (`jurongmarine_cmms.sql`) | [`ingest_cmms.md`](ingest_cmms.md) |
-| `scripts/ingest_images.py` | Scanned nameplates and incident report forms (`data/images/`): read by Tesseract, the class vision model, or both; photos stored for the app (forms redacted) | [`ingest_images.md`](ingest_images.md) |
-| `scripts/ingest_sops.py` | SOP documents (`data/sops/`): steps with line numbers, machine links, keyword search | [`ingest_sops.md`](ingest_sops.md) |
-| `scripts/relationships.py` | The loaded tables: links the sources (CMMS, sensors, spares, scans, SOPs) | [`relationships.md`](relationships.md), [ER diagram](er_diagram.md) |
-| `scripts/agent_user.py` | Creates the app's read-only database user (PDPA), after the loads | [`agent_user.md`](agent_user.md), [README](../README.md#database-access-for-the-app-pdpa) |
-| `scripts/pipeline.py` | Runs all of the above in order (the SOPs after the CMMS), writes a Markdown report | [`pipeline.md`](pipeline.md) |
-| `scripts/audit_sensor_csv.py` | Profiles a sensor CSV without loading it: formats, units, ids, gaps, duplicates, outliers, with line numbers. Run it alone, or first in the pipeline with `pipeline.py --audit` | [`trap_list.md`](trap_list.md#sensor-log-vibration_temp_2026h1csv) |
+| `ingest/ingest_logs.py` | Sensor log CSV (`vibration_temp_*.csv`) | [`ingest_logs.md`](ingest_logs.md) |
+| `ingest/ingest_spares.py` | Critical spares sheet (`critical_spares.xlsx`) | [`ingest_spares.md`](ingest_spares.md) |
+| `ingest/ingest_cmms.py` | CMMS SQL dump (`jurongmarine_cmms.sql`) | [`ingest_cmms.md`](ingest_cmms.md) |
+| `ingest/ingest_images.py` | Scanned nameplates and incident report forms (`data/images/`): read by Tesseract, the class vision model, or both; photos stored for the app (forms redacted) | [`ingest_images.md`](ingest_images.md) |
+| `ingest/ingest_sops.py` | SOP documents (`data/sops/`): steps with line numbers, machine links, keyword search | [`ingest_sops.md`](ingest_sops.md) |
+| `ingest/relationships.py` | The loaded tables: links the sources (CMMS, sensors, spares, scans, SOPs) | [`relationships.md`](relationships.md), [ER diagram](er_diagram.md) |
+| `ingest/agent_user.py` | Creates the app's read-only database user (PDPA), after the loads | [`agent_user.md`](agent_user.md), [README](../README.md#database-access-for-the-app-pdpa) |
+| `ingest/pipeline.py` | Runs all of the above in order (the SOPs after the CMMS), writes a Markdown report | [`pipeline.md`](pipeline.md) |
+| `ingest/audit_sensor_csv.py` | Profiles a sensor CSV without loading it: formats, units, ids, gaps, duplicates, outliers, with line numbers. Run it alone, or first in the pipeline with `pipeline.py --audit` | [`trap_list.md`](trap_list.md#sensor-log-vibration_temp_2026h1csv) |
 
-The shared modules are `scripts/db_config.py` (settings, database connection) and
-`scripts/lineage.py` (the run log, [`lineage.md`](lineage.md)). Every data-quality problem
+The shared modules are `common/db_config.py` (settings, database connection) and
+`ingest/lineage.py` (the run log, [`lineage.md`](lineage.md)). Every data-quality problem
 found so far, with evidence, is in [`trap_list.md`](trap_list.md).
 
 ## Quick start
@@ -36,20 +36,20 @@ Then, from the repo root:
 docker compose up -d                      # MySQL 8.4 on localhost:3307
 docker compose ps                         # wait for "healthy"
 
-python scripts/ingest_logs.py   data/logs/vibration_temp_2026H1.csv --dry-run
-python scripts/ingest_logs.py   data/logs/vibration_temp_2026H1.csv --recreate   # first load
-python scripts/ingest_spares.py data/tabular/critical_spares.xlsx --dry-run
-python scripts/ingest_spares.py data/tabular/critical_spares.xlsx --recreate     # first load
-python scripts/ingest_cmms.py   data/sql/jurongmarine_cmms.sql --dry-run
-python scripts/ingest_cmms.py   data/sql/jurongmarine_cmms.sql --recreate        # first load
-python scripts/ingest_images.py data/images --dry-run                            # needs Tesseract, see below
-python scripts/ingest_images.py data/images --dry-run --photos-preview .cache/ingest_images/preview   # look at the redacted forms
-python scripts/ingest_images.py data/images --recreate                           # first load (engine: see below)
-python scripts/ingest_sops.py   data/sops --dry-run
-python scripts/ingest_sops.py   data/sops --recreate                             # first load (after the CMMS)
+python ingest/ingest_logs.py   data/logs/vibration_temp_2026H1.csv --dry-run
+python ingest/ingest_logs.py   data/logs/vibration_temp_2026H1.csv --recreate   # first load
+python ingest/ingest_spares.py data/tabular/critical_spares.xlsx --dry-run
+python ingest/ingest_spares.py data/tabular/critical_spares.xlsx --recreate     # first load
+python ingest/ingest_cmms.py   data/sql/jurongmarine_cmms.sql --dry-run
+python ingest/ingest_cmms.py   data/sql/jurongmarine_cmms.sql --recreate        # first load
+python ingest/ingest_images.py data/images --dry-run                            # needs Tesseract, see below
+python ingest/ingest_images.py data/images --dry-run --photos-preview .cache/ingest_images/preview   # look at the redacted forms
+python ingest/ingest_images.py data/images --recreate                           # first load (engine: see below)
+python ingest/ingest_sops.py   data/sops --dry-run
+python ingest/ingest_sops.py   data/sops --recreate                             # first load (after the CMMS)
 
-python scripts/relationships.py --mermaid docs/er_diagram.md   # link the sources (after the loads)
-python scripts/agent_user.py                                   # the app's read-only user, then a check
+python ingest/relationships.py --mermaid docs/er_diagram.md   # link the sources (after the loads)
+python ingest/agent_user.py                                   # the app's read-only user, then a check
 ```
 
 **The images need Tesseract** (free, offline OCR), installed once: Windows from
@@ -78,9 +78,9 @@ Or run the loads and `relationships.py` in one go, with a report of the results 
 `reports/` ([`pipeline.md`](pipeline.md)):
 
 ```bash
-python scripts/pipeline.py --dry-run     # check everything first
-python scripts/pipeline.py --recreate    # first load; later loads without --recreate
-python scripts/pipeline.py --image-engine both   # engine for the scans (default: IMAGE_ENGINE in .env)
+python ingest/pipeline.py --dry-run     # check everything first
+python ingest/pipeline.py --recreate    # first load; later loads without --recreate
+python ingest/pipeline.py --image-engine both   # engine for the scans (default: IMAGE_ENGINE in .env)
 ```
 
 Use `--recreate` on the first load and after any schema change; afterwards run
@@ -88,7 +88,7 @@ without it. Run `relationships.py` again after every load: it re-checks the link
 and refreshes the views and the ER diagram.
 
 With uv (personal repo): `uv sync`, then put `uv run` in front of each command,
-e.g. `uv run python scripts/ingest_cmms.py data/sql/jurongmarine_cmms.sql --dry-run`.
+e.g. `uv run python ingest/ingest_cmms.py data/sql/jurongmarine_cmms.sql --dry-run`.
 
 ## Database (Docker)
 
@@ -217,10 +217,10 @@ by a stricter machine-id check: trap list I10). The 7 machines the SOPs name (by
 name or alias) all match the CMMS.
 
 ```bash
-python scripts/relationships.py --dry-run --mermaid docs/er_diagram.md   # no database needed
-python scripts/relationships.py                                          # check + catalog + views
-python scripts/relationships.py --foreign-keys                           # also enforce where clean
-python scripts/relationships.py --drop-foreign-keys                      # before reloading a source
+python ingest/relationships.py --dry-run --mermaid docs/er_diagram.md   # no database needed
+python ingest/relationships.py                                          # check + catalog + views
+python ingest/relationships.py --foreign-keys                           # also enforce where clean
+python ingest/relationships.py --drop-foreign-keys                      # before reloading a source
 ```
 
 Foreign keys are opt-in: a reload deletes rows they would protect, so while they
@@ -350,7 +350,7 @@ repeated and compared.
    ```bash
    git switch --detach <git_commit>                     # the code as it was
    sha256sum data/logs/vibration_temp_2026H1.csv        # same file as file_sha256?
-   python scripts/ingest_logs.py data/logs/vibration_temp_2026H1.csv --dry-run
+   python ingest/ingest_logs.py data/logs/vibration_temp_2026H1.csv --dry-run
    git switch -                                         # back to where you were
    ```
 

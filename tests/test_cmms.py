@@ -1,4 +1,4 @@
-"""Tests for scripts/ingest_cmms.py. No database needed: pytest tests/test_cmms.py"""
+"""Tests for ingest/ingest_cmms.py. No database needed: pytest tests/test_cmms.py"""
 import sys
 from collections import Counter
 from datetime import date

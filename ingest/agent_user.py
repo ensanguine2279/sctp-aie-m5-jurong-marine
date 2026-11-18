@@ -33,9 +33,9 @@ Settings come from the same .env as the other scripts (CMMS_DB_HOST, _PORT, _NAM
                              image's own setting)
 
 Usage
-    python scripts/agent_user.py --dry-run   # show the plan; no database needed
-    python scripts/agent_user.py             # create/update the user, then --check
-    python scripts/agent_user.py --check     # prove what it can and can't read (exit 1 if not)
+    python ingest/agent_user.py --dry-run   # show the plan; no database needed
+    python ingest/agent_user.py             # create/update the user, then --check
+    python ingest/agent_user.py --check     # prove what it can and can't read (exit 1 if not)
 """
 from __future__ import annotations
 
@@ -43,6 +43,12 @@ import argparse
 import re
 import sys
 from dataclasses import dataclass
+
+from pathlib import Path
+
+_COMMON = str(Path(__file__).resolve().parents[1] / "common")   # db_config.py, sop_search.py:
+if _COMMON not in sys.path:                                       # shared by ingest/ and the API
+    sys.path.append(_COMMON)
 
 from db_config import DbConfig, add_common_args, getenv, load_db_config
 from relationships import CATALOG, VIEWS, Names

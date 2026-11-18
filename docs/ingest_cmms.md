@@ -6,8 +6,8 @@ full audit trail: every cleaned row can be traced back to the exact line of the 
 came from, and every load is recorded. The dump is **parsed, never executed**, so nothing
 in it can drop or overwrite our tables.
 
-- **Script:** `scripts/ingest_cmms.py`
-- **Shared modules:** `scripts/db_config.py` (settings, DB connection), `scripts/lineage.py` (run log)
+- **Script:** `ingest/ingest_cmms.py`
+- **Shared modules:** `common/db_config.py` (settings, DB connection), `ingest/lineage.py` (run log)
 - **Tests:** `tests/test_cmms.py` (`pytest`, no database needed)
 - **Data audit:** problems found in the client's dump, with record IDs, in [`trap_list.md`](trap_list.md#cmms-dump-jurongmarine_cmmssql)
 
@@ -37,13 +37,13 @@ in it can drop or overwrite our tables.
 pip install pandas numpy sqlalchemy pymysql python-dotenv pytest
 
 # 1. Check what the script makes of the dump. No database needed.
-python scripts/ingest_cmms.py data/sql/jurongmarine_cmms.sql --dry-run
+python ingest/ingest_cmms.py data/sql/jurongmarine_cmms.sql --dry-run
 
 # 2. First real load (creates the tables)
-python scripts/ingest_cmms.py data/sql/jurongmarine_cmms.sql --recreate
+python ingest/ingest_cmms.py data/sql/jurongmarine_cmms.sql --recreate
 
 # 3. Later loads of the same or a newer dump
-python scripts/ingest_cmms.py data/sql/jurongmarine_cmms.sql
+python ingest/ingest_cmms.py data/sql/jurongmarine_cmms.sql
 ```
 
 Requires the MySQL container to be running (`docker compose up -d`) and a
@@ -79,7 +79,7 @@ most of them are client questions rather than reject rules. See
 ## Command-line options
 
 ```
-python scripts/ingest_cmms.py [DUMP] [options]
+python ingest/ingest_cmms.py [DUMP] [options]
 ```
 
 | Option | Default | What it does |

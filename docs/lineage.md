@@ -7,7 +7,7 @@ that file, and the version of the code that loaded it**. Rejected and
 duplicate rows are kept too, so the data quality report can show what was
 wrong and what was done about it.
 
-- **Module:** `scripts/lineage.py` (the run log, shared by all ingest scripts)
+- **Module:** `ingest/lineage.py` (the run log, shared by all ingest scripts)
 - **Used by:** [`ingest_logs.py`](ingest_logs.md), [`ingest_spares.py`](ingest_spares.md)
 - **Tests:** `tests/test_shared.py`, plus the lineage tests in `tests/test_logs.py` and `tests/test_spares.py`
 

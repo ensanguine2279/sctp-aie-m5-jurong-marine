@@ -1,18 +1,18 @@
 # pipeline.py: run everything, report the results
 
-`scripts/pipeline.py` runs every ingest script, then `relationships.py` (and optionally
+`ingest/pipeline.py` runs every ingest script, then `relationships.py` (and optionally
 `agent_user.py`), and writes the results to a Markdown report: one table row per step,
 with the numbers you'd otherwise collect from six terminal outputs.
 
 ```bash
-python scripts/pipeline.py --dry-run                      # check everything; nothing written to the database
-python scripts/pipeline.py --recreate                     # first load (drops and recreates the tables)
-python scripts/pipeline.py                                # later loads
-python scripts/pipeline.py --foreign-keys --agent check   # with foreign keys, then check the app user
-python scripts/pipeline.py --only sops,relationships      # reload the SOPs and re-link
-python scripts/pipeline.py --save-log                     # also keep the full on-screen log
-python scripts/pipeline.py --dry-run --audit              # a new sensor file: profile it first
-python scripts/pipeline.py --image-engine both            # read the scans with Tesseract and the model
+python ingest/pipeline.py --dry-run                      # check everything; nothing written to the database
+python ingest/pipeline.py --recreate                     # first load (drops and recreates the tables)
+python ingest/pipeline.py                                # later loads
+python ingest/pipeline.py --foreign-keys --agent check   # with foreign keys, then check the app user
+python ingest/pipeline.py --only sops,relationships      # reload the SOPs and re-link
+python ingest/pipeline.py --save-log                     # also keep the full on-screen log
+python ingest/pipeline.py --dry-run --audit              # a new sensor file: profile it first
+python ingest/pipeline.py --image-engine both            # read the scans with Tesseract and the model
 ```
 
 **Which engine reads the scans:** `--image-engine`, else `IMAGE_ENGINE` in `.env` (or the
@@ -21,7 +21,7 @@ two-engine values ([`ingest_images.md`](ingest_images.md#two-engines---engine-bo
 report's header says which engine ran (`Image engine`). Reads are cached, so a reload with
 `both` costs model budget only for scans or prompts the cache hasn't seen.
 
-With uv (personal repo): `uv run python scripts/pipeline.py ...`.
+With uv (personal repo): `uv run python ingest/pipeline.py ...`.
 
 The images step needs Tesseract installed ([Setup](ingest_images.md#setup-tesseract)). Without
 it the step fails with install instructions and, as for any failed step, the steps after it
@@ -63,7 +63,7 @@ still writes the report, marked "interrupted".
 
 ## Profiling a new sensor file (`--audit`)
 
-`--audit` runs `scripts/audit_sensor_csv.py` on the sensor CSV, the same file the sensor
+`--audit` runs `ingest/audit_sensor_csv.py` on the sensor CSV, the same file the sensor
 load uses (`--logs`), as the very first step. It profiles the whole file without loading
 anything: file encoding and line endings, timestamp formats and range, machine ids not in
 the CMMS, temperature units per machine, out-of-range values, duplicates, and gaps per
@@ -74,7 +74,7 @@ Use it when a **new sensor file arrives**, before it replaces the loaded data, b
 dry run first:
 
 ```bash
-python scripts/pipeline.py --dry-run --audit --save-log
+python ingest/pipeline.py --dry-run --audit --save-log
 ```
 
 It isn't on by default: a file that's already been audited gains nothing from being profiled
@@ -139,7 +139,7 @@ the report, and the report's header links to it. Use it to debug a failed step w
 report's last 20 lines of error output aren't enough, or to compare two runs line by line.
 
 - **Everything, in order:** a header line per step (`=== [2/6] Critical spares: python
-  scripts/ingest_spares.py ...`), every line the step printed, then its outcome
+  ingest/ingest_spares.py ...`), every line the step printed, then its outcome
   (`--- failed, exit code 1, 0.4s`). Lines from the error stream start with `[stderr]`.
 - **Written as it goes**, not at the end: if a step hangs or you press Ctrl+C, the log
   shows how far it got.

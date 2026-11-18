@@ -1,15 +1,18 @@
 # The repo root's .gcloudignore: what `gcloud run deploy jme-agent-api --source .` does NOT
 # upload to Cloud Build. Keeps secrets and the client's data off Google's build bucket, and
-# the upload small. (The Dockerfile copies only requirements-api.txt and scripts/ anyway.)
+# the upload small. (The Dockerfile copies only requirements-api.txt, scripts/ and common/ anyway.)
 .env
 .env.*
 .git
+
 .pytest_cache/
 .venv/
 __pycache__/
+
 *.ini
 *.md
 *.pyc
+
 cloudbeaver/
 cloudrun/
 data/
@@ -17,5 +20,6 @@ docs/
 logs/
 evals/
 frontend/
+ingest/
 reports/
 tests/

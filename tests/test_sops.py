@@ -1,4 +1,4 @@
-"""Tests for scripts/ingest_sops.py. No database needed: SOP files are built as bytes,
+"""Tests for ingest/ingest_sops.py. No database needed: SOP files are built as bytes,
 including the client's three SOPs exactly as delivered (em dash, no final newline).
 One test reads the real folder data/sops/ if it is there, and is skipped otherwise."""
 from __future__ import annotations
@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import ingest_sops as sp
+import sop_search as ss
 from ingest_sops import SopFile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -248,8 +249,8 @@ def test_search_finds_the_sop_for_a_paraphrase(question, first):
 def test_the_paraphrases_are_found_only_through_synonyms(question, _, monkeypatch):
     """Proves the paraphrase tests test SYNONYMS: without it, keyword search misses them."""
     out = sp.process(client_folder(), machines=MACHINES)
-    monkeypatch.setattr(sp, "SYNONYMS", {})
-    monkeypatch.setattr(sp, "ENTRY_VERBS", ())                  # the entry rule too
+    monkeypatch.setattr(ss, "SYNONYMS", {})
+    monkeypatch.setattr(ss, "ENTRY_VERBS", ())                  # the entry rule too
     assert sp.search_sops(question, out["sops"], out["links"]) == []
 
 

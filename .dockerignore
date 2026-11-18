@@ -15,6 +15,7 @@ data/
 docs/
 evals/
 frontend/
+ingest/
 logs/
 reports/
 tests/

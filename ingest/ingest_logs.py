@@ -27,9 +27,9 @@ ISO timestamps without an offset are assumed to be --source-tz (default
 Asia/Singapore, where the sensors are).
 
 Usage
-    python scripts/ingest_logs.py data/logs/vibration_temp_2026H1.csv --dry-run
-    python scripts/ingest_logs.py data/logs/vibration_temp_2026H1.csv --recreate   # first time
-    python scripts/ingest_logs.py data/logs/vibration_temp_2026H1.csv
+    python ingest/ingest_logs.py data/logs/vibration_temp_2026H1.csv --dry-run
+    python ingest/ingest_logs.py data/logs/vibration_temp_2026H1.csv --recreate   # first time
+    python ingest/ingest_logs.py data/logs/vibration_temp_2026H1.csv
 """
 from __future__ import annotations
 
@@ -41,6 +41,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+_COMMON = str(Path(__file__).resolve().parents[1] / "common")   # db_config.py, sop_search.py:
+if _COMMON not in sys.path:                                       # shared by ingest/ and the API
+    sys.path.append(_COMMON)
 
 from db_config import add_common_args, load_db_config, safe_identifier, to_records
 from lineage import RUNS_DDL, finish_run, start_run

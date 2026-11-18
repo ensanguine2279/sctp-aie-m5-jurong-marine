@@ -1,18 +1,18 @@
 # ingest_sops.py: the SOP documents
 
-`scripts/ingest_sops.py` reads every `.txt` / `.md` file in a folder (by default
+`ingest/ingest_sops.py` reads every `.txt` / `.md` file in a folder (by default
 `data/sops/`), keeps the ones that are SOPs, splits each into its steps with line
 numbers, links it to the machines it names, and loads it with lineage, like the other
 sources. It answers Ask 1's third kind of question: "what's the SOP before entering the
 blasting chamber?"
 
 ```bash
-python scripts/ingest_sops.py data/sops --dry-run      # read and check; no database needed
-python scripts/ingest_sops.py data/sops --recreate     # first load, and once after the 4 Nov 2026 schema change
-python scripts/ingest_sops.py data/sops                # later loads
+python ingest/ingest_sops.py data/sops --dry-run      # read and check; no database needed
+python ingest/ingest_sops.py data/sops --recreate     # first load, and once after the 4 Nov 2026 schema change
+python ingest/ingest_sops.py data/sops                # later loads
 ```
 
-With uv (personal repo): `uv run python scripts/ingest_sops.py data/sops --dry-run`.
+With uv (personal repo): `uv run python ingest/ingest_sops.py data/sops --dry-run`.
 Run it after `ingest_cmms.py`, so it can match machine names against `cmms_machines`.
 
 ## What the client sent
