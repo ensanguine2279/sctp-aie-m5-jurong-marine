@@ -32,9 +32,9 @@ from the cutover to --severity-ambiguous-until are NOT converted (scale 'ambiguo
 until the client confirms the exact switch-over date.
 
 Usage
-    python scripts/ingest_cmms.py data/sql/jurongmarine_cmms.sql --dry-run
-    python scripts/ingest_cmms.py data/sql/jurongmarine_cmms.sql --recreate   # first time
-    python scripts/ingest_cmms.py data/sql/jurongmarine_cmms.sql
+    python ingest/ingest_cmms.py data/sql/jurongmarine_cmms.sql --dry-run
+    python ingest/ingest_cmms.py data/sql/jurongmarine_cmms.sql --recreate   # first time
+    python ingest/ingest_cmms.py data/sql/jurongmarine_cmms.sql
 """
 from __future__ import annotations
 
@@ -51,6 +51,10 @@ from typing import Iterator
 
 import numpy as np
 import pandas as pd
+
+_COMMON = str(Path(__file__).resolve().parents[1] / "common")   # db_config.py, sop_search.py:
+if _COMMON not in sys.path:                                       # shared by ingest/ and the API
+    sys.path.append(_COMMON)
 
 from db_config import add_common_args, load_db_config, safe_identifier, to_records
 from lineage import RUNS_DDL, finish_run, start_run

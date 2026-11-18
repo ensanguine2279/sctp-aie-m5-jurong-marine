@@ -1,4 +1,4 @@
-"""Tests for scripts/ingest_logs.py (sensor log). No database needed.
+"""Tests for ingest/ingest_logs.py (sensor log). No database needed.
 
 Run:  pytest tests/test_logs.py
 """

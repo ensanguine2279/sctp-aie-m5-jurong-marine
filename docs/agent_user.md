@@ -1,17 +1,17 @@
 # agent_user.py: the app's read-only database user
 
-`scripts/agent_user.py` creates the MySQL user the app (and through its tools, the LLM)
+`ingest/agent_user.py` creates the MySQL user the app (and through its tools, the LLM)
 connects as, and proves what that user can and can't read. It is the PDPA guardrail in
 the database: telling the model "use the views" is not protection, the database has to
 refuse.
 
 ```bash
-python scripts/agent_user.py --dry-run   # the plan and SQL, password hidden; no database needed
-python scripts/agent_user.py             # create/update the user, then check it
-python scripts/agent_user.py --check     # only the check (exit 1 if anything is wrong)
+python ingest/agent_user.py --dry-run   # the plan and SQL, password hidden; no database needed
+python ingest/agent_user.py             # create/update the user, then check it
+python ingest/agent_user.py --check     # only the check (exit 1 if anything is wrong)
 ```
 
-With uv (personal repo): `uv run python scripts/agent_user.py ...`.
+With uv (personal repo): `uv run python ingest/agent_user.py ...`.
 
 Run it after the loads and `relationships.py`: objects that don't exist yet are skipped,
 not granted.

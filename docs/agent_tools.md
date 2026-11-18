@@ -86,7 +86,7 @@ Every query runs with `MAX_EXECUTION_TIME` 10 s on MySQL.
 | Spares units (S2, S5, S7) | Sizes in mm and inches; notes on belt part numbers, units of issue and the unstated currency |
 | Machines without sensors (L5) | `no_data`, naming the 5 machines that have them |
 | Gaps, noise (L4, L6) | Coverage per bucket against the 12-minute grid; means, never single readings |
-| No SOP for most incident types (D3) | `find_sop` uses `ingest_sops.search_sops`, the same gate: below the minimum score the answer is `found: false`. It never stretches another SOP; if the SOP found doesn't name the machine asked about, a note says so |
+| No SOP for most incident types (D3) | `find_sop` uses `search_sops` (`common/sop_search.py` since 17 Nov 2026, the same code the loader builds the search column with), the same gate: below the minimum score the answer is `found: false`. It never stretches another SOP; if the SOP found doesn't name the machine asked about, a note says so |
 | SOP steps quoted alone | `find_sop` always returns the SOP whole with its lines; steps pointing to documents not in the data get a note (D8) |
 
 ## Photos: `fetch_image` (not a tool)

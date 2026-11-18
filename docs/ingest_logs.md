@@ -5,11 +5,11 @@ cleans the mixed formats the client warned about, and keeps a full audit trail:
 every cleaned reading can be traced back to the exact line of the file it came
 from, and every load is recorded.
 
-- **Script:** `scripts/ingest_logs.py`
-- **Shared modules:** `scripts/db_config.py` (settings, DB connection), `scripts/lineage.py` (run log)
+- **Script:** `ingest/ingest_logs.py`
+- **Shared modules:** `common/db_config.py` (settings, DB connection), `ingest/lineage.py` (run log)
 - **Tests:** `tests/test_logs.py` (`pytest`, no database needed)
-- **Data audit:** `scripts/audit_sensor_csv.py` profiles a sensor file without loading it; findings in [`trap_list.md`](trap_list.md#sensor-log-vibration_temp_2026h1csv)
-- **Charts:** `scripts/plot_sensor_csv.py` charts each machine's daily or weekly means; what they show is in [What the 2026H1 log shows](#what-the-2026h1-log-shows)
+- **Data audit:** `ingest/audit_sensor_csv.py` profiles a sensor file without loading it; findings in [`trap_list.md`](trap_list.md#sensor-log-vibration_temp_2026h1csv)
+- **Charts:** `ingest/plot_sensor_csv.py` charts each machine's daily or weekly means; what they show is in [What the 2026H1 log shows](#what-the-2026h1-log-shows)
 
 ---
 
@@ -36,13 +36,13 @@ from, and every load is recorded.
 
 ```bash
 # 1. Check what the script makes of the file. No database needed.
-python scripts/ingest_logs.py data/logs/vibration_temp_2026H1.csv --dry-run
+python ingest/ingest_logs.py data/logs/vibration_temp_2026H1.csv --dry-run
 
 # 2. First real load (creates the tables)
-python scripts/ingest_logs.py data/logs/vibration_temp_2026H1.csv --recreate
+python ingest/ingest_logs.py data/logs/vibration_temp_2026H1.csv --recreate
 
 # 3. Later loads of the same or a newer file
-python scripts/ingest_logs.py data/logs/vibration_temp_2026H1.csv
+python ingest/ingest_logs.py data/logs/vibration_temp_2026H1.csv
 ```
 
 Requires the MySQL container to be running (`docker compose up -d`) and a
@@ -74,7 +74,7 @@ The script exits with an error if any of the five columns is missing.
 ## Command-line options
 
 ```
-python scripts/ingest_logs.py [CSV] [options]
+python ingest/ingest_logs.py [CSV] [options]
 ```
 
 | Option | Default | What it does |
@@ -453,7 +453,7 @@ What it means, and how it connects to the other sources:
 **Reproduce:**
 
 ```bash
-python scripts/plot_sensor_csv.py data/logs/vibration_temp_2026H1.csv --freq W --table reports/sensor_monthly.csv
+python ingest/plot_sensor_csv.py data/logs/vibration_temp_2026H1.csv --freq W --table reports/sensor_monthly.csv
 ```
 
 This writes `reports/sensor_weekly.png` (all five machines, mean vibration, temperature

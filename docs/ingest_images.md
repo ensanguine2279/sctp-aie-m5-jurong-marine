@@ -1,6 +1,6 @@
 # ingest_images.py: scanned nameplates and incident forms
 
-`scripts/ingest_images.py` reads every image in a folder (by default `data/images/`), works
+`ingest/ingest_images.py` reads every image in a folder (by default `data/images/`), works
 out whether it is a **machine nameplate** or a **WSH-F02 incident report form**, reads its
 fields, cleans them, and loads them with lineage, like the other sources.
 
@@ -12,11 +12,11 @@ The scans add what the CMMS doesn't have:
 | Incident report form | `cmms_safety_incidents` by report number (`IR-2024-900` -> `incident_id` 900) | immediate action, root cause (or a note that it's in a 5-Why attachment), whether the safety officer signed, and **the severity scale printed on the form** |
 
 ```bash
-python scripts/ingest_images.py data/images --dry-run      # read and check; no database needed
-python scripts/ingest_images.py data/images --recreate     # first load
-python scripts/ingest_images.py data/images                # later loads
-python scripts/ingest_images.py data/images --engine llm   # vision model via the proxy endpoint
-python scripts/ingest_images.py data/images --engine both  # both, compared field by field
+python ingest/ingest_images.py data/images --dry-run      # read and check; no database needed
+python ingest/ingest_images.py data/images --recreate     # first load
+python ingest/ingest_images.py data/images                # later loads
+python ingest/ingest_images.py data/images --engine llm   # vision model via the proxy endpoint
+python ingest/ingest_images.py data/images --engine both  # both, compared field by field
 ```
 
 `IMAGE_ENGINE=both` in `.env` makes `both` the default, so `pipeline.py` uses it too
@@ -26,7 +26,7 @@ choosing (`resolve_engine`) and says where the choice came from in its first lin
 before loading `.env`, so the setting only worked if also exported in the shell. A misspelt
 value stops the run.
 
-With uv (personal repo): `uv run python scripts/ingest_images.py data/images --dry-run`.
+With uv (personal repo): `uv run python ingest/ingest_images.py data/images --dry-run`.
 `pipeline.py` runs it as step 4, after the CMMS load (so it can check machine ids) and before
 `relationships.py`.
 
@@ -430,7 +430,7 @@ The hosted page has no data folder, so the photos go into the database with the 
 - **`img_files_public`** (granted to `agent_ro`): nameplates' originals and forms' redacted
   copies, of loaded scans only. `img_files` itself isn't granted.
 - **Check them by eye before the first load:**
-  `python scripts/ingest_images.py data/images --dry-run --photos-preview .cache/ingest_images/preview`
+  `python ingest/ingest_images.py data/images --dry-run --photos-preview .cache/ingest_images/preview`
   writes every redacted form there (git-ignored). `--no-photos` skips the step.
 
 Run summary lines: `Photos for the app: original=12, redacted=30` and, if any,

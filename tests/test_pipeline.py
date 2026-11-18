@@ -1,4 +1,4 @@
-"""Tests for scripts/pipeline.py. No database or ingest data needed: a fake runner
+"""Tests for ingest/pipeline.py. No database or ingest data needed: a fake runner
 stands in for the scripts, with output taken from their documented run summaries."""
 from __future__ import annotations
 
@@ -157,11 +157,11 @@ def test_default_plan_order_and_flags():
     assert plan[0].args == [INPUTS["logs"], "--recreate", "--env-file", "/x/.env"]
     rels = plan[-1].args
     assert "--recreate" not in rels and rels[-2:] == ["--mermaid", "docs/er_diagram.md"]
-    assert plan[2].display() == ("python scripts/ingest_cmms.py data/sql/jurongmarine_cmms.sql "
+    assert plan[2].display() == ("python ingest/ingest_cmms.py data/sql/jurongmarine_cmms.sql "
                                  "--recreate --env-file /x/.env")
-    assert plan[3].display() == ("python scripts/ingest_images.py data/images "
+    assert plan[3].display() == ("python ingest/ingest_images.py data/images "
                                  "--recreate --env-file /x/.env")
-    assert plan[4].display() == ("python scripts/ingest_sops.py data/sops "
+    assert plan[4].display() == ("python ingest/ingest_sops.py data/sops "
                                  "--recreate --env-file /x/.env")
 
 
@@ -491,7 +491,7 @@ def test_run_pipeline_logs_each_step_and_its_outcome(tmp_path):
     with open(path, "w", encoding="utf-8") as log:
         pl.run_pipeline(pl.build_plan(inputs=INPUTS), run, log=log, echo=lambda *a, **k: None)
     text = path.read_text(encoding="utf-8")
-    assert "=== [1/6] Sensor logs: python scripts/ingest_logs.py" in text
+    assert "=== [1/6] Sensor logs: python ingest/ingest_logs.py" in text
     assert "--- failed, exit code 1, 0.2s" in text
     assert "=== [5/6] SOP documents" in text
     assert "=== [6/6] Links between sources" in text and "--- not run" in text
@@ -537,7 +537,7 @@ def test_audit_runs_first_on_the_sensor_file_and_writes_nothing():
     assert plan[0].args == [INPUTS["logs"]]                    # read-only: no --env-file
     dry = pl.build_plan(inputs=INPUTS, audit=True, dry_run=True)
     assert dry[0].args == [INPUTS["logs"]]                     # the script has no --dry-run
-    assert dry[0].display() == f"python scripts/audit_sensor_csv.py {INPUTS['logs']}"
+    assert dry[0].display() == f"python ingest/audit_sensor_csv.py {INPUTS['logs']}"
 
 
 def test_audit_is_off_by_default_and_can_be_picked_with_only():

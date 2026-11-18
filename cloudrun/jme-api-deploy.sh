@@ -16,6 +16,14 @@ test -f scripts/guard_names.py || { echo "scripts/guard_names.py missing: the AP
 if [ -e scripts/agent_ui.py ] || [ -e frontend ]; then
   echo "page files in the API zip"; exit 1
 fi
+# Since 17 Nov 2026 the agent imports db_config and the SOP search from common/
+for f in common/db_config.py common/sop_search.py; do
+  test -f "$f" || { echo "$f missing: zip common/ with the API"; exit 1; }
+done
+grep -q "^COPY common/ common/" Dockerfile || { echo "Dockerfile doesn't copy common/"; exit 1; }
+if [ -e ingest ] || [ -e scripts/ingest_sops.py ]; then
+  echo "loader files in the API zip (ingest/ stays on your computer)"; exit 1
+fi
 
 gcloud run deploy jme-agent-api --source . --region "$REGION" \
   --no-allow-unauthenticated --service-account "$API_SA" \

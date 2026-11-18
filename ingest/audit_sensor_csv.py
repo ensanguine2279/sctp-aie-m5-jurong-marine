@@ -1,6 +1,6 @@
 """Profile the full sensor log for the trap list (L-items in docs/trap_list.md).
 
-Usage:  python scripts/audit_sensor_csv.py data/logs/vibration_temp_2026H1.csv
+Usage:  python ingest/audit_sensor_csv.py data/logs/vibration_temp_2026H1.csv
 Prints evidence with CSV line numbers (header = line 1). Read-only, no database.
 """
 import re

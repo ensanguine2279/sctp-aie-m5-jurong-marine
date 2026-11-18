@@ -27,9 +27,9 @@ The sheet is a complete list, so each load replaces all spares rows with the
 new sheet (ingest_runs keeps the history of which file was loaded when).
 
 Usage
-    python scripts/ingest_spares.py data/tabular/critical_spares.xlsx --dry-run
-    python scripts/ingest_spares.py data/tabular/critical_spares.xlsx --recreate   # first time
-    python scripts/ingest_spares.py data/tabular/critical_spares.xlsx
+    python ingest/ingest_spares.py data/tabular/critical_spares.xlsx --dry-run
+    python ingest/ingest_spares.py data/tabular/critical_spares.xlsx --recreate   # first time
+    python ingest/ingest_spares.py data/tabular/critical_spares.xlsx
 """
 from __future__ import annotations
 
@@ -44,6 +44,10 @@ from pathlib import Path
 import numpy as np
 import openpyxl
 import pandas as pd
+
+_COMMON = str(Path(__file__).resolve().parents[1] / "common")   # db_config.py, sop_search.py:
+if _COMMON not in sys.path:                                       # shared by ingest/ and the API
+    sys.path.append(_COMMON)
 
 from db_config import add_common_args, load_db_config, to_records
 from lineage import RUNS_DDL, finish_run, start_run

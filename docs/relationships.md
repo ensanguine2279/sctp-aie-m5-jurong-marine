@@ -1,16 +1,16 @@
 # relationships.py: linking the sources
 
-`scripts/relationships.py` ties the cleaned tables of the sources together. Run it
+`ingest/relationships.py` ties the cleaned tables of the sources together. Run it
 after the ingest scripts; it is safe to run after every load.
 
 ```bash
-python scripts/relationships.py --dry-run --mermaid docs/er_diagram.md   # no database needed
-python scripts/relationships.py                                          # check + catalog + views
-python scripts/relationships.py --foreign-keys                           # also enforce where clean
-python scripts/relationships.py --drop-foreign-keys                      # before reloading a source
+python ingest/relationships.py --dry-run --mermaid docs/er_diagram.md   # no database needed
+python ingest/relationships.py                                          # check + catalog + views
+python ingest/relationships.py --foreign-keys                           # also enforce where clean
+python ingest/relationships.py --drop-foreign-keys                      # before reloading a source
 ```
 
-With uv (personal repo): `uv run python scripts/relationships.py ...`.
+With uv (personal repo): `uv run python ingest/relationships.py ...`.
 
 ## Relationships
 

@@ -53,12 +53,12 @@ that isn't an EMP code (e.g. a name) is NOT stored in the clean table, and the r
 (which keeps it as read) is not granted to the app user.
 
 Usage
-    python scripts/ingest_images.py data/images --dry-run
-    python scripts/ingest_images.py data/images --recreate        # first time
-    python scripts/ingest_images.py data/images
-    python scripts/ingest_images.py data/images --engine llm      # vision model via the llm proxy
-    python scripts/ingest_images.py data/images --engine both     # both, compared field by field
-    python scripts/ingest_images.py data/images --dry-run --photos-preview .cache/ingest_images/preview
+    python ingest/ingest_images.py data/images --dry-run
+    python ingest/ingest_images.py data/images --recreate        # first time
+    python ingest/ingest_images.py data/images
+    python ingest/ingest_images.py data/images --engine llm      # vision model via the llm proxy
+    python ingest/ingest_images.py data/images --engine both     # both, compared field by field
+    python ingest/ingest_images.py data/images --dry-run --photos-preview .cache/ingest_images/preview
                                                                   # check the redacted forms
 """
 from __future__ import annotations
@@ -76,6 +76,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+_COMMON = str(Path(__file__).resolve().parents[1] / "common")   # db_config.py, sop_search.py:
+if _COMMON not in sys.path:                                       # shared by ingest/ and the API
+    sys.path.append(_COMMON)
 
 from db_config import add_common_args, load_db_config, safe_identifier, to_records
 from ingest_cmms import SEVERITY_AMBIGUOUS_UNTIL, SEVERITY_CUTOVER, _text, parse_date

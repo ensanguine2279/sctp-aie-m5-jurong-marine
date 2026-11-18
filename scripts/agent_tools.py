@@ -57,6 +57,12 @@ from typing import Any, Callable, Literal
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from pathlib import Path
+
+_COMMON = str(Path(__file__).resolve().parents[1] / "common")   # db_config.py, sop_search.py:
+if _COMMON not in sys.path:                                       # shared by ingest/ and the API
+    sys.path.append(_COMMON)
+
 log = logging.getLogger("agent_tools")
 
 DEFAULT_TIMEOUT_MS = 10_000       # per query; MySQL's MAX_EXECUTION_TIME (SELECT only)
@@ -1533,7 +1539,7 @@ a single step out of its procedure). Search is by keyword over the current SOPs;
 nothing scores high enough the answer is 'no SOP in the data covers this' and you must
 not adapt another SOP. With only a machine, lists the SOPs that name it.""", SopArgs)
 def find_sop(db: Db, a: SopArgs) -> ToolResult:
-    from ingest_sops import MIN_SCORE, search_sops
+    from sop_search import MIN_SCORE, search_sops
 
     if not (a.question or a.machine):
         raise ToolError("bad_arguments", "Give a question, a machine, or both.")

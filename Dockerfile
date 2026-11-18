@@ -2,7 +2,7 @@
 # private (only the page's service account may call it). Deploy from the repo root:
 #   gcloud run deploy jme-agent-api --source . --no-allow-unauthenticated ...
 # Since 16 Nov 2026 (phase 4) this root Dockerfile is the API's; the page has its own, in
-# frontend/. scripts/guard_names.py must be in scripts/: without the staff name list the API
+# frontend/. scripts/guard_names.py must be in scripts/, and common/ (db_config, sop_search) next to it: without the staff name list the API
 # refuses to start (fail closed).
 FROM python:3.12-slim
 
@@ -13,6 +13,7 @@ COPY requirements-api.txt .
 RUN pip install -r requirements-api.txt
 
 COPY scripts/ scripts/
+COPY common/ common/
 
 # Cloud Run sets $PORT (8080). AGENT_LOG_FILE=off: the JSON lines go to stderr (Cloud Logging)
 # only; the container's disk is temporary.

@@ -1,4 +1,4 @@
-"""Tests for scripts/relationships.py. No database needed."""
+"""Tests for ingest/relationships.py. No database needed."""
 from __future__ import annotations
 
 import re
